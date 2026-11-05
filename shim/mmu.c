@@ -54,6 +54,11 @@
 
 extern char _head[], _end[];
 
+/* Filled by start.S with the runtime address of _start. The linker places
+ * the image at 0, but the bootloader loads it wherever it likes. */
+extern uint64_t shim_runtime_base;
+uint64_t shim_runtime_base;
+
 /* 1 L2 + up to 2 L3 tables, plus slack to align to 16K at runtime */
 static uint64_t pt_pool[4 * NENT] __attribute__((aligned(4096)));
 
@@ -72,17 +77,40 @@ static void zero_table(uint64_t *t)
 		t[i] = 0;
 }
 
+int mmu_granule_ok(void)
+{
+	return ((rsr("id_aa64mmfr0_el1") >> 20) & 0xf) != 0;
+}
+
 int mmu_enable(struct mmu_info *info)
 {
-	uintptr_t img_lo = (uintptr_t)_head & ~(PG_SIZE - 1);
-	uintptr_t img_hi = ((uintptr_t)_end + PG_SIZE - 1) & ~(PG_SIZE - 1);
+	uintptr_t base = (uintptr_t)shim_runtime_base;
+	uintptr_t img_lo = (base + (uintptr_t)_head) & ~(PG_SIZE - 1);
+	uintptr_t img_hi = (base + (uintptr_t)_end + PG_SIZE - 1) & ~(PG_SIZE - 1);
 	uintptr_t pool = ((uintptr_t)pt_pool + PG_SIZE - 1) & ~(PG_SIZE - 1);
 	uint64_t *l2 = (uint64_t *)pool;
 	int n_l3 = 0;
 
+	/*
+	 * These page tables are 16K-granule (the sweet configuration, and
+	 * what XNU wants). ID_AA64MMFR0_EL1.TGran1 says whether the core
+	 * supports it: 0 = 4K only, 1 = 4K+16K, 2 = 4K+16K+64K.
+	 * The G4 has Cortex-A53/A57, so 16K is expected; check rather than
+	 * assume, because a wrong granule walks into a fault storm.
+	 */
+	uint32_t tgran1 = (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf);
+
 	info->img_lo = img_lo;
 	info->img_hi = img_hi;
 	info->ttbr = pool;
+	info->sctlr_before = rsr("sctlr_el1");
+	info->sctlr_after = 0;
+	info->n_l3 = 0;
+
+	if (tgran1 == 0) {
+		info->n_l3 = -1;
+		return -2;	/* no 16K granule */
+	}
 	if (((img_hi - 1) >> BLK_SHIFT) - (img_lo >> BLK_SHIFT) > 1)
 		return -1;	/* only room for two L3 tables */
 

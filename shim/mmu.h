@@ -1,7 +1,9 @@
 #pragma once
 #include <stdint.h>
 
-#define FB_PHYS	0x9c000000UL
+#include "g4.h"
+
+#define FB_PHYS	G4_FB_BASE
 
 struct mmu_info {
 	uint64_t img_lo, img_hi, ttbr;
@@ -10,4 +12,6 @@ struct mmu_info {
 };
 
 int mmu_enable(struct mmu_info *info);
+/* 1 when the core supports the 16 KiB granule the page tables use. */
+int mmu_granule_ok(void);
 uint64_t mmu_probe(uintptr_t va);

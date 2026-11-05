@@ -3,8 +3,11 @@ backup/
 dtb/
 recovery/
 # third-party/Apple sources fetched for reading
-research/
+research/*
+# ...except the factory LK of this phone, which is our hardware ground truth
+!research/lk-g4/
 shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+.DS_Store

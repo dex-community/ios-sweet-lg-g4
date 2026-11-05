@@ -1,6 +1,7 @@
 /*
- * sweet boot shim entry: arm64 Linux Image header so Qualcomm ABL treats
- * us like a kernel. ABL enters at EL1, MMU/D-cache off, x0 = DTB pointer.
+ * LG G4 boot shim entry: arm64 Linux Image header so the bootloader treats
+ * us like a kernel. Both ABL and LK enter at EL1 with the MMU and D-cache
+ * off and x0 = DTB pointer (LK's scm_elexec_call passes the DTB in x0).
  */
 	.section .text.head, "ax"
 	.globl _head
@@ -20,7 +21,15 @@ _head:
 	.globl _start
 _start:
 	msr	daifset, #0xf
-	mov	x19, x0			/* DTB pointer from ABL */
+	mov	x19, x0			/* DTB pointer from the bootloader */
+	mov	x22, x1			/* other candidates (see find_dtb) */
+	mov	x23, x2
+	/* Record where we actually run. The linker places everything at 0, but
+	 * LK may load the image anywhere (0x8000, 0x80080000, ...), so the
+	 * MMU code must not use the link-time addresses. */
+	adr	x20, _start
+	adr	x21, shim_runtime_base
+	str	x20, [x21]
 	msr	spsel, #1
 	adr	x1, _stack_top
 	mov	sp, x1
@@ -34,7 +43,9 @@ _start:
 	b.hs	2f
 	str	xzr, [x1], #8
 	b	1b
-2:	mov	x0, x19
+2:	mov	x0, x19			/* DTB pointer (LK: x0) */
+	mov	x1, x22			/* ABL: DTB in x1 */
+	mov	x2, x23			/* some bootloaders: DTB in x2 */
 	bl	shim_main
 3:	wfe
 	b	3b

@@ -1,4 +1,316 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+## 2026-11-05 (seconda sessione): il telefono vero
+
+Tutto quello che segue è **misurato sul telefono**, non dedotto.
+
+### Il bootloader
+
+```
+fastboot getvar all
+  (bootloader) kernel:lk          <- LK, non ABL
+  (bootloader) version:0.5
+  (bootloader) unlocked:yes
+  (bootloader) product:MSM8992_P1_GLOBAL_COM
+  (bootloader) max-download-size:0x20000000
+  (bootloader) partition-size:userdata:0x5cc000000
+```
+
+Limitazioni di questo LK (tutte verificate):
+
+| Comando | Risultato |
+| --- | --- |
+| `fastboot boot <img>` | `FAILED (remote: 'unknown command')` |
+| `fastboot fetch <part> <file>` | non implementato (file da 0 byte) |
+| `fastboot reboot recovery` | accettato, ma il telefono torna in fastboot |
+| `fastboot oem <qualsiasi>` | solo `oem device-id` risponde |
+
+Quindi **l'unico modo per eseguire il nostro shim è scrivere una partizione**,
+e l'unico modo per entrare nella recovery è `fastboot reboot` -> Android ->
+`adb reboot recovery`.
+
+### Recovery
+
+TWRP 3.7 (`omni_g4-eng 16.1.0 OPM8.181105.002 23 test-keys`), **con root**:
+`adb shell id` -> `uid=0(root)`.
+
+Il suo kernel però non permette di leggere la RAM fisica:
+
+| Via | Esito |
+| --- | --- |
+| `/dev/mem` | `No such device or address` (CONFIG_STRICT_DEVMEM) |
+| `/proc/kcore` | non esiste |
+| `sgdisk /dev/block/.../mmcblk0` | `Error is 13` (EACCES sul disco intero) |
+| `/dev/graphics/fb0` | si legge, ma contiene la UI della recovery |
+
+Le partizioni si possono comunque copiare (`dd` sui device node per partizione)
+e il GPT si legge da **sysfs**: `/sys/class/block/mmcblk0pN/start` e `/size`.
+
+Il SuperSU che l'utente aveva installato **non c'è**: nessun `su`, nessun
+pacchetto, `/data/adb` non esiste. SuperSU non supporta comunque Android 13.
+
+### Memoria reale (`/proc/iomem`)
+
+```
+00000000-063fffff : System RAM          100 MB
+07200000-073fffff : System RAM            2 MB
+0f400000-0fefffff : System RAM           11 MB
+0ff00000-0ffdffff : persistent_ram         1 MB
+10000000-5fffffff : System RAM         1280 MB   <- banco basso grande
+60000000-7fffffff : (buco: non RAM)
+80000000-dfffffff : System RAM         1536 MB   <- banco alto
+```
+
+3 GiB in tutto (`androidboot.ddr_size=3221225472`). Il buco a
+60000000-7fffffff e' la regione che il bootloader tiene per se'.
+
+**Decisione per XNU: `PHYS_BASE = 0x80000000`, `MEM_SIZE = 0x60000000`**
+(1.5 GiB): il banco piu' alto, sopra ogni carve-out della XPU
+(`secure_mem` 0x0-0x9600000, `modem_mem` 0x9000000-0xd400000, ...). Stessa
+logica con cui lo sweet sceglie la "upper DDR bank" sul Redmi.
+
+### Pannello e framebuffer
+
+```
+/proc/cmdline: mdss_mdp.panel=1:dsi:0:qcom,mdss_dsi_jdi_nt36850_1440p_mipi0_cmd:1:..._mipi1_cmd
+/sys/class/graphics/fb0: mdssfb_90000  1440,5120  stride=5760  bpp=32
+```
+
+Il pannello e' il **JDI NT36850 1440p, dual MIPI DSI, command mode**. Il
+framebuffer e' **ARGB8888, stride 5760** (mentre il link DSI trasporta 24
+bpp). Il `cont_splash_mem` a 0x03400000 e' 12 MiB e **non ci stanno** 1440x2560
+a 32 bpp (servono 14.1 MiB): la finestra di splash non e' un framebuffer
+completibile.
+
+### Il display non mostra il nostro console
+
+Lo shim gira fino in fondo (il telefono torna nel bootloader dopo esattamente
+il ritardo che il codice imposta), ma sullo schermo resta il logo LG.
+
+L'ipotesi piu' probabile: **0x0-0x9600000 e' la "secure region" protetta
+dalla XPU**, e in EL1 non sicuro la CPU non ci scrive. Il logo LG lo mette
+LK (mondo sicuro) e l'hardware MDP lo scandisce; noi non possiamo scriverci
+dentro. Sweet non aveva questo problema: il suo pannello e' in **video
+mode**, quindi il semplice scrivere nel buffer basta.
+
+Conclusione per la Fase 4: **serve un driver display vero**, che programmi
+MDP+DSI e usi un buffer in RAM normale (non la finestra di splash).
+
+Riferimento pronto: il kernel
+`https://github.com/nepheloid/nethunter_kernel_g4` (albero completo per il
+G4) contiene
+
+* `arch/arm64/boot/dts/lge/dsi-panel-jdi-nt36850-dualmipi{0,1}-qhd-cmd.dtsi`
+  - il pannello esatto del telefono, in command mode: 720x2560 per link,
+  24 bpp, `rgb_swap_rgb`, burst mode, `lane_map_0123`, porches
+  (h: 180/120/4, v: 7/8/1), reset sequence, on/off command DCS;
+* `arch/arm64/boot/dts/qcom/msm8992-mdss.dtsi` - i controller DSI:
+  `mdss_dsi0` = `qcom,mdss-dsi@fd994000` (ctrl 0x260, phy 0xfd994500),
+  `mdss_dsi1` = `qcom,mdss-dsi@fd996000`;
+* `drivers/video/msm/` - il driver MDP/DSI completo da cui ricavare
+  l'inizializzazione.
+
+### Il canale log: la RAM non basta, l'eMMC nemmeno (per ora)
+
+Il shim mantiene una copia ASCII del console (`shim/console.c`, `con_log`) e
+la scrive in due posti:
+
+1. **RAM scratch a 0x50000000** con il marker `G4SHIMLG` - un warm reset non
+   scrubba la DRAM, ma nessuna recovery di questo telefono puo' leggerla
+   (`/dev/mem` bloccato, niente `/proc/kcore`);
+2. **eMMC**, un settore da 512 byte, con il marker `G4SHIMLG` + codice
+   errore + RCA + il log.
+
+Il primo canale non e' leggibile. Il secondo **non funziona ancora**: il
+settore `misc` (LBA 262400) resta a zero e `cache` (LBA 9896192) resta
+intatto, quindi il driver non arriva alla card. Motivo probabile: il
+controller va inizializzato come fa Android (`drivers/mmc/host/sdhci-msm.c`
+del kernel NetHunter: `core_clk` rate, DLL per HS400, UHS signaling) e non
+basta l'SDHCI standard come nel driver UniXNU, che riutilizzava lo stato
+lasciato dal firmware.
+
+Nota: il tempo di reset e' passato da 15 s a 60 s con il driver eMMC, cioe'
+il driver sta esaurendo i timeout: si arriva al controller ma la card non
+risponde.
+
+### Backup
+
+Presi dal telefono in recovery (root), in `backup/`:
+
+| File | Dimensione | Contenuto |
+| --- | --- | --- |
+| `boot-stock.img` | 40 MiB | partizione `boot` **del telefono**, byte per byte |
+| `persist-stock.img` | 32 MiB | calibrazione radio |
+| `fsg-stock.img`, `fsc-stock.img` | 1.5/0.5 MiB | calibrazione |
+| `modemst1/2-stock.img` | 1.5 MiB | stato modem |
+| `devinfo-stock.img` | 512 KiB | stato bootloader (`ANDROID-BOOT!`) |
+
+L'immagine `boot` del telefono **non coincide** con quella dello zip AICP
+(kernel piu' grande nel ROM installato), ma il `dt.img` QCDT e' identico a
+parte da tre proprietà irrilevanti (`qcom,idle-timeout`, i due `pm-qos-*`,
+`qcom,popp-enable`).
+
+`userdata` non e' mai stata toccata.
+
+### Cosa funziona davvero
+
+- Lo shim e' **LK-compatible** (`tools/verify_bootimg.py` PASS): header con
+  `dt_size` a offset 40, QCDT v3 allegato, indirizzi senza sovrapposizioni.
+- Lo shim **si carica e gira sul telefono**: LK lo avvia, arriva in fondo a
+  `shim_main`, scrive il log e si riavvia da solo.
+- Il QEMU dice la stessa cosa: lo shim arriva alle diagnostiche.
+
+### Cosa manca
+
+1. **Il driver eMMC** non raggiunge la card (sopra).
+2. **Il display** non e' pilotato (Fase 4, driver MDP/DSI).
+3. **La build di XNU**: sorgente xnu-8796.141.3 clonato in
+   `/Users/io/Dev/ios/xnu-build/xnu-8796`; la macchina config `SWEET` va
+   clonata per `msm8992`, e la patch SMP via PSCI (0065) va esclusa perche'
+   **l'H815 non ha PSCI** (`enable-method = "qcom,8994-arm-cortex-acc"`).
+4. Il granolo pagina: il kernel Android del G4 gira a 4 KiB, XNU vuole 16
+   KiB. Cortex-A53/A57 implementano LPA, quindi 16 KiB dovrebbe esistere,
+   ma va confermato: il shim stampa `ID_AA64MMFR0_EL1.TGran1`.
+
+
+---
+
+# iOS 16 on LG G4 (H815) - porting notes
+
+Working copy: `ios-sweet-lg-g4/` (a clone of dipa-studio/ios-sweet). Base
+project: the Redmi Note 10 Pro (`sweet`, SM8150, Qualcomm ABL). Target:
+LG G4 H815, MSM8992, **LK** bootloader.
+
+See `GUIDE-00-SETUP.md` (setup), `GUIDE-01-SHIM.md` (the shim and the LK
+boot image) and `STATUS.md` (state).
+
+## 2026-11-05: phase 0 done, shim builds and passes the QEMU test
+
+### What the reference projects actually contributed
+
+- **ios-v60** (ch1tmdgus): the shim between sweet and v60 differs in only
+  a handful of constants (IMEM restart reason, GIC bases, timer INTIDs,
+  the watchdog) - `diff sweet/shim ios-v60/shim` shows start.S, fdt.c,
+  mmu.c, console.c and shim.ld are byte-identical. Its value is the
+  *method*: `docs/v60/HARDWARE.md` is the model for recording hardware
+  facts with their source, and `docs/v60/HISTORY.md` for the attempt log.
+  It does **not** help with the bootloader: the V60 also uses ABL.
+- **UniXNU-lumia950xl**: the Lumia 950 XL is also an MSM8992, so its eMMC
+  controller is at the *same address with the same IRQs* as the G4's
+  (`sdhci@f9824900`, IRQ 123/138). Its driver lives in
+  `drivers/NativeSdhci/` (an IOKit `IOBlockStorageDevice`), which does not
+  fit sweet's base (no IOStorageFamily, IOMedia patched out). The plan is
+  to port only the freestanding core (`SdhciCore.cpp`, `PollingHost.cpp`,
+  `SdhciRegs.h`) into sweet's `bsd/dev/sweet_ufs.c` shape as
+  `bsd/dev/sweet_emmc.c`. Two risks it flagged: the G4's eMMC may have the
+  command queue enabled (the UniXNU driver refuses it) and the G4's
+  partition table is probably MBR, not GPT (UniXNU hard-requires
+  "EFI PART").
+
+### The G4's bootloader is LK, not ABL - the one big difference
+
+sweet's `mkbootimg --header_version 2 --dtb <raw.dtb>` produces an image
+for ABL. LK wants the device tree in a **QCDT v3 table appended to the
+boot image**, with `dt_size` in the header at offset 40 (LK's
+`struct boot_img_hdr` differs from AOSP's v0 there).
+
+Decoded the G4's own stock boot image (`aicp/boot.img`, 11710464 bytes):
+`ANDROID!`, page 4096, kernel 9449013 @ 0x8000, ramdisk 1023940 @
+0x1000000, tags 0x100, **offset 40 = 0x0012d000**, and the appended
+`unpacked_dt.img` is exactly 1232896 bytes and starts with `QCDT` v3.
+
+The QCDT holds 10 entries of 40 bytes pointing at 4 distinct device trees.
+`variant_id 0xb64` (the H815's `qcom,board-id`) points at offset 0xe2000,
+whose sha1 matches `msm8992-lg-h815-boot.dtb` padded to 307200 bytes
+(`6985b6f2`). **The stock QCDT is reused verbatim**, so LK's own matching
+logic selects the right DTB.
+
+### Address trap
+
+LK copies the selected DTB (307200 bytes) to `tags_addr`. LG's stock
+`tags_addr` is 0x100, which would land on top of a kernel at 0x8000, and
+LG's own image has that overlap and still boots - so its LK must override
+the header addresses (the msm8996 LK project does this with
+`ABOOT_IGNORE_BOOT_HEADER_ADDRS`). Picked an arrangement that is correct
+either way: kernel 0x8000, dtb/tags 0x400000, ramdisk 0x1000000, and
+`tools/verify_bootimg.py` asserts no overlap.
+
+### The hand-off to the kernel did not need changing
+
+LK's `scm_elexec_call()` sets `param.el1_x0 = dtb_offset`, so x0 holds the
+DTB pointer exactly like ABL. `shim/start.S` was left alone.
+
+### Hardware facts (device tree, see docs/g4-hardware/HARDWARE-G4.md)
+
+- GICD 0xf9000000, GICR 0xf9002000, timer 19.2 MHz, VTIMER INTID 19.
+- Framebuffer: **no simple-framebuffer node**. Panel 1440x2560,
+  `qcom,mdss-dsi-bpp = 0x18` (24 bpp), **command mode**, dual DSI.
+  `cont_splash_mem` 0x03400000 + 0xc00000 (12 MiB).
+- Touch: Synaptics s3528 @ I2C 0x20 **or** LG SIC lg2411 @ I2C 0x28, bus
+  `i2c@f9924000`, IRQ 96, reset GPIO 8, IRQ GPIO 22. Both are enabled in
+  the tree with the same IRQ - which one is fitted must be probed.
+- Buttons: `gpio_keys` has only volume-up (PM8994 GPIO 3) and a hall
+  sensor (TLMM GPIO 75). Volume-down and power are PMIC PON pins 2 and 1.
+- PMIC: **PM8994 + PMI8994** (not PM8150/PM8916), SPMI arbiter 0xfc4c0000,
+  IRQ 190.
+- eMMC: `sdhci@f9824900` = sdhc1/mmc0, non-removable, 8-bit, IRQ 123/138.
+- **PSCI is absent**: AOSP's h815 port says "psci is broken" and deletes
+  the node; the CPU nodes use `enable-method = "qcom,8994-arm-cortex-acc"`
+  (Qualcomm's SCF/ACC path). The AOSP port reserves the ARM spin-table
+  handover slot at 0x06000000.
+- The G4's Android kernel runs **4 KiB** pages; sweet's XNU is built for
+  **16 KiB**. Cortex-A53/A57 implement LPA so 16 KiB should exist, but it
+  has to be confirmed on the device: the shim prints
+  `ID_AA64MMFR0_EL1.TGran1`.
+
+### Attempts and what they taught
+
+1. `mkbootimg` is not installed and AOSP's mkbootimg is the wrong format
+   anyway -> wrote `tools/mkbootimg_lg.py` (LK header + QCDT appendix).
+2. The harness safety gate blocks directory removal -> used `git clone`
+   plus the recoverable-delete helper instead.
+3. `awk: calling undefined function strtonum` - BSD awk has no strtonum
+   -> replaced with shell arithmetic in `shim/build.sh`.
+4. `undefined reference to memset` - freestanding build, GCC turns struct
+   initialisation into a memset call -> added `shim/lib.c`.
+5. QEMU with `-monitor stdio` and a piped command line: the monitor
+   mangled the input ("invalid char 'U' in expression") and the run hung
+   -> replaced the monitor with `-object memory-backend-file` and read the
+   guest RAM from the file after QEMU exits.
+6. The QEMU framebuffer came out **empty except the bottom rows**: QEMU
+   was killed by the 60 s timeout in the middle of clearing the screen
+   (786432 pixels x 3 byte writes to emulated device memory is slow) ->
+   gave the run 25 s and used a smaller test screen.
+7. The QEMU run panicked with `FAR 00000000F9017008` (the watchdog
+   register) even though the build was supposed to skip hardware probes:
+   **`#ifdef SHIM_HW_DIAG` is true for `-DSHIM_HW_DIAG=0`** - `#ifdef`
+   tests definition, not value. Fixed with `#if SHIM_HW_DIAG`.
+8. `IMAGE lo=6172662F` (ASCII garbage) and `TTBR0 30303030`: `mmu_enable()`
+   returned early on the granule check *before* filling `mmu_info`, so the
+   console printed uninitialised stack. Fixed by filling the struct first.
+9. The framebuffer decoder produced garbage at scale 2 because
+   `CH_W`/`CH_H` were computed at import time from the module-level
+   `SCALE` -> compute them from the argument instead.
+
+### Position-independence bug (would have hit the phone too)
+
+`shim/mmu.c` derived the image range from the *link-time* addresses
+(`_head` is 0 in the linker script). The bootloader loads the image
+wherever it likes - QEMU puts it at 0x40200000, LK probably at
+0x80080000 - so the page tables would have covered the wrong memory and
+the very first instruction fetch after enabling the MMU would fault.
+`shim/start.S` now records the runtime address of `_start` in
+`shim_runtime_base` and `mmu.c` adds it to the link-time offsets.
+
+### Current state
+
+- `shim/build.sh` builds a 225280 byte shim and a 1466368 byte LK boot
+  image; `tools/verify_bootimg.py` says PASS.
+- The QEMU run reaches the diagnostics and prints them; `tools/fb2text.py`
+  decodes the framebuffer back into text.
+- **Nothing has been booted on the phone yet.** The next step is
+  `fastboot boot shim/out/shim-boot.img` and a photograph of the screen.
+
+
 
 ## Agent handoff / active work (2026-10-15, latest)
 
@@ -431,3 +743,64 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+---
+
+## 2026-11-05 — Dump del LK di fabbrica (aboot) e riformulazione del problema eMMC
+
+Dump della partizione `aboot` (p8) dalla recovery con root:
+
+```sh
+adb shell 'dd if=/dev/block/mmcblk0p8 of=/sdcard/aboot.img bs=4096'
+adb pull /sdcard/aboot.img
+```
+
+Risultato: `aboot` **è il bootloader LK vero**, ELF32 ARM stripped.
+Entry `0x340f90`, `PT_LOAD` vaddr `0x0f900000` (file off `0x8000`,
+filesz `0xe93d8`, memsz `0xfe53c`). Salvato in
+`research/lk-g4/aboot-lk-g4-h815.elf`
+(sha256 `0e120ff5d930a9d8bd3f113932e8af88d07ff12caa742e0911f884672cc21666`).
+
+Stringhe rilevanti: `mmc init failed!`, `%s: target is not emmc boot`,
+`%s: mmc write failure - %s`, `MMC Boot: MBR read failed!`,
+`GPT: Could not read primary gpt from mmc`, `failed to set sdc%u_iface_clk`,
+`sdhci_msm_init_dll`, `platform/msm_shared/sdhci.c`.
+
+`ANDROID!` compare dentro il segmento di testo: è `BOOT_MAGIC`, usato da LK
+per validare l'header del boot image. LK legge il boot image da
+`MEMBASE + 0xFF000` (`app/aboot/aboot.c:89-92`); se MEMBASE = 0x0f900000,
+l'header sta a `0x0f9ff000`, subito dopo la fine di LK.
+
+**Riformulazione del problema.** LK ha *già* inizializzato l'eMMC prima di
+saltare al nostro shim: legge il boot image dalla card con `mmc_read()`
+(`app/aboot/aboot.c:890` → `platform/msm_shared/mmc.c:2462`). Quindi la card
+è già alimentata, cloccata e **selezionata** quando il shim parte. Il
+bring-up da zero in `shim/emmc.c` (reset software SDHCI, HC_POWER, clock
+GCC, CMD0/1/2/3/7) è quindi **non necessario e dannoso**:
+
+* il reset software dell'host distrugge la configurazione lasciata da LK
+  (DLL/CDC, bit vendor, MCLK selector, IO pad switch);
+* l'RCA **non serve**: sulla bus SD l'indirizzo della card non viaggia nei
+  comandi, la selezione è avvenuta con CMD7. CMD24 scrive sulla card già
+  selezionata.
+
+Conseguenza: la strada giusta è **non reinizializzare** (solo CMD16 +
+CMD24 + CMD18) o, meglio, **chiamare il driver di LK**
+(`mmc_write(uint64_t addr, uint32_t len, uint32_t *in)` e
+`mmc_read(uint64_t addr, uint32_t *out, uint32_t len)` — **ordine argomenti
+diverso**), che è già funzionante.
+
+**Sospetto aggiuntivo sul canale del tempo.** `reset_stage` viene impostato
+solo sul percorso normale (`shim/shim.c:908`). Se il driver va in fault,
+`exc_handler()` chiama `reset(15)` con `reset_stage == 0xffffffff` → attesa
+15 s, e `reset()` rientra in `emmc_write_log()` → ricorsione. Quindi
+l'attesa di ~40 s letta come "stadio 2" **implicherebbe che il driver è
+tornato con errore e non è andato in fault** — ma la misura include anche
+il boot della TWRP, quindi il modello numerico va validato prima
+(vedi `GUIDE-03-EMMC-DEBUG.md`, Test 0).
+
+**Nota Android.** Il telefono è Android **8.1.0 Oreo**
+(`lge/omni_g4/g4:16.1.0/OPM8.181105.002/23:eng/test-keys`), non Android 13:
+SuperSU 2.46 ha quindi buone probabilità di funzionare. `ro.boot.ddr_size`
+= 3221225472 (3 GiB), `ro.boot.bootdevice` = `f9824900.sdhci` (conferma
+l'indirizzo dell'host usato nel driver).

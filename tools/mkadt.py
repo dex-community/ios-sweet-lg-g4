@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
+"""Build the minimal Apple Device Tree that the xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the device's live FDT.
+
+Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--device g4]
+
+The --device switch picks the hardware profile:
+
+  sweet (default)  Redmi Note 10 Pro, SM8150, Snapdragon 732G
+  g4               LG G4 (H815), MSM8992, Snapdragon 808
 """
 import hashlib, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
-# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
+# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md).
+# sweet: the low bank of a 4 GiB+ phone, used only by the QEMU test.
 PHYS_BASE = 0xb0000000
 MEM_SIZE = 0x4d000000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
@@ -35,6 +43,34 @@ FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
+
+# --- LG G4 (H815), MSM8992 -----------------------------------------------
+# Every value below was read off the phone itself:
+#   * the RAM map from /proc/iomem in a recovery: 10000000-5fffffff (1.25 GiB)
+#     and 80000000-dfffffff (1.5 GiB), with a hole at 60000000-7fffffff.
+#     The upper bank is above every XPU carve-out (secure_mem 0-0x9600000,
+#     modem_mem 0x9000000-0xd400000, ...), so it is what XNU gets.
+#   * the GIC from the device tree: qcom,msm-qgic2 at 0xf9000000 (distributor)
+#     and 0xf9002000 (redistributor).
+#   * the framebuffer window from the device tree: cont_splash_mem at
+#     0x03400000, 12 MiB. The panel is 1440x2560; the running phone's fbdev
+#     reports stride 5760 and 32 bpp (ARGB8888), while the DSI link itself
+#     carries 24 bpp.
+#   * the eMMC host from the device tree: sdhci@f9824900 (sdhc1/mmc0).
+G4_PHYS_BASE = 0x80000000
+G4_MEM_SIZE = 0x60000000
+G4_GICD, G4_GICD_SIZE = 0xf9000000, 0x1000
+G4_GICR, G4_GICR_SIZE = 0xf9002000, 0x1000
+G4_FB, G4_FB_SIZE = 0x03400000, 0x00c00000
+G4_FB_W, G4_FB_H, G4_FB_STRIDE = 1440, 2560, 5760
+G4_EMMC, G4_EMMC_SIZE = 0xf9824900, 0x1a0
+G4_ECID = 0x4c4748340000001  # 'LGH8' + 1, synthetic
+# The G4 has 6 cores: 4x Cortex-A53 (MPIDR reg 0x00-0x03) and 2x Cortex-A57
+# (reg 0x100-0x101), per the device tree. PSCI is unavailable on this board
+# (AOSP's h815 port says "psci is broken" and deletes the node), so the
+# kernel is built for one core to begin with.
+G4_NCORES = 1
+G4_CPUS = [0]
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
@@ -74,13 +110,40 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+def build(seed=None, qemu=False, highmem=False, device='sweet'):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
+
+    device='g4': the LG G4 (H815) profile - different RAM map, GIC, framebuffer
+    and storage controller. The kernel still presents an iPhone X to the
+    userland, so the identity parts (product, ECID shape, canvas) stay.
+    """
+    g4 = (device == 'g4')
+    if g4:
+        phys_base, mem_size = G4_PHYS_BASE, G4_MEM_SIZE
+        gicd, gicr = G4_GICD, G4_GICR
+        gicd_size, gicr_size = G4_GICD_SIZE, G4_GICR_SIZE
+        fb, fb_size = G4_FB, G4_FB_SIZE
+        fb_w, fb_h, fb_stride = G4_FB_W, G4_FB_H, G4_FB_STRIDE
+        ecid = G4_ECID
+        ncores = G4_NCORES
+        cpu_regs = G4_CPUS
+        board_compat = cstr('lg,h815') + cstr('qcom,msm8992')
+    else:
+        phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+        gicd, gicr = GICD, GICR
+        gicd_size, gicr_size = GICD_SIZE, GICR_SIZE
+        fb, fb_size = FB, FB_SIZE
+        fb_w, fb_h, fb_stride = FB_W, FB_H, FB_STRIDE
+        ecid = SWEET_ECID
+        ncores = 1 if qemu else 8
+        cpu_regs = None
+        board_compat = cstr('xiaomi,sweet') + cstr('qcom,sm7150')
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
-    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    timebase = TIMEBASE
+    if qemu and not g4:
+        gicd, gicr, timebase = QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -92,8 +155,8 @@ def build(seed=None, qemu=False, highmem=False):
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
         ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
-        ('firmware-version', cstr('sweet-shim')),
-        ('system-firmware-version', cstr('sweet-shim')),
+        ('firmware-version', cstr('g4-shim' if g4 else 'sweet-shim')),
+        ('system-firmware-version', cstr('g4-shim' if g4 else 'sweet-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -111,7 +174,7 @@ def build(seed=None, qemu=False, highmem=False):
         # files), so e.g. DataMigration never records LastSystemVersion and
         # migrates on every boot. Synthetic ECID (not the phone's); chip-id
         # of the A11 that the iPhone X userland expects.
-        ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
+        ('unique-chip-id', struct.pack('<Q', ecid)),
         ('chip-id', u32(0x8015)),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
@@ -134,12 +197,15 @@ def build(seed=None, qemu=False, highmem=False):
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
+    for core in range(ncores):
+        # The G4's MPIDRs are Aff1:Aff0 = 0x000-0x003 (A53) and 0x100-0x101
+        # (A57); sweet's are Aff1 = core << 8.
+        mpidr = cpu_regs[core] if cpu_regs else (core << 8)
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('compatible', (cstr('arm,cortex-a53') if g4 else cstr('qcom,kryo470')) + cstr('ARM,v8')),
+            ('reg', u32(mpidr)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
@@ -163,7 +229,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -191,18 +257,26 @@ def build(seed=None, qemu=False, highmem=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('reg', u64(fb, fb_size)),
+        ('width', u32(fb_w)),
+        ('height', u32(fb_h)),
+        ('stride', u32(fb_stride)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
-    ufs = node('sweet-ufs', [
-        ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
-    ])
+    # On the G4 it is the eMMC host at 0xf9824900 instead.
+    if g4:
+        storage = node('sweet-emmc', [
+            ph(),
+            ('compatible', cstr('qcom,sdhci-msm')),
+            ('reg', u64(G4_EMMC, G4_EMMC_SIZE)),
+        ])
+    else:
+        storage = node('sweet-ufs', [
+            ph(),
+            ('compatible', cstr('qcom,ufshc')),
+            ('reg', u64(UFS, UFS_SIZE)),
+        ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
@@ -231,18 +305,19 @@ def build(seed=None, qemu=False, highmem=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + board_compat + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [storage]))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    device = 'g4' if '--device' in sys.argv and sys.argv[sys.argv.index('--device') + 1] == 'g4' else 'sweet'
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, device=device)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
