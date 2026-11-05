@@ -9,13 +9,22 @@ Ultimo aggiornamento: 2026-11-05.
 
 ## 0. Dove siamo, in una riga
 
-Il driver eMMC **non è mai stato il problema**. Il problema era (ed è) un
-**crash in una fase successiva del boot**, e il canale di log che usavamo
-per diagnosticarlo era rotto, quindi tutte le letture precedenti erano
-artefatti.
+Tre bug **veri nel codice** sono stati trovati e corretti (granulo del
+page table, cache, core reset del controller eMMC) e il canale di
+diagnostica e' stato rifatto per essere immune al jitter del boot. Il
+controller eMMC **risponde** (registri vivi, clock attivo e stabile) ma
+**la carta e' muta**: non risponde a CMD5, CMD7, CMD16 ne' alla
+re-identificazione completa. L'ipotesi aperta e' il gating del clock
+(`CORE_CLK_PWRSAVE`), gia' corretto ma non ancora verificato, e poi i
+bit di modalita' HS400 del controller.
 
-Stato attuale: **il shim crasha nella fase PSCI o GIC**, non nella fase
-eMMC. La diagnosi è a un passo dalla certezza.
+Il canale XNU e' molto piu' avanti di quanto sembrasse: il porting
+`ios-sweet` e' gia' un porting di XNU su **un telefono Qualcomm con
+device tree**, quindi la stessa forma del nostro. La build gira in CI e
+le patch sono state adattate al G4 (A53 -> `armv8-a`, `lg,h815`).
+
+Ultima cosa fatta: il run con il gating del clock azzerato (in attesa
+del risultato) e la CI XNU `42012839180` lanciata.
 
 ---
 
@@ -369,3 +378,133 @@ adb reboot bootloader
 fastboot flash boot backup/boot-stock.img
 fastboot reboot
 ```
+
+---
+
+## 10. Sessione 2026-11-05 (pomeriggio) — bug trovati e dove riprendere
+
+### 10.1 I tre bug corretti in questa sessione
+
+**1. `TG0` sbagliato nel TCR (`shim/mmu.c`).** I bit `[15:14]` di
+`TCR_EL1` sono TG0: `0` = 4K, `1` = 16K, **`2` = 64K**. Il codice aveva
+`2` (64K) mentre le page table sono costruite per 16K (L2 = blocchi da
+32MB con la base a bit 25, L3 = pagine da 16K). Con TG0 = 2 la
+passeggiata parte dal livello sbagliato e ogni traslazione e' sbagliata:
+il primo accesso dopo `mmu_enable()` faultava. Ora e' `1`.
+
+**2. La dcache invalidava le page table appena scritte (`shim/mmu.c`).**
+Le page table stanno nel `.bss`, dentro l'immagine: `dc ivac` (invalidate
+senza clean) le faceva sparire, e in RAM restava lo zero (o la spazzatura
+di LK). Ora: `dc civac` **prima** di riempire le tabelle e un secondo
+`dc civac` **dopo**, solo sul pool delle tabelle.
+
+**3. Il core reset del controller eMMC (`shim/emmc.c`).** La sequenza di
+LK (`sdhci_msm_init`) clear HC_MODE -> **core reset** -> write del
+registro azzera anche la generazione del clock e il DLL/CDC: senza clock
+nessun comando completa. Ora la sequenza **senza** core reset viene
+provata per prima, quella con il core reset solo come secondo tentativo.
+
+### 10.2 Il canale di diagnostica nuovo
+
+Il formato del tempo e' cambiato da "un secondo per unita'" (il jitter
+del boot TWRP e' di qualche secondo, quindi illeggibile) a **eventi a
+tabella fissa, 20 s per slot**:
+
+```
+wait = 40 s + 20 s * indice_evento        (il crash usa una base separata: 500 s)
+```
+
+La tabella degli eventi e' in `shim/shim.c` (enum `EV_*`) e nel decoder
+`tools/run-shim.sh`. `tools/where.sh` decodifica l'offset dell'ELR
+(unita' da 32 byte) quando il crash c'e' stato.
+
+### 10.3 Cosa dice il telefono (misure reali)
+
+| build | attesa | evento |
+|---|---|---|
+| HC mode senza core reset, poi con | 51,3 s | 1 — la carta non risponde a CMD5/CMD7 |
+| + clock di card e classificazione | 431,8 s | 20 — **controller vivo e clockato, carta muta** |
+| + re-identificazione CMD0/1/2/3/7 | 451,3 s | 21 — la carta non risponde ne' a CMD0/1/2/3/7 |
+
+La classificazione legge i registri **prima** di toccare qualcosa ed
+esclude: core MMC non raggiungibile, capability vuote, clock spento, clock
+non stabile, linea di comando bloccata. Resta la carta.
+
+### 10.4 La pista aperta: il gating del clock
+
+Il controller MSM può spegnere da solo il clock verso la card:
+`CORE_CLK_PWRSAVE` (bit 1 di `CORE_VENDOR_SPEC` = CORE+0x10c). Con quel
+bit, "Keeping PWRSAVE ON may turn off the clock" (driver Linux
+`sdhci-msm.c`), e quindi nessun comando completa mai. E' gia' stato
+aggiunto il codice che lo azzera prima di parlare con la card
+(`emmc.c`, `g_pwrsave_cleared`, evento `EV_CLOCK_GATED`), **ma il run di
+verifica non e' ancora stato letto**.
+
+Se anche questo fallisce, la prossima lista (in ordine):
+
+1. **Bit di modalita' HS400 nel vendor spec**: `CORE_HC_MCLK_SEL`
+   (bit 9:8, default = 2, HS400 = 3) e `CORE_HC_SELECT_IN` (bit 21:19,
+   HS400 = 6). Dopo un CMD0 la carta torna al modo legacy, quindi il
+   controller va rimesso in modo default.
+2. **Rail di alimentazione della card**: se LK ha spento l'SDC rail
+   il controller risponde ma la carta e' morta (coerente con "controller
+   vivo, carta muta"). Si vede dal PMIC (PM8994 via SPMI 0xfc4c0000).
+3. **Fix B: chiamare il driver di LK** (`mmc_init`/`mmc_write` nel binario
+   di fabbrica, `research/lk-g4/aboot-lk-g4-h815.elf`, base runtime
+   0x0f900000). Richiede reverse engineering delle firme.
+
+### 10.5 XNU: lo stato reale
+
+- La build **non** avviene in locale: la CI gira su `macos-14` (Xcode 15.x,
+  l'unico `iig` con l'ABI IORPC di xnu-8796). Workflow:
+  `.github/workflows/xnu.yml`, parametro `machine_config`.
+- **Il porting SWEET e' gia' un telefono Qualcomm con device tree**
+  (platform expert `IODTPlatformExpert`, timer virtuale dal DT, boot della
+  CPU senza PSCI): e' la stessa forma del G4, quindi la base e' riusabile.
+- Adattamenti gia' fatti e pushati:
+  - `xnu/patches/0004`: `-march=armv8.2-a+crypto` -> `-march=armv8-a+crypto`
+    (il G4 e' solo Cortex-A53 / ARMv8.0; con armv8.2 il compilatore puo'
+    emettere LSE e complex che l'A53 non ha).
+  - `xnu/patches/0016`: aggiunta la voce `'IONameMatch' = 'lg,h815';` in
+    `KernelConfigTables`, altrimenti il platform expert non si attacca al
+    nostro ADT.
+- La CI `42012839180` e' partita con questi patch: **da controllare** con
+  `gh run view 42012839180 -R dex-community/ios-sweet-lg-g4`.
+- `tools/mkadt.py --device g4` genera gia' l'ADT del G4 (RAM
+  0x80000000+1.5GB, GIC 0xf9000000/0xf9002000, framebuffer
+  0x03400000 1440x2560, eMMC 0xf9824900, compatible `lg,h815`).
+- `tools/build-g4-image.sh` (nuovo) fa la catena:
+  artefatto CI -> ADT -> payload (`tools/mkpayload.py`) -> immagine di boot
+  LK (`shim/build.sh out/<tag>.bin`).
+- Manca: il **driver eMMC in XNU** (il porting SWEET legge la root da
+  UFS: `bsd/dev/sweet_ufs.c`). Riferimento: UniXNU-lumia950xl.
+- Manca: il **D22AP ADT** per l'identita' del userland
+  (`research/ipsw-x/d22ap.adt`, non in git): si estrae dall'IPSW con
+  `tools/remotezip.py`.
+- L'IPSW e' in `/Users/io/Dev/ios/lg g4/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw`.
+
+### 10.6 Come riprendere, in ordine
+
+```sh
+cd /Users/io/Dev/ios/ios-sweet-lg-g4
+git pull github main
+
+# 1) il run eMMC (risultato del gating del clock)
+FINE_TIMING=1 RAW_TIMING=1 ./shim/build.sh && ./tools/run-shim.sh
+#    evento 22 = il clock era gated; 0 = tutto OK (il log finisce sulla card)
+
+# 2) la CI XNU
+gh run view 42012839180 -R dex-community/ios-sweet-lg-g4
+gh run download -R dex-community/ios-sweet-lg-g4 42012839180 -n xnu-kernel -D xnu/out-42012839180
+
+# 3) immagine di boot del G4
+tools/build-g4-image.sh 42012839180 g4
+fastboot flash boot shim/out/shim-boot-g4.img && fastboot reboot
+```
+
+### 10.7 Stato del telefono al momento del passaggio
+
+La partizione `boot` **e' stata ripristinata** con l'immagine stock
+(`backup/boot-stock.img`) e il telefono e' tornato su Android. La
+recovery TWRP e' ancora installata e l'adb root funziona, quindi il
+telefono e' usabile per il prossimo ciclo di test.

@@ -77,6 +77,7 @@ EVENTS = [
     "the command line is stuck busy",
     "the controller is fine but the card does not answer",
     "the card does not answer to the full identification (CMD0/1/2/3/7)",
+    "the controller was gating the card clock (CORE_CLK_PWRSAVE)",
 ]
 
 print(f"elapsed from fastboot reboot : {t1 - t0:.1f} s")

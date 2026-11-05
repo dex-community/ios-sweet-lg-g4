@@ -87,6 +87,16 @@
 #define CORE_POWER	0x00
 #define CORE_MCI_VER	0x50
 #define CORE_HC_MODE	0x78	/* bit 0 = HC_MODE_EN, bit 13 = FF_CLK_SW_RST_DIS */
+#define CORE_VENDOR_SPEC 0x10c
+
+/*
+ * The MSM controller can gate the clock to the card by itself: with
+ * CORE_CLK_PWRSAVE set in the vendor spec register the card clock stops
+ * as soon as there is no traffic, and then no command ever completes.
+ * The Linux driver clears the bit while it talks to the card (and puts it
+ * back afterwards).
+ */
+#define CORE_CLK_PWRSAVE	(1u << 1)
 
 #define HC_MODE_EN		(1u << 0)
 #define FF_CLK_SW_RST_DIS	(1u << 13)
@@ -305,6 +315,7 @@ enum {
 	D_FAIL_INT,	/* interrupt status of the last controller error       */
 	D_CMD_ERR,	/* emmc_last_cmd_error when the log was built          */
 	D_CID0,		/* first word of the CID (CMD2) after the re-init    */
+	D_VENDOR_SPEC,	/* core 0x10c, the vendor spec register              */
 	D_COUNT
 };
 
@@ -765,9 +776,12 @@ enum {
 	CLASS_CLOCK_OFF,	/* the card clock is not enabled              */
 	CLASS_CLOCK_UNSTABLE,	/* the internal clock never stabilised        */
 	CLASS_CMD_INHIBIT,	/* the command line is stuck busy             */
+	CLASS_CLOCK_GATED,	/* the card clock was gated by the controller */
 	CLASS_CARD_ABSENT	/* the controller is fine, the card is not    */
 };
 unsigned emmc_class = CLASS_NONE;
+/* Set when CORE_CLK_PWRSAVE was set and had to be cleared. */
+static int g_pwrsave_cleared;
 
 static unsigned emmc_classify(void)
 {
@@ -786,6 +800,8 @@ static unsigned emmc_classify(void)
 		return CLASS_CLOCK_UNSTABLE;
 	if (present & PS_CMD_INHIBIT)
 		return CLASS_CMD_INHIBIT;
+	if (g_pwrsave_cleared)
+		return CLASS_CLOCK_GATED;
 	return CLASS_CARD_ABSENT;
 }
 
@@ -971,6 +987,25 @@ static int emmc_prepare(uint8_t *scratch)
 	 * attempt (see emmc_hc_mode()).
 	 */
 	emmc_hc_mode(0);
+
+	/*
+	 * The controller may have been left with the automatic clock
+	 * gating on: the card clock would then stop by itself and no
+	 * command would ever complete. Clear it (the Linux driver does the
+	 * same while it talks to the card).
+	 */
+	{
+		uint32_t vspec = rd32(CORE + CORE_VENDOR_SPEC);
+
+		g_diag[D_VENDOR_SPEC] = vspec;
+		trail(0x0019, vspec);
+		if (vspec != 0xffffffffu && (vspec & CORE_CLK_PWRSAVE)) {
+			g_pwrsave_cleared = 1;
+			wr32(CORE + CORE_VENDOR_SPEC, vspec & ~CORE_CLK_PWRSAVE);
+			trail(0x001a, 1);
+		}
+	}
+
 	/* Without a card clock no command can complete. */
 	emmc_clock_enable(0);
 

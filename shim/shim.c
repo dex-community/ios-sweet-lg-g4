@@ -118,6 +118,7 @@ enum {
 	EV_CMD_INHIBIT,		/* the command line is stuck busy             */
 	EV_CARD_ABSENT,		/* the controller is fine, the card is not    */
 	EV_REINIT_FAIL,		/* the card does not answer to CMD0/1/2/3/7   */
+	EV_CLOCK_GATED,		/* the controller was gating the card clock   */
 	EV_COUNT
 };
 /* The eMMC stage values, mirrored from emmc.c. */
@@ -164,6 +165,7 @@ static unsigned shim_event_index(void)
 		case 4: ev = EV_CLOCK_UNSTABLE; break;
 		case 5: ev = EV_CMD_INHIBIT; break;
 		case 6: ev = EV_CARD_ABSENT; break;
+		case 7: ev = EV_CLOCK_GATED; break;
 		default: ev = EV_WAKE_FAIL; break;
 		}
 		break;
