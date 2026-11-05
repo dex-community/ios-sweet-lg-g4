@@ -993,3 +993,32 @@ Adattamenti fatti ai patch:
 - Aggiunta la voce di `KernelConfigTables` con
   `'IONameMatch' = 'lg,h815';` perche' il platform expert si attacchi al
   nostro ADT e non solo a quello dello Xiaomi.
+
+### Aggiornamento 2026-11-05 12:05 — CI XNU verde, immagine G4 pronta
+
+La CI `42012839180` (xnu, macos-14, MACHINE_CONFIG=SWEET con le patch
+adattate al G4) e' **riuscita in 8m35s**. Kernel:
+`xnu/out-42012839180/kernel.development.sweet` (Mach-O 64-bit arm64, non
+arm64e).
+
+Catena completa e verificata sul G4:
+
+```
+python3 tools/mkadt.py shim/out/g4.adt --device g4
+python3 tools/mkpayload.py xnu/out-42012839180/kernel.development.sweet \
+        shim/out/g4.adt shim/out/g4.bin \
+        --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0"
+cd shim && ./build.sh out/g4.bin
+```
+
+Risultato: `shim/out/shim-boot-g4.img` (17.870.848 byte,
+sha256 `71be0b8f149d3ade6eb5433d7a1758bdeb17dc70b5dca9bd92452a35c9a0238e`),
+`tools/verify_bootimg.py` -> PASS e il ramdisk coincide con il payload.
+**Non e' stato flashato**: il telefono e' stato ripristinato con
+`backup/boot-stock.img` e torna su Android.
+
+Il prossimo test (quando si riprende) e' semplice: flashare questa
+immagine e guardare se XNU arriva almeno a "init alive". Le incognite
+restanti, in ordine: il driver eMMC in XNU (il porting SWEET legge la root
+da UFS), il D22AP ADT per l'identita' del userland, e il display (il
+framebuffer del G4 e' nella secure region, protetto dall'XPU).
