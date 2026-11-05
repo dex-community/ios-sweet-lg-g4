@@ -124,6 +124,7 @@
 #define CMD_SET_BLOCKLEN	16
 #define CMD_READ_BLOCK		17
 #define CMD_WRITE_BLOCK		24
+#define CMD_SEND_RELATIVE_ADDR	3	/* CMD3: get/set the relative address */
 
 /* Card status (R1). The state is bits 12:9, READY_FOR_DATA is bit 8. */
 #define R1_STATE(r)		(((r) >> 9) & 0xfu)
@@ -188,10 +189,67 @@
 unsigned emmc_last_stage = 0xff;
 int emmc_last_error = 0;
 
+/*
+ * The result of the FIRST bring-up attempt.
+ *
+ * emmc_write_log() runs twice: once from the main path (where the console
+ * log still exists in RAM) and once from reset() (where the log is written
+ * to the card). The second call starts from scratch and would overwrite the
+ * stage of the first one, which is the one that matters: the timing
+ * channel in reset() has to report where the FIRST attempt stopped.
+ *
+ * These three variables are therefore only written once, by the first
+ * call, and never touched again.
+ */
+unsigned emmc_first_stage = 0xff;
+int emmc_first_error = 0;
+int emmc_first_cmd_error = 0;
+
 /* Raw error of the last command: -1 the lines never became idle, -2 the
  * command timed out in software, -3 the controller reported an error,
  * -4 the card's R1 reported a fatal error. */
 int emmc_last_cmd_error = 0;
+
+/*
+ * A fine grained progress counter, updated before every step that can
+ * fault (in practice: every MMIO access). If the shim dies in the driver,
+ * this is what says where: the panic handler puts it into the wait time.
+ *
+ * It is deliberately separate from emmc_last_stage, which tracks the
+ * logical steps of the bring-up.
+ */
+unsigned emmc_step = 0;
+#define STEP(n)	(emmc_step = (n))
+
+/* The step names, for the documentation and for reading the trail.
+ * Static, so that they do not put absolute relocations in the image. */
+static const char *const emmc_step_names[] = {
+	"entry", "snapshot", "hcmode-rd", "hcmode-wr", "caps", "int-enable",
+	"cmd16-1", "wake-select", "wake-cmd5", "cmd16-2", "ext-csd",
+	"build", "write1", "write2", "readback"
+};
+static const unsigned emmc_step_count = (unsigned)(sizeof(emmc_step_names) /
+					     sizeof(emmc_step_names[0]));
+
+/* The numeric values of the steps. Keep in sync with emmc_step_names. */
+enum {
+	STEP_ENTRY = 0,
+	STEP_SNAPSHOT,
+	STEP_HCMODE_READ,
+	STEP_HCMODE_WRITE,
+	STEP_CAPS,
+	STEP_INTEN,
+	STEP_CMD16_1,
+	STEP_WAKE_SELECT,
+	STEP_WAKE_CMD5,
+	STEP_CMD16_2,
+	STEP_EXT_CSD,
+	STEP_BUILD,
+	STEP_WRITE1,
+	STEP_WRITE2,
+	STEP_READBACK,
+	STEP_COUNT
+};
 
 /* ------------------------------------------------------------------ */
 /* Diagnostics: one sector of host/card state, written next to the log  */
@@ -519,6 +577,7 @@ fail:
 /* Read-only look at the host as LK left it. Nothing is written. */
 static void emmc_snapshot(void)
 {
+	STEP(STEP_SNAPSHOT);
 	g_diag[D_CORE_POWER]  = rd32(CORE + CORE_POWER);
 	g_diag[D_CORE_MCIVER] = rd32(CORE + CORE_MCI_VER);
 	g_diag[D_CORE_HCMODE] = rd32(CORE + CORE_HC_MODE);
@@ -555,13 +614,66 @@ static int emmc_wake(void)
 	for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
 		uint32_t rca = candidates[i];
 
-		/* CMD5 may be refused (card only deselected, not asleep):
-		 * that is fine, CMD7 below decides. */
-		(void)emmc_cmd(CMD_SLEEP_AWAKE, rca << 16, CMD_RESP_48BUSY, &rsp);
+		/*
+		 * Order matters, and it is the opposite of what v2 did.
+		 *
+		 * CMD7 (SELECT/DESELECT) is what puts the card on the bus:
+		 * after it, the card answers the commands that carry its RCA.
+		 * CMD5 (SLEEP_AWAKE) only operates on the card that is
+		 * currently selected, so it has to come AFTER the select.
+		 *
+		 * The factory LK makes this explicit: mmc_put_card_to_sleep()
+		 * (0x0f916a6c) does CMD7(deselect) and then CMD5(sleep), in
+		 * that order. Reversing it on the way back in is the natural
+		 * mirror image: CMD7(select) then CMD5(awake).
+		 *
+		 * CMD7 carries the RCA in bits 31:16 and wants an R1B
+		 * response. CMD5 wants the same layout plus bit 15 set
+		 * (SLEEP_AWAKE = awake) and the host-support bit 31 set, so
+		 * that a card which really did enter deep sleep agrees to
+		 * come back out.
+		 */
 		if (!emmc_cmd(CMD_SELECT_CARD, rca << 16, CMD_RESP_48BUSY, &rsp)) {
 			g_rca = (uint16_t)rca;
 			g_diag[D_RCA] = rca;
+
+			/* The card is selected now; wake it up. */
+			STEP(STEP_WAKE_CMD5);
+			emmc_cmd(CMD_SLEEP_AWAKE,
+				 0x80000000u | (rca << 16) | 0x00008000u,
+				 CMD_RESP_48BUSY, &rsp);
 			return 0;
+		}
+	}
+
+	/*
+	 * Last resort: ask the card for its relative address.
+	 *
+	 * On eMMC the RCA is chosen by the host and the card confirms it:
+	 * LK's mmc_send_relative_address() sends CMD3 with argument
+	 * (MMC_RCA << 16) and keeps the same value, and MMC_RCA is 2
+	 * (mmc_sdhci.h:130). A card that answers CMD3 with a different
+	 * value in bits 31:16 of the response tells us the real RCA, and
+	 * that is the one to select.
+	 *
+	 * This only works on a card that is awake enough to answer, so it
+	 * is a supplement to the candidates above, not a replacement.
+	 */
+	{
+		uint32_t rca;
+
+		if (emmc_cmd(CMD_SEND_RELATIVE_ADDR, 0, CMD_RESP_48, &rsp) == 0) {
+			rca = (rsp >> 16) & 0xffffu;
+			if (rca && rca < 0x10000u &&
+			    !emmc_cmd(CMD_SELECT_CARD, rca << 16,
+				      CMD_RESP_48BUSY, &rsp)) {
+				g_rca = (uint16_t)rca;
+				g_diag[D_RCA] = rca;
+				emmc_cmd(CMD_SLEEP_AWAKE,
+					 0x80000000u | (rca << 16) | 0x00008000u,
+					 CMD_RESP_48BUSY, &rsp);
+				return 0;
+			}
 		}
 	}
 	return -1;
@@ -614,6 +726,7 @@ static int emmc_prepare(uint8_t *scratch)
 	 */
 	if (!(rd32(CORE + CORE_HC_MODE) & HC_MODE_EN)) {
 		emmc_last_stage = STAGE_HC_MODE;
+		STEP(STEP_HCMODE_WRITE);
 		/* Disable HC mode. */
 		wr32(CORE + CORE_HC_MODE, rd32(CORE + CORE_HC_MODE) & ~HC_MODE_EN);
 		/* Core power reset (bit 7 of CORE+0x00). */
@@ -626,6 +739,7 @@ static int emmc_prepare(uint8_t *scratch)
 	}
 	g_diag[D_HCMODE_AFTER] = rd32(CORE + CORE_HC_MODE);
 
+	STEP(STEP_CAPS);
 	caps = rd32(HC + HC_CAPS1);
 	if (caps == 0 || caps == 0xffffffffu)
 		return EMMC_E_NO_CAPS;
@@ -643,16 +757,19 @@ static int emmc_prepare(uint8_t *scratch)
 
 	/* Rung 1: is the card still selected? */
 	emmc_last_stage = STAGE_BLKLEN;
+	STEP(STEP_CMD16_1);
 	rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
 	g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
 	if (rc || R1_STATE(rsp) != CARD_STATE_TRAN) {
 		/* Rung 2: asleep or deselected. */
 		emmc_last_stage = STAGE_WAKE;
+		STEP(STEP_WAKE_SELECT);
 		if (emmc_wake())
 			return EMMC_E_WAKE;
 		g_diag[D_RUNG] = 1;
 
 		emmc_last_stage = STAGE_BLKLEN2;
+		STEP(STEP_CMD16_2);
 		rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
 		g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
 		if (rc || R1_STATE(rsp) != CARD_STATE_TRAN)
@@ -661,6 +778,7 @@ static int emmc_prepare(uint8_t *scratch)
 
 	/* Rung 3: what is this card? */
 	emmc_last_stage = STAGE_EXTCSD;
+	STEP(STEP_EXT_CSD);
 	rc = emmc_xfer(CMD_SEND_EXT_CSD, 0, 0, scratch, &rsp);
 	if (rc)
 		return EMMC_E_EXTCSD;
@@ -771,6 +889,19 @@ static void emmc_build_diag(uint8_t *sector)
  * Put the console log on the card, then read it back to prove it landed.
  * Returns 0 only if the read-back matches.
  */
+/*
+ * Remember the outcome of the first bring-up attempt. The second call
+ * (from reset()) must not overwrite it.
+ */
+static void emmc_save_first_result(void)
+{
+	if (emmc_first_stage == 0xff) {
+		emmc_first_stage = emmc_last_stage;
+		emmc_first_error = emmc_last_error;
+		emmc_first_cmd_error = emmc_last_cmd_error;
+	}
+}
+
 int emmc_write_log(const char *text, unsigned len)
 {
 	uint8_t sector[512];
@@ -788,6 +919,7 @@ int emmc_write_log(const char *text, unsigned len)
 	g_rca = 0;
 
 	con_str("EMMC", "start");
+	STEP(STEP_ENTRY);
 	emmc_last_stage = STAGE_START;
 	emmc_last_error = 0;
 	emmc_last_cmd_error = 0;
@@ -796,6 +928,7 @@ int emmc_write_log(const char *text, unsigned len)
 	if (rc) {
 		emmc_last_error = rc;
 		con_hex2("EMMC", "prepare=", (uint32_t)rc, "stage=", emmc_last_stage);
+		emmc_save_first_result();
 		return rc;
 	}
 	con_hex2("EMMC", "sec=", g_sec_count, "sector_mode=", (uint32_t)g_sector_mode);
@@ -807,21 +940,25 @@ int emmc_write_log(const char *text, unsigned len)
 	emmc_build_diag(scratch);
 
 	/* Log + diagnostics on both spares. */
+	STEP(STEP_WRITE1);
 	rc1 = emmc_write_sector(LOG_LBA_SPARE1, sector);
 	if (!rc1)
 		rc1 = emmc_write_sector(LOG_LBA_SPARE1 + 1, scratch);
+	STEP(STEP_WRITE2);
 	rc2 = emmc_write_sector(LOG_LBA_SPARE2, sector);
 	if (!rc2)
 		rc2 = emmc_write_sector(LOG_LBA_SPARE2 + 1, scratch);
 	con_hex2("EMMC", "w spare1=", (uint32_t)rc1, "spare2=", (uint32_t)rc2);
 	if (rc1 && rc2) {
 		emmc_last_error = rc1;
+		emmc_save_first_result();
 		return rc1;
 	}
 
 	/* A write that cannot be read back is not a write. */
 	emmc_last_stage = STAGE_READBACK;
 	lba_back = rc1 ? LOG_LBA_SPARE2 : LOG_LBA_SPARE1;
+	STEP(STEP_READBACK);
 	rc = emmc_read_sector(lba_back, scratch);
 	if (!rc) {
 		same = 1;
@@ -835,13 +972,16 @@ int emmc_write_log(const char *text, unsigned len)
 
 	if (rc) {
 		emmc_last_error = rc;
+		emmc_save_first_result();
 		return rc;
 	}
 	if (!same) {
 		emmc_last_error = EMMC_E_VERIFY;
+		emmc_save_first_result();
 		return EMMC_E_VERIFY;
 	}
 	emmc_last_stage = STAGE_DONE;
 	emmc_last_error = 0;
+	emmc_save_first_result();
 	return 0;
 }

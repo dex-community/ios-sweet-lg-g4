@@ -804,3 +804,41 @@ il boot della TWRP, quindi il modello numerico va validato prima
 SuperSU 2.46 ha quindi buone probabilità di funzionare. `ro.boot.ddr_size`
 = 3221225472 (3 GiB), `ro.boot.bootdevice` = `f9824900.sdhci` (conferma
 l'indirizzo dell'host usato nel driver).
+
+---
+
+## 2026-11-05 — Il canale del tempo NON misura quello che credevamo (Test 0)
+
+Prima di ogni altra cosa ho validato il canale del tempo, che era l'unico
+dato che avevamo su cosa falliva nel bring-up eMMC.
+
+Due build, stessa identica tranne l'attesa forzata:
+
+| build | attesa imposta | tempo misurato |
+|---|---|---|
+| `FORCE_WAIT_S=5`  | 5 s  | **40,2 s** |
+| `FORCE_WAIT_S=60` | 60 s | (in corso) |
+
+Il codice e' corretto: in `shim/shim.c:232` l'attesa forzata sovrascrive
+quella calcolata dallo stadio. Il tempo misurato non cambIa con l'attesa
+imposta, quindi **i 40 s non sono l'attesa dello shim**: sono il tempo di
+boot del bootloader + il boot della TWRP fino a quando `adb devices`
+la vede.
+
+Conseguenza: le letture di stadio fatte prima ("stadio 2", "stadio 4",
+"errore 0") erano **interpretazioni sbagliate di un numero che non
+cambiava**. Il tempo totale e' dominato da una costante di ~35-40 s
+(boot TWRP), e la codifica `stage * 20 s` produceva numeri simili per
+stadi molto diversi: e' per questo che l'attesa e' sembrata sempre
+~41-42 s anche cambiando il codice.
+
+Il canale del tempo, cosi' com'era, era **inutilizzabile**. Va rifatto:
+- la misura va ancorata a un evento osservabile *dentro* la finestra dello
+  shim, non al rientro in recovery;
+- in alternativa il tempo di attesa va reso molto piu' grande del tempo di
+  boot fisso, in modo che la differenza domini il rumore.
+
+Nota: `tools/run-shim.sh` misura `t1 - t_fastboot_exit`, dove
+`t_fastboot_exit` e' il momento in cui il telefono lascia il fastboot.
+Quel momento include gia' il boot di LK, quindi non e' un riferimento
+pulito per l'inizio dello shim.

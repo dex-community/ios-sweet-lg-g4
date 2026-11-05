@@ -57,12 +57,12 @@ print(f"elapsed from fastboot reboot : {t1 - t0:.1f} s")
 if tf:
     e = t1 - tf
     print(f"elapsed from the bootloader : {e:.1f} s")
-    # The shim waits until stage * 20 s (+ 3 s per unit of the raw command
-    # error) after it started; the bootloader itself takes about 1 s.
+    # The shim waits until stage * 20 s + (error + 1) * 2 s after it
+    # started; the bootloader itself takes about 1 s.
     print("stage / error candidates:")
     for stage in range(0, 13):
-        for err in range(0, 14):
-            total = 1 + stage * 20 + err * 3
-            if abs(total - e) < 2.5:
-                print(f"  stage {stage:2d}, command error -{err} -> {total} s")
+        for err in range(0, 12):
+            total = 1 + stage * 20 + (err + 1) * 2
+            if abs(total - e) < 2.0:
+                print(f"  stage {stage:2d}, error {-(err+1):3d} -> {total} s")
 EOF

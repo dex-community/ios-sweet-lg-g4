@@ -39,6 +39,7 @@ CFLAGS="$CFLAGS -DCON_SCALE=${CON_SCALE:-3}"
 CFLAGS="$CFLAGS -DFB_BPP=${FB_BPP:-24}"
 FORCE_WAIT_S=${FORCE_WAIT_S:-0}
 CFLAGS="$CFLAGS -DSHIM_FORCE_WAIT_S=$FORCE_WAIT_S"
+CFLAGS="$CFLAGS -DSHIM_RAW_TIMING=${RAW_TIMING:-0}"
 SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c"
 
 mkdir -p out

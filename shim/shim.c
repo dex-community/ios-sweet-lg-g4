@@ -27,6 +27,13 @@ int emmc_write_log(const char *text, unsigned len);
 extern unsigned emmc_last_stage;
 extern int emmc_last_error;
 extern int emmc_last_cmd_error;
+/* The result of the FIRST bring-up attempt, kept apart from the second
+ * one that reset() triggers. See emmc.c. */
+extern unsigned emmc_first_stage;
+extern int emmc_first_error;
+extern int emmc_first_cmd_error;
+/* The fine grained progress counter of the eMMC driver. */
+extern unsigned emmc_step;
 
 /*
  * The stage of the eMMC bring-up is encoded in the time the phone stays up
@@ -51,8 +58,14 @@ extern int emmc_last_cmd_error;
 #ifndef SHIM_FORCE_WAIT_S
 #define SHIM_FORCE_WAIT_S	0
 #endif
+#ifndef SHIM_RAW_TIMING
+#define SHIM_RAW_TIMING		0
+#endif
 static unsigned reset_stage = 0xffffffffU;	/* 0xffffffff: not set */
 static uint64_t shim_t0;
+/* Set when the shim took a fault: the stage of the fault is reported
+ * through the wait time, and the card write is skipped. */
+static int panic_stage;
 
 #define RESTART_BOOTLOADER	0x77665500U
 
@@ -196,8 +209,12 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	 * Put the log on the eMMC as well: the panel is in command mode and
 	 * the RAM copy does not survive the trip through Android. The card
 	 * does survive, and a recovery reads it back with dd.
+	 *
+	 * NOT after a fault: the fault usually comes from the eMMC driver
+	 * itself, so a second attempt would fault again and recurse.
 	 */
-	emmc_write_log(con_log, (unsigned)con_log_len);
+	if (!panic_stage)
+		emmc_write_log(con_log, (unsigned)con_log_len);
 #endif
 	/*
 	 * How long to stay up before the reset. Normally this is a fixed
@@ -209,7 +226,18 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 		unsigned wait_s = after_s;
 
 #if SHIM_HW_DIAG
-		if (reset_stage != 0xffffffffU) {
+		if (panic_stage) {
+			/*
+			 * A fault: the wait is the fine grained eMMC step,
+			 * in seconds, so the computer reads it directly.
+			 */
+			uint64_t hz = rsr("cntfrq_el0");
+			uint64_t elapsed_s = (now() - shim_t0) / hz;
+			uint64_t deadline_s = (uint64_t)reset_stage;
+
+			wait_s = (deadline_s > elapsed_s) ?
+				 (unsigned)(deadline_s - elapsed_s) : 0;
+		} else if (reset_stage != 0xffffffffU) {
 			uint64_t hz = rsr("cntfrq_el0");
 			uint64_t elapsed_s = (now() - shim_t0) / hz;
 			unsigned stage = reset_stage > 12 ? 12 : reset_stage;
@@ -218,14 +246,28 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 			 * step that failed); fall back to the raw command
 			 * error if there is no higher level one.
 			 */
-			int err = emmc_last_error ? emmc_last_error :
-						emmc_last_cmd_error;
+			int err = emmc_first_error ? emmc_first_error :
+						emmc_first_cmd_error;
 			unsigned err_s = (err < 0) ?
 				 (unsigned)(-err + 1) * STAGE_ERR_STEP_S : 0;
 			uint64_t deadline_s = (uint64_t)stage * STAGE_STEP_S + err_s;
 
 			wait_s = (deadline_s > elapsed_s) ?
 				 (unsigned)(deadline_s - elapsed_s) : 0;
+			/*
+			 * DIAGNOSTIC ENCODING: report the raw values so
+			 * they can be read straight off the clock without
+			 * having to invert a formula. stage is in the
+			 * minutes part, error in the seconds part.
+			 */
+			if (SHIM_RAW_TIMING) {
+				unsigned raw = (stage & 0xf) * 60 +
+					       (unsigned)(-err) * 2;
+				uint64_t raw_deadline = (uint64_t)raw;
+
+				wait_s = (raw_deadline > elapsed_s) ?
+					 (unsigned)(raw_deadline - elapsed_s) : 0;
+			}
 			con_hex2("STAGE", "n=", stage, "err=", (uint32_t)err);
 			con_hex("WAIT", wait_s);
 		}
@@ -348,7 +390,26 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("X0", regs[0]);
 	con_hex("X1", regs[1]);
 	con_hex("X30", regs[29]);	/* stashed lr is just above the frame */
-	/* The log is already in scratch RAM; do not wait long. */
+	/*
+	 * The log is already in scratch RAM; do not wait long.
+	 *
+	 * The panic path must NOT try to write to the card again: the
+	 * fault very likely came from the eMMC driver, and a second
+	 * attempt would fault again and recurse (the "fault while
+	 * handling a fault" branch above). So the card write is skipped
+	 * here and the wait is used to report the stage of the fault.
+	 */
+	panic_stage = 1;
+	/*
+	 * Report where the fault happened through the wait time: the wait
+	 * is set to the fine grained eMMC step, so the computer can read
+	 * it straight off the clock.
+	 */
+	if (SHIM_RAW_TIMING)
+		reset_stage = emmc_step;
+	else if (reset_stage == 0xffffffffU)
+		reset_stage = emmc_first_stage != 0xff ?
+					emmc_first_stage : 0;
 	reset(15);
 }
 
@@ -927,8 +988,12 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * The stage of the eMMC bring-up goes into the time the phone stays
 	 * up, so that it can be read off the clock even when the card could
 	 * not be written to.
+	 *
+	 * emmc_first_* holds the outcome of the first attempt, which is the
+	 * one this has to report: reset() calls emmc_write_log() a second
+	 * time and that call would otherwise replace the stage.
 	 */
-	reset_stage = emmc_last_stage;
+	reset_stage = emmc_first_stage;
 	/* The log is in scratch RAM now, so there is no reason to linger. */
 	reset(15);
 }
