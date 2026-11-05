@@ -842,3 +842,154 @@ Nota: `tools/run-shim.sh` misura `t1 - t_fastboot_exit`, dove
 `t_fastboot_exit` e' il momento in cui il telefono lascia il fastboot.
 Quel momento include gia' il boot di LK, quindi non e' un riferimento
 pulito per l'inizio dello shim.
+
+---
+
+## 2026-11-05 — Il crash è in test_gic(), non nel driver eMMC
+
+Con il tracciamento fine (fasi numeriche + `emmc_step`), la codifica del
+tempo è cambiata in "un secondo per unità": il panic handler mette
+`phase_no + emmc_step` secondi nell'attesa, e `tools/run-shim.sh` lo
+decodifica.
+
+Risultati:
+
+| run | attesa | fase |
+|---|---|---|
+| `phase*20 + step` | 158,9 s | 7 (psci) o 8 (gic) |
+| micro-fasi psci/gic | 79,6 s | **80 = "gic (before test_gic)"** |
+
+Quindi **PSCI risponde** (`smc()` non e' il problema) e il crash e' dentro
+`test_gic()`.
+
+Nota sul DT: `msm8992-lg-h815.dts` contiene esplicitamente
+
+```
+/* psci is broken */
+/delete-node/ psci;
+```
+
+e le CPU usano `enable-method = "qcom,8994-arm-cortex-acc"`. Il kernel
+Android del G4 (`arch/arm64/kernel/psci.c`) cerca un nodo DT con
+`compatible = "arm,psci"`: senza, `psci_init()` restituisce `-ENODEV` e
+non registra `arm_pm_restart`/`pm_power_off`. Percio' **sul G4 il reboot
+del kernel Android non passa da PSCI**. Il nostro `smc(PSCI_SYSTEM_RESET)`
+in `reset()` pero' funziona: il TrustZone risponde a `smc #0`, e' il DT
+che non lo dichiara. (Da verificare con calma, ma il telefono rientra in
+recovery, quindi il reset avviene.)
+
+Sospetti dentro `test_gic()`, in ordine:
+
+1. `rsr("icc_sre_el1")` / `wsr("icc_sre_el1", ...)`: se il GIC non e' un
+   GICv3 con interfaccia sysreg, l'istruzione e' undefined -> trap.
+2. `rd32(GICD_BASE)` / `wr32(GICD_BASE, ...)`: `GICD_BASE` =
+   `0xf9000000`, se l'XPU lo blocca in EL1 non sicuro -> data abort.
+3. `find_gicr()` e i registri del redistribuitor (`0xf9002000`).
+
+Ora c'e' una micro-fase per ogni istruzione di `test_gic()` (81..109), per
+sapere esattamente quale faulta.
+
+---
+
+## 2026-11-05 — Tre bug trovati nel codice (non solo nel timing)
+
+Il canale del tempo era diventato troppo ambiguo (il jitter del boot
+TWRP e' di qualche secondo e l'unita' era di 1 s), quindi il formato e'
+stato cambiato in **eventi a tabella fissa, 20 s per slot**:
+
+```
+wait = 40 s + 20 s * indice_evento
+```
+
+Il jitter di +-5 s non sposta piu' la lettura nel slot vicino, e l'host
+non deve piu' indovinare nulla: `tools/run-shim.sh` ha la tabella.
+Un crash ha una base separata (500 s) e dentro c'e' l'offset dell'ELR in
+unita' da 32 byte, cosi' i due formati non si sovrappongono.
+
+### Bug 1 — `TG0` era 2 (64K) invece di 1 (16K)
+
+`shim/mmu.c`:
+
+```c
+#define TCR_VAL  (28UL | ... | (2UL << 14) | ...)   /* TG0 = 2 = 64K */
+```
+
+I bit `[15:14]` di TCR_EL1 sono TG0: 0 = 4K, 1 = 16K, **2 = 64K**. Le
+page table invece sono costruite per 16K (L2 = blocchi da 32MB con la
+base a bit 25, L3 = pagine da 16K). Con TG0 = 2 la passeggiata parte dal
+livello sbagliato: la base di un blocco L2 deve stare a bit 29 e ogni
+blocco copre 128MB, non 32MB. Tutte le traslazioni erano sbagliate e il
+primo accesso dopo `mmu_enable()` faultava — esattamente dove finiva
+l'ELR.
+
+### Bug 2 — la dcache invalidava le page table appena scritte
+
+```c
+dcache_inval_range(img_lo, img_hi);   /* dc ivac: invalida senza scrivere */
+... fill delle page table ...
+```
+
+Le page table stanno nel `.bss`, quindi dentro l'immagine: invalidarle
+**senza clean** scarta i dati e in RAM restano gli zeri (o spazzatura di
+LK). La traduzione non trovava niente. Ora il codice fa `dc civac`
+(clean+invalidate) **prima** di riempire le tabelle e un secondo
+`dc civac` **dopo**, solo sul pool delle tabelle, cosi' quello che la MMU
+legge e' quello che e' stato scritto.
+
+### Bug 3 — il core reset del controller eMMC
+
+`emmc_hc_mode()` replicava la sequenza di LK (`sdhci_msm_init`): clear
+HC_MODE, **core reset** (bit 7 di CORE+0x00), write del registro. Ma il
+core reset azzera anche la generazione del clock e il DLL/CDC: senza
+clock nessun comando completa. Ora la sequenza senza core reset viene
+provata per prima e quella con il core reset solo come secondo tentativo.
+
+### Cosa dice il telefono
+
+| run | attesa | evento |
+|---|---|---|
+| HC mode senza core reset, poi con | 51,3 s | 1: la carta non risponde a CMD5 ne' CMD7 |
+| + clock di card e classificazione | 431,8 s | 20: **il controller e' vivo e clockato, la carta non risponde** |
+
+La classificazione (registri letti prima di toccare qualcosa) esclude:
+core MMC non raggiungibile, capability vuote, clock spento, clock non
+stabile, linea di comando bloccata. Resta solo la carta: e' addormentata
+e la sequenza di risveglio non la convince.
+
+Percio' e' stata implementata la **re-identificazione completa**
+(CMD0 GO_INACTIVE -> CMD1 SEND_OP_COND -> CMD2 ALL_SEND_CID ->
+CMD3 SET_RELATIVE_ADDR -> CMD7 SELECT_CARD) al clock di identificazione
+(~400 kHz), che non presume niente sullo stato precedente della carta.
+
+Nota: il layout del registro COMMAND di questo controller **non** e' quello
+dello standard SDHCI: il riferimento Linux del kernel CAF usa
+
+```c
+#define SDHCI_MAKE_CMD(c, f) (((c & 0xff) << 8) | (f & 0xff))
+```
+
+cioe' l'indice del comando sta ai bit [13:8] e i flag nel byte basso
+(CRC = 0x08, index = 0x10, data present = 0x20). Il driver gia' usava
+questa convenzione: verificato, non un bug.
+
+### XNU: il porting SWEET e' gia' un telefono Qualcomm con device tree
+
+Il repo `dipa-studio/ios-sweet` non porta XNU su un iPhone: lo porta su
+un **Xiaomi** con un **device tree** (platform expert `IODTPlatformExpert`,
+timer virtuale letto dal DT, boot della CPU senza PSCI). E' esattamente il
+nostro caso, quindi la base e' riusabile:
+
+- `tools/mkadt.py` ha gia' il profilo `--device g4` (RAM map, GIC,
+  framebuffer, eMMC, compatible `lg,h815` + `qcom,msm8992`).
+- `shim/loader.c` sa gia' lanciare XNU (payload, ADT, boot_args, salto).
+- La build XNU gira in CI su `macos-14` (Xcode 15.x, `iig` compatibile):
+  non serve Xcode in locale.
+
+Adattamenti fatti ai patch:
+
+- `-march=armv8.2-a+crypto` -> `-march=armv8-a+crypto`: il G4 e' fatto
+  solo di Cortex-A53 (ARMv8.0); con armv8.2 il compilatore puo' emettere
+  istruzioni LSE/complex che l'A53 non ha (SIGILL).
+- Aggiunta la voce di `KernelConfigTables` con
+  `'IONameMatch' = 'lg,h815';` perche' il platform expert si attacchi al
+  nostro ADT e non solo a quello dello Xiaomi.

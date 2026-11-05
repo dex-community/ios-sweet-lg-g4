@@ -22,6 +22,7 @@
 #include "fdt.h"
 #include "mmu.h"
 #include "loader.h"
+#include "trail.h"
 
 int emmc_write_log(const char *text, unsigned len);
 extern unsigned emmc_last_stage;
@@ -34,6 +35,8 @@ extern int emmc_first_error;
 extern int emmc_first_cmd_error;
 /* The fine grained progress counter of the eMMC driver. */
 extern unsigned emmc_step;
+/* Why the card did not answer (emmc.c). */
+extern unsigned emmc_class;
 
 /*
  * The stage of the eMMC bring-up is encoded in the time the phone stays up
@@ -61,11 +64,144 @@ extern unsigned emmc_step;
 #ifndef SHIM_RAW_TIMING
 #define SHIM_RAW_TIMING		0
 #endif
+/*
+ * Fine timing: the diagnostic event, not the raw step.
+ *
+ *   wait = SHIM_FINE_BASE_S + 20 s * event index
+ *
+ * The event index comes from a fixed table, so the host can decode the
+ * wait time without knowing anything about the driver. The unit is 20 s
+ * because the boot of the phone (the bootloader plus TWRP) varies by a few
+ * seconds between runs: with a smaller unit the jitter would move the
+ * reading into the neighbouring slot.
+ *
+ * The base is larger than the time reset() spends in its own second
+ * emmc_write_log() call, otherwise the wait would clamp to 0 and the
+ * reading would be meaningless.
+ */
+#ifndef SHIM_FINE_TIMING
+#define SHIM_FINE_TIMING	0
+#endif
+#ifndef SHIM_FINE_BASE_S
+#define SHIM_FINE_BASE_S	40
+#endif
+/*
+ * A crash is reported with a base of its own, above the highest event
+ * slot (40 + 20 * 14 = 320), so the two encodings never overlap.
+ */
+#define SHIM_CRASH_BASE		500
+
+/*
+ * The event table. The index is what the host decodes; keep it in sync
+ * with tools/run-shim.sh.
+ */
+enum {
+	EV_ALL_OK = 0,	/* the log was written to the card and read back  */
+	EV_WAKE_FAIL,	/* the card answered to neither CMD5 nor CMD7        */
+	EV_CMD16_TIMEOUT,	/* CMD16 timed out                          */
+	EV_CMD16_ERR,		/* the controller reported an error         */
+	EV_CMD16_FATAL,	/* the card answered with a fatal R1          */
+	EV_EXTCSD_TIMEOUT,	/* the EXT_CSD read timed out              */
+	EV_EXTCSD_ERR,		/* the controller reported an error         */
+	EV_EXTCSD_OTHER,	/* the EXT_CSD read failed in another way   */
+	EV_WRITE_TIMEOUT,	/* the sector write timed out               */
+	EV_WRITE_ERR,		/* the controller reported an error         */
+	EV_OTHER,		/* the driver did not get that far          */
+	EV_READBACK_FAIL,	/* the read back failed or did not match    */
+	EV_MMU_NO_16K,		/* the core has no 16K granule              */
+	EV_MMU_FAIL,		/* mmu_enable() refused                     */
+	EV_MMU_OK,		/* the MMU is on with the 16K page tables   */
+	EV_INACCESSIBLE,	/* the controller does not answer at all    */
+	EV_NO_CAPS,		/* the capability registers are empty        */
+	EV_CLOCK_OFF,		/* the card clock is not enabled              */
+	EV_CLOCK_UNSTABLE,	/* the internal clock never stabilised        */
+	EV_CMD_INHIBIT,		/* the command line is stuck busy             */
+	EV_CARD_ABSENT,		/* the controller is fine, the card is not    */
+	EV_REINIT_FAIL,		/* the card does not answer to CMD0/1/2/3/7   */
+	EV_COUNT
+};
+/* The eMMC stage values, mirrored from emmc.c. */
+#define EV_STAGE_WAKE		4
+#define EV_STAGE_BLKLEN		3
+#define EV_STAGE_BLKLEN2	5
+#define EV_STAGE_EXTCSD		6
+#define EV_STAGE_WRITE		7
+#define EV_STAGE_READBACK	8
+#define EV_STAGE_DONE		9
+#define EV_STAGE_REINIT		10
+
 static unsigned reset_stage = 0xffffffffU;	/* 0xffffffff: not set */
 static uint64_t shim_t0;
 /* Set when the shim took a fault: the stage of the fault is reported
  * through the wait time, and the card write is skipped. */
 static int panic_stage;
+/* emmc_step right after the FIRST emmc_write_log(): the second call (from
+ * reset()) overwrites emmc_step, so it is captured here. */
+static unsigned first_step = 0xffffffffU;
+/* What mmu_enable() returned, for the event table. */
+static int shim_mmu_rc = -1;
+
+/*
+ * Which event the phone reports through the wait time: how far the eMMC
+ * bring-up got and, if it got all the way, what the MMU did.
+ */
+static unsigned shim_event_index(void)
+{
+	unsigned stage = emmc_first_stage;
+	int ce = emmc_first_cmd_error;
+	unsigned ev;
+
+	switch (stage) {
+	case EV_STAGE_DONE:
+		ev = EV_ALL_OK;
+		break;
+	case EV_STAGE_WAKE:
+		/* The card did not answer: the class says why. */
+		switch (emmc_class) {
+		case 1: ev = EV_INACCESSIBLE; break;
+		case 2: ev = EV_NO_CAPS; break;
+		case 3: ev = EV_CLOCK_OFF; break;
+		case 4: ev = EV_CLOCK_UNSTABLE; break;
+		case 5: ev = EV_CMD_INHIBIT; break;
+		case 6: ev = EV_CARD_ABSENT; break;
+		default: ev = EV_WAKE_FAIL; break;
+		}
+		break;
+	case EV_STAGE_BLKLEN:
+	case EV_STAGE_BLKLEN2:
+		ev = (ce == -3) ? EV_CMD16_ERR :
+		     ((ce == -4 || ce == -1) ? EV_CMD16_FATAL : EV_CMD16_TIMEOUT);
+		break;
+	case EV_STAGE_EXTCSD:
+		ev = (ce == -3) ? EV_EXTCSD_ERR :
+		     (ce == -2) ? EV_EXTCSD_TIMEOUT : EV_EXTCSD_OTHER;
+		break;
+	case EV_STAGE_WRITE:
+		ev = (ce == -3) ? EV_WRITE_ERR :
+		     (ce == -2) ? EV_WRITE_TIMEOUT : EV_OTHER;
+		break;
+	case EV_STAGE_READBACK:
+		ev = EV_READBACK_FAIL;
+		break;
+	case EV_STAGE_REINIT:
+		ev = EV_REINIT_FAIL;
+		break;
+	default:
+		ev = EV_OTHER;
+		break;
+	}
+
+	if (ev == EV_ALL_OK) {
+		/* The card worked, so report the MMU instead. */
+		if (shim_mmu_rc == -2)
+			ev = EV_MMU_NO_16K;
+		else if (shim_mmu_rc)
+			ev = EV_MMU_FAIL;
+		else
+			ev = EV_MMU_OK;
+	}
+	return ev;
+}
 
 #define RESTART_BOOTLOADER	0x77665500U
 
@@ -110,12 +246,13 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
 static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 extern char secondary_entry[];
+void shim_main(uint64_t x0, uint64_t x1, uint64_t x2);
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
 /* A numeric twin of "stage", so that the phase can be reported through
  * the wait time when the shim faults (the console is not readable). */
 static unsigned phase_no;
-#define PHASE(n)	(phase_no = (n))
+#define PHASE(n)	(phase_no = (n), trail(0x1000, (n)))
 static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -131,18 +268,25 @@ static uint64_t sgi_self(unsigned id)
 	       (1U << (m & 0xf));		/* target list: Aff0 */
 }
 
+/*
+ * PSCI call.
+ *
+ * On this device PSCI does not exist: the H815 device tree deletes the
+ * psci node ("/* psci is broken *\/") and the Android kernel falls back
+ * to the qcom,pshold driver for the reboot. Calling "smc #0" traps, so
+ * the call is not made at all and the function reports "not supported".
+ *
+ * The signature is kept so that the callers (test_smp, psci_line) stay
+ * compilable and can be re-enabled if a device with a real PSCI is ever
+ * targeted.
+ */
 static uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 {
-	register uint64_t x0 __asm__("x0") = fn;
-	register uint64_t x1 __asm__("x1") = a1;
-	register uint64_t x2 __asm__("x2") = a2;
-	register uint64_t x3 __asm__("x3") = a3;
-	__asm__ volatile("smc #0"
-			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
-			 :
-			 : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
-			   "x12", "x13", "x14", "x15", "x16", "x17", "memory");
-	return x0;
+	(void)fn;
+	(void)a1;
+	(void)a2;
+	(void)a3;
+	return 0xffffffffffffffffULL;	/* not supported */
 }
 
 static uint64_t now(void)
@@ -191,6 +335,7 @@ static void save_log(void)
 
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
+	trail(0x3000, after_s);
 	save_log();
 	con_skip();
 	{
@@ -232,15 +377,32 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 #if SHIM_HW_DIAG
 		if (panic_stage) {
 			/*
-			 * A fault: the wait is the fine grained eMMC step,
-			 * in seconds, so the computer reads it directly.
+			 * A fault: the wait is the phase number, in
+			 * seconds, so the computer reads it directly.
 			 */
 			uint64_t hz = rsr("cntfrq_el0");
 			uint64_t elapsed_s = (now() - shim_t0) / hz;
-			uint64_t deadline_s = (uint64_t)reset_stage;
+			/* reset_stage is 0xffffffff when the fault came before
+			 * anything set it (double fault): never wait ~4e9 s. */
+			uint64_t deadline_s = (reset_stage != 0xffffffffU) ?
+					      (uint64_t)reset_stage :
+					      (uint64_t)phase_no;
 
 			wait_s = (deadline_s > elapsed_s) ?
 				 (unsigned)(deadline_s - elapsed_s) : 0;
+		} else if (SHIM_FINE_TIMING) {
+			uint64_t hz = rsr("cntfrq_el0");
+			uint64_t elapsed_s = (now() - shim_t0) / hz;
+			unsigned ev = shim_event_index();
+			uint64_t deadline_s = SHIM_FINE_BASE_S + 20ULL * ev;
+
+			if (deadline_s <= elapsed_s)
+				con_hex("FINE", 0xbad0);	/* base too small */
+			wait_s = (deadline_s > elapsed_s) ?
+				 (unsigned)(deadline_s - elapsed_s) : 0;
+			con_hex2("FINE", "ev=", ev, "stage=", emmc_first_stage);
+			con_hex("STEP", first_step);
+			con_hex("WAIT", wait_s);
 		} else if (reset_stage != 0xffffffffU) {
 			uint64_t hz = rsr("cntfrq_el0");
 			uint64_t elapsed_s = (now() - shim_t0) / hz;
@@ -278,7 +440,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 		if (SHIM_FORCE_WAIT_S > 0)
 			wait_s = SHIM_FORCE_WAIT_S;
 #endif
-#ifndef SHIM_HW_DIAG
+#if !SHIM_HW_DIAG
 	/* QEMU build: no watchdog to kick, so just park and let the monitor
 	 * dump the framebuffer. */
 	(void)wait_s;
@@ -295,8 +457,21 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	 */
 	wr32(G4_RESTART_REASON, LK_RECOVERY_MODE);
 	__asm__ volatile("dsb sy" ::: "memory");
-	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	/*
+	 * Reset the phone by dropping PS_HOLD, NOT with PSCI.
+	 *
+	 * The H815 has no PSCI: its device tree says so explicitly
+	 * ("/* psci is broken *\/" and "/delete-node/ psci;"), the CPU
+	 * nodes use enable-method = "qcom,8994-arm-cortex-acc", and the
+	 * Android kernel's arm_pm_restart is the qcom,pshold driver
+	 * (drivers/power/reset/msm-poweroff.c), not psci_sys_reset.
+	 *
+	 * Calling smc(PSCI_SYSTEM_RESET) faults (the phase counter says
+	 * the crash is in smc(PSCI_VERSION)), so the PSCI call is gone.
+	 * Deasserting PS_HOLD is what the kernel does for the same job.
+	 */
 	wr32(G4_PSHOLD, 0);
+	__asm__ volatile("dsb sy" ::: "memory");
 #endif
 	for (;;)
 		__asm__ volatile("wfe");
@@ -355,6 +530,11 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		irq_handler();
 		return;
 	}
+	/* First thing, before anything that could fault again. */
+	trail(0x2000, (uint32_t)slot);
+	trail(0x2001, (uint32_t)rsr("elr_el1"));
+	trail(0x2002, (uint32_t)rsr("esr_el1"));
+	trail(0x2003, (uint32_t)rsr("far_el1"));
 
 	/*
 	 * A fault while handling a fault: the framebuffer may well be the
@@ -364,6 +544,9 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	 */
 	if (in_exc) {
 		con_disable();
+		/* Without this, reset() calls emmc_write_log() again; if that
+		 * is what faulted, it faults again, forever. */
+		panic_stage = 1;
 		reset(5);
 	}
 	in_exc = 1;
@@ -407,15 +590,50 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	/*
 	 * Report where the fault happened through the wait time.
 	 *
-	 * The wait is phase * PHASE_STEP_S + emmc_step seconds, so the
-	 * computer reads the phase of the shim and, inside it, the exact
-	 * step of the eMMC driver that faulted.
+	 * The wait is the phase number, in seconds, so the computer reads
+	 * it directly. The encoding is unambiguous by construction:
+	 *   1..10   the phase of the shim
+	 *   11..69  the step inside the eMMC driver (phase 2)
+	 *   70..109 the phase of the shim again (psci, gic, fdt)
+	 *   +128    the fault was on a secondary core
+	 *
+	 * The fine grained eMMC step is a fallback. The precise answer is
+	 * the faulting instruction, and the AArch64 exception link register
+	 * holds exactly that: elr_el1 is the address of the instruction
+	 * that took the fault. When the fault happened inside our own
+	 * image the offset from the image base is small, so it fits in
+	 * the wait time and pins the crash to a single instruction
+	 * instead of a whole step.
 	 */
-	if (SHIM_RAW_TIMING)
-		reset_stage = phase_no * 20 + emmc_step;
-	else if (reset_stage == 0xffffffffU)
-		reset_stage = emmc_first_stage != 0xff ?
-					emmc_first_stage : 0;
+	if (SHIM_RAW_TIMING) {
+		uint64_t mpidr = rsr("mpidr_el1");
+		uint64_t elr = rsr("elr_el1");
+		uintptr_t img = (uintptr_t)shim_main;
+		unsigned n;
+
+		if (phase_no == 2)
+			n = 10 + emmc_step;
+		else
+			n = phase_no;
+
+		/*
+		 * If elr points into our image, report the offset from
+		 * shim_main instead: it is more precise than the step.
+		 * The wait time is one byte, so the offset is counted in
+		 * 32 byte units (8 instructions): that covers 8 KiB of
+		 * code, which is the whole text section, and keeps the
+		 * number inside 0..255.
+		 */
+		if (elr >= img && elr < img + 0x8000)
+			n = (unsigned)((elr - img) / 32);
+		else if (elr >= img && elr < img + 0x100000)
+			n = (unsigned)((elr - img) / 32) & 0x7f;
+
+		reset_stage = SHIM_CRASH_BASE + n +
+			      (((mpidr & 0xffffff) != 0) ? 100 : 0);
+	} else if (reset_stage == 0xffffffffU)
+		reset_stage = SHIM_CRASH_BASE +
+			      (emmc_first_stage != 0xff ? emmc_first_stage : 0);
 	reset(15);
 }
 
@@ -539,62 +757,108 @@ static void irq_window(const char *label, uintptr_t r, int src)
 static void test_gic(void)
 {
 	stage = "gic sre";
+	/*
+	 * The MSM8992 has a GICv2 (DTS: qcom,msm-qgic2). 0xf9002000 is the
+	 * GICv2 CPU interface, not a GICv3 redistributor, and the ICC_* system
+	 * registers are UNDEFINED when ID_AA64PFR0_EL1.GIC is 0: the first
+	 * icc_sre_el1 read below would take a sync exception, turn the wait
+	 * time into a panic code and skip the final log write to the card.
+	 */
+	if (((rsr("id_aa64pfr0_el1") >> 24) & 0xf) == 0) {
+		con_str("GIC", "no GICv3 sysreg iface (GICv2 SoC), skip");
+		return;
+	}
+	/*
+	 * Sub-phases: the GIC is the part of this device that is most
+	 * likely to be wrong (wrong base, wrong interface version, or an
+	 * address the XPU does not let EL1 touch). Each step gets its own
+	 * phase number, so the wait time says exactly which one faults.
+	 */
+	PHASE(81);
 	uint64_t sre = rsr("icc_sre_el1");
+	PHASE(82);
 	if (!(sre & 1)) {
 		wsr("icc_sre_el1", sre | 1);
 		isb();
 	}
+	PHASE(83);
 	if (!(rsr("icc_sre_el1") & 1)) {
 		con_str("GIC", "no sysreg iface, skip");
 		return;
 	}
 
 	stage = "gic dist";
+	PHASE(84);
 	uint32_t dctlr = rd32(GICD_BASE);
+	PHASE(85);
 	/* Non-secure view (DS=0): bit0 EnableGrp1, bit1 EnableGrp1A, bit4 ARE_NS; Linux writes 0x13 */
 	wr32(GICD_BASE, dctlr | 0x13);
+	PHASE(86);
 	gicd_wait_rwp();
+	PHASE(87);
 	con_hex2("GICD", "was=", dctlr, "now=", rd32(GICD_BASE));
 
 	stage = "gic redist";
+	PHASE(88);
 	uintptr_t r = find_gicr();
 	if (!r) {
 		con_str("GICR", "not found");
 		return;
 	}
+	PHASE(89);
 	uint32_t waker = rd32(r + GICR_WAKER);
+	PHASE(90);
 	if (waker & 2) {
 		wr32(r + GICR_WAKER, waker & ~2U);
 		for (int i = 0; i < 100000 && (rd32(r + GICR_WAKER) & 4); i++)
 			;
 	}
+	PHASE(91);
 	con_hex2("GICR", "base=", r, "waker=", rd32(r + GICR_WAKER));
 
 	stage = "gic config";
+	PHASE(92);
 	uint32_t grp = rd32(r + GICR_IGROUPR0);
+	PHASE(93);
 	wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
+	PHASE(94);
 	uint32_t en_before = rd32(r + GICR_ISENABLER0);
+	PHASE(95);
 	uint32_t pri_before = rd32(r + GICR_IPRIORITYR + 16);	/* INTIDs 16..19 */
+	PHASE(96);
 	for (int id = 0; id < 32; id++)
 		wr8(r + GICR_IPRIORITYR + id, 0xa0);
+	PHASE(97);
 	wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
+	PHASE(98);
 	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0));
 	(void)grp;
 	(void)pri_before;
 
+	PHASE(99);
 	uint64_t ctlr = rsr("icc_ctlr_el1");
+	PHASE(100);
 	wsr("icc_ctlr_el1", ctlr & ~2ULL);	/* EOImode 0: EOIR also deactivates */
+	PHASE(101);
 	wsr("icc_pmr_el1", 0xf0);
+	PHASE(102);
 	wsr("icc_bpr1_el1", 0);
+	PHASE(103);
 	wsr("icc_igrpen1_el1", 1);
+	PHASE(104);
 	isb();
+	PHASE(105);
 	con_hex2("ICC", "ctlr=", ctlr, "grpen1=", rsr("icc_igrpen1_el1"));
 
 	stage = "gic vtimer";
+	PHASE(106);
 	irq_window("VTIMER", r, VTIMER_INTID);
+	PHASE(107);
 	stage = "gic sgi";
 	irq_window("SGI1", r, SGI_INTID);
+	PHASE(108);
 	wr32(r + GICR_ICENABLER0, 0xffffffff);
+	PHASE(109);
 	isb();
 }
 
@@ -872,6 +1136,7 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	uint64_t dtb = find_dtb(x0, x1, x2);
 
 	shim_t0 = now();
+	trail_init();
 	PHASE(1); stage = "boot";
 #if SHIM_HW_DIAG
 	/*
@@ -910,6 +1175,11 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 #if SHIM_HW_DIAG
 	PHASE(2); stage = "emmc";
 	emmc_write_log(con_log, (unsigned)con_log_len);
+	first_step = emmc_step;
+	trail(0x1100, (uint32_t)emmc_first_error);
+	trail(0x1101, emmc_first_stage);
+	trail(0x1102, (uint32_t)emmc_first_cmd_error);
+	trail(0x1103, first_step);
 #endif
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
@@ -925,6 +1195,7 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 
 	PHASE(5); stage = "mmu enable";
 	int rc = mmu_enable(&mi);
+	shim_mmu_rc = rc;
 
 	PHASE(6); stage = "fill on";
 	uint64_t fill_on = rc ? 0 : ticks_fill(RED);
@@ -961,11 +1232,24 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * Probe it anyway: if the TZ does answer, SMP becomes possible.
 	 */
 #if SHIM_HW_DIAG
-	PHASE(7); stage = "psci";
-	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	/*
+	 * The H815 device tree has no psci node ("psci is broken" in AOSP's
+	 * h815 port, and the node is explicitly deleted with
+	 * /delete-node/ psci;) and the CPU nodes use enable-method =
+	 * "qcom,8994-arm-cortex-acc", so PSCI is not available.
+	 *
+	 * Calling it faults: the phase counter puts the crash exactly in
+	 * smc(PSCI_VERSION). The probe is therefore gone. SMP is not
+	 * reachable through PSCI on this device; the CPU nodes would have
+	 * to be started with the "qcom,8994-arm-cortex-acc" method, which
+	 * is a different (and much deeper) piece of work.
+	 */
+	PHASE(70); stage = "psci";
+	con_str("PSCI", "not available on this device (no psci node)");
 	con_skip();
 
-	PHASE(8); stage = "gic";
+	PHASE(80); stage = "gic";
+	PHASE(81);
 	test_gic();
 #else
 	con_str("PSCI", "skipped (not a phone)");

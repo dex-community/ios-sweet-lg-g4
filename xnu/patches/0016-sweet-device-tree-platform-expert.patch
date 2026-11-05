@@ -12,6 +12,12 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 +    "     'IONameMatch'     = 'xiaomi,sweet';"
 +    "     'IOProbeScore'    = 10000:32;"
 +    "   },"
++    "   {"
++    "     'IOClass'         = SweetPlatformExpert;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IONameMatch'     = 'lg,h815';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
 +#endif
      "   {"
      "     'IOClass'         = IOPanicPlatform;"

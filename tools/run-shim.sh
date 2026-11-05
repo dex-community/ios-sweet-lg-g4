@@ -53,16 +53,66 @@ fi
 python3 - "$t0" "$t_fastboot_exit" "$t1" <<'EOF'
 import sys
 t0, tf, t1 = (float(x) if x else 0.0 for x in sys.argv[1:4])
+
+EVENTS = [
+    "ALL OK: the log was written to the card and read back",
+    "the card answered to neither CMD5 (awake) nor CMD7 (select)",
+    "CMD16 timed out",
+    "CMD16: the controller reported an error",
+    "CMD16: the card answered with a fatal R1",
+    "the EXT_CSD read (CMD8) timed out",
+    "the EXT_CSD read: the controller reported an error",
+    "the EXT_CSD read failed in another way",
+    "the sector write timed out",
+    "the sector write: the controller reported an error",
+    "the driver did not get that far (or failed in another way)",
+    "the read back failed or did not match what was written",
+    "the core has no 16K page granule: mmu_enable() refused",
+    "mmu_enable() refused for another reason",
+    "the MMU is on with the 16K page tables",
+    "the controller does not answer at all (0xffffffff on the registers)",
+    "the capability registers are empty",
+    "the card clock is not enabled",
+    "the internal clock never stabilised",
+    "the command line is stuck busy",
+    "the controller is fine but the card does not answer",
+    "the card does not answer to the full identification (CMD0/1/2/3/7)",
+]
+
 print(f"elapsed from fastboot reboot : {t1 - t0:.1f} s")
 if tf:
     e = t1 - tf
     print(f"elapsed from the bootloader : {e:.1f} s")
-    # The shim waits until stage * 20 s + (error + 1) * 2 s after it
-    # started; the bootloader itself takes about 1 s.
-    print("stage / error candidates:")
-    for stage in range(0, 13):
-        for err in range(0, 12):
-            total = 1 + stage * 20 + (err + 1) * 2
-            if abs(total - e) < 2.0:
-                print(f"  stage {stage:2d}, error {-(err+1):3d} -> {total} s")
+    # The bootloader + the TWRP boot take a fixed amount of time; the rest
+    # is what the shim waited, and the shim encodes its diagnostic event
+    # in it: 40 s plus 20 s per event slot.
+    #
+    # BOOT_OVERHEAD was measured with two builds that forced the wait
+    # (FORCE_WAIT_S=5 -> 40.2 s, FORCE_WAIT_S=60 -> 95.1 s: a
+    # difference of 54.9 s for a difference of 55 s of wait). The boot
+    # time jitters by a few seconds, which is why the event unit is 20 s.
+    BOOT_OVERHEAD = 35.2
+    wait = e - BOOT_OVERHEAD
+    print(f"shim wait                   : {wait:.1f} s")
+    if wait < 0:
+        print("  (the shim waited less than the boot overhead: it crashed "
+              "before the timing channel could encode anything)")
+        raise SystemExit
+    n = int(round(wait))
+    if n >= 500:
+        off = n - 500
+        if off >= 100:
+            off -= 100
+            print(f"  -> CRASH on a secondary core: the fault was {off} x 32 "
+                  f"bytes after shim_main (0x{off * 32:x})")
+        else:
+            print(f"  -> CRASH: the fault was {off} x 32 bytes after "
+                  f"shim_main (0x{off * 32:x})")
+    elif n >= 40:
+        ev = int(round((n - 40) / 20.0))
+        ev = max(0, min(ev, len(EVENTS) - 1))
+        print(f"  -> event {ev}: {EVENTS[ev]}")
+    else:
+        print(f"  -> too short to decode ({n} s): the overhead estimate is "
+              "off, or the shim died early")
 EOF

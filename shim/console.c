@@ -79,6 +79,8 @@ void con_clear(uint32_t bg)
 
 static void put_char(int col, char ch, uint32_t fg)
 {
+	if (!con_fb_on)
+		return;
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];
@@ -154,10 +156,15 @@ static void log_line(const char *label, const char *s)
 		return;
 	for (const char *p = label; *p && n < CON_LOG_SIZE - 2; p++)
 		con_log[n++] = *p;
+	if (n < CON_LOG_SIZE - 2)
+		con_log[n++] = ' ';
 	for (const char *p = s; *p && n < CON_LOG_SIZE - 2; p++)
 		con_log[n++] = *p;
 	con_log[n++] = '\n';
-	con_log[n++] = 0;
+	/* Terminate, but do not count the NUL: it used to be part of the
+	 * length, so the saved log had "\n\0" after every line and con_repaint
+	 * drew a blank line between all of them. */
+	con_log[n] = 0;
 	con_log_len = n;
 }
 
@@ -183,7 +190,31 @@ void con_hex(const char *label, uint64_t v)
 void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint32_t vb)
 {
 	char buf[9];
-	int col = put_str(0, label, YELLOW);
+	char text[48];
+	int t = 0;
+	int col;
+
+	/*
+	 * Build the same line for the ASCII log. This function used to paint
+	 * only: on the phone the panel is never visible, so every con_hex2()
+	 * line (EMMC prepare=, STAGE, WDT, GICD, ...) was missing from the
+	 * log that reaches the card.
+	 */
+	for (const char *p = a; *p && t < 20; p++)
+		text[t++] = *p;
+	fmt_hex(text + t, va, 8);
+	t += 8;
+	if (b) {
+		text[t++] = ' ';
+		for (const char *p = b; *p && t < 38; p++)
+			text[t++] = *p;
+		fmt_hex(text + t, vb, 8);
+		t += 8;
+	}
+	text[t] = 0;
+	log_line(label, text);
+
+	col = put_str(0, label, YELLOW);
 	col = col < LABEL_COLS ? LABEL_COLS : col + 1;
 	col = put_str(col, a, YELLOW);
 	fmt_hex(buf, va, 8);

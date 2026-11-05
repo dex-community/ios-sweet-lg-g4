@@ -39,8 +39,16 @@
 #define WB_FLAGS	(D_ATTR(ATTR_WB) | D_SH_INNER | D_AF | D_UXN)
 #define NC_FLAGS	(D_ATTR(ATTR_NC) | D_SH_OUTER | D_AF | D_PXN | D_UXN)
 
-/* TCR: T0SZ=28, IRGN0/ORGN0=WBWA, SH0=inner, TG0=16K, EPD1, TG1=16K, IPS=36 bit */
-#define TCR_VAL		(28UL | (1UL << 8) | (1UL << 10) | (3UL << 12) | (2UL << 14) | \
+/*
+ * TCR: T0SZ=28, IRGN0/ORGN0=WBWA, SH0=inner, TG0=16K, TG1=16K, IPS=36 bit.
+ *
+ * TG0 is bits [15:14]: 0 = 4K, 1 = 16K, 2 = 64K. It was 2 (64K) while the
+ * page tables are built for 16K, so every translation walked the wrong
+ * level: with TG0=2 the level 2 block covers 128MB and its base address
+ * starts at bit 29, while the table stores 32MB blocks starting at bit 25.
+ * The first store after mmu_enable() therefore faulted.
+ */
+#define TCR_VAL		(28UL | (1UL << 8) | (1UL << 10) | (3UL << 12) | (1UL << 14) | \
 			 (28UL << 16) | (1UL << 23) | (1UL << 30) | (1UL << 32))
 
 #define SCTLR_M		(1UL << 0)
@@ -59,15 +67,22 @@ extern char _head[], _end[];
 extern uint64_t shim_runtime_base;
 uint64_t shim_runtime_base;
 
-/* 1 L2 + up to 2 L3 tables, plus slack to align to 16K at runtime */
-static uint64_t pt_pool[4 * NENT] __attribute__((aligned(4096)));
+/* 1 L2 + up to 2 L3 tables. The pool has to start on a 16K boundary: it is
+ * the base of the level 2 table, and the low bits of TTBR0 are RES0. */
+static uint64_t pt_pool[4 * NENT] __attribute__((aligned(16384)));
 
-static void dcache_inval_range(uintptr_t start, uintptr_t end)
+/*
+ * Clean and invalidate a range. The clean matters: the bootloader may have
+ * loaded the image (or the .bss the page tables live in) with the cache on
+ * and never written it back to RAM, so an invalidation without a clean
+ * would throw the data away instead of moving it to RAM.
+ */
+static void dcache_civac_range(uintptr_t start, uintptr_t end)
 {
 	uint64_t line = 4UL << ((rsr("ctr_el0") >> 16) & 0xf);
 
 	for (uintptr_t a = start & ~(line - 1); a < end; a += line)
-		__asm__ volatile("dc ivac, %0" : : "r"(a) : "memory");
+		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
@@ -87,7 +102,7 @@ int mmu_enable(struct mmu_info *info)
 	uintptr_t base = (uintptr_t)shim_runtime_base;
 	uintptr_t img_lo = (base + (uintptr_t)_head) & ~(PG_SIZE - 1);
 	uintptr_t img_hi = (base + (uintptr_t)_end + PG_SIZE - 1) & ~(PG_SIZE - 1);
-	uintptr_t pool = ((uintptr_t)pt_pool + PG_SIZE - 1) & ~(PG_SIZE - 1);
+	uintptr_t pool = (uintptr_t)pt_pool;
 	uint64_t *l2 = (uint64_t *)pool;
 	int n_l3 = 0;
 
@@ -114,6 +129,17 @@ int mmu_enable(struct mmu_info *info)
 	if (((img_hi - 1) >> BLK_SHIFT) - (img_lo >> BLK_SHIFT) > 1)
 		return -1;	/* only room for two L3 tables */
 
+	/*
+	 * The image lines may be stale in the cache from the bootloader, and
+	 * the bootloader may have loaded the image with the cache on and
+	 * never written it back: clean it to RAM and drop the stale lines, so
+	 * that the code about to run and the .bss about to be used are the
+	 * ones the MMU will find in RAM. This has to happen BEFORE the page
+	 * tables are written, because the tables live in that .bss.
+	 */
+	dcache_civac_range(img_lo, img_hi);
+	__asm__ volatile("ic iallu; dsb sy; isb" ::: "memory");
+
 	/* L2: Device everywhere RAM or MMIO can be (first 8GB), rest unmapped */
 	zero_table(l2);
 	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++)
@@ -133,9 +159,13 @@ int mmu_enable(struct mmu_info *info)
 	}
 	info->n_l3 = n_l3;
 
-	/* Image lines may be stale in the cache from ABL; we wrote memory directly. */
-	dcache_inval_range(img_lo, img_hi);
-	__asm__ volatile("ic iallu; dsb sy; isb" ::: "memory");
+	/*
+	 * The tables are in the .bss, so they are in the cache: put them in
+	 * RAM before the MMU starts walking them. An invalidation without a
+	 * clean would leave RAM with the old contents and the first
+	 * translation would fault.
+	 */
+	dcache_civac_range(pool, pool + (1 + n_l3) * PG_SIZE);
 
 	wsr("mair_el1", MAIR_VAL);
 	wsr("tcr_el1", TCR_VAL);
