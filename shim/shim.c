@@ -112,6 +112,10 @@ static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 extern char secondary_entry[];
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
+/* A numeric twin of "stage", so that the phase can be reported through
+ * the wait time when the shim faults (the console is not readable). */
+static unsigned phase_no;
+#define PHASE(n)	(phase_no = (n))
 static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -401,12 +405,14 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	 */
 	panic_stage = 1;
 	/*
-	 * Report where the fault happened through the wait time: the wait
-	 * is set to the fine grained eMMC step, so the computer can read
-	 * it straight off the clock.
+	 * Report where the fault happened through the wait time.
+	 *
+	 * The wait is phase * PHASE_STEP_S + emmc_step seconds, so the
+	 * computer reads the phase of the shim and, inside it, the exact
+	 * step of the eMMC driver that faulted.
 	 */
 	if (SHIM_RAW_TIMING)
-		reset_stage = emmc_step;
+		reset_stage = phase_no * 20 + emmc_step;
 	else if (reset_stage == 0xffffffffU)
 		reset_stage = emmc_first_stage != 0xff ?
 					emmc_first_stage : 0;
@@ -866,7 +872,7 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	uint64_t dtb = find_dtb(x0, x1, x2);
 
 	shim_t0 = now();
-	stage = "boot";
+	PHASE(1); stage = "boot";
 #if SHIM_HW_DIAG
 	/*
 	 * On the phone the console starts switched off. The splash
@@ -902,25 +908,25 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * trail it leaves behind says how far the card bring-up got.
 	 */
 #if SHIM_HW_DIAG
-	stage = "emmc";
+	PHASE(2); stage = "emmc";
 	emmc_write_log(con_log, (unsigned)con_log_len);
 #endif
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
-	stage = "loader";
+	PHASE(3); stage = "loader";
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
 
 	/* No payload: run the diagnostics so the screen shows what we learned. */
-	stage = "fill off";
+	PHASE(4); stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);
 	uint64_t mem_off = ticks_mem();
 
-	stage = "mmu enable";
+	PHASE(5); stage = "mmu enable";
 	int rc = mmu_enable(&mi);
 
-	stage = "fill on";
+	PHASE(6); stage = "fill on";
 	uint64_t fill_on = rc ? 0 : ticks_fill(RED);
 	uint64_t mem_on = rc ? 0 : ticks_mem();
 	if (rc)
@@ -955,11 +961,11 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * Probe it anyway: if the TZ does answer, SMP becomes possible.
 	 */
 #if SHIM_HW_DIAG
-	stage = "psci";
+	PHASE(7); stage = "psci";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
 	con_skip();
 
-	stage = "gic";
+	PHASE(8); stage = "gic";
 	test_gic();
 #else
 	con_str("PSCI", "skipped (not a phone)");
@@ -970,10 +976,10 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * The diagnostics above clear the screen, so the device tree is
 	 * dumped last: on the phone this is what tells us the real RAM map.
 	 */
-	stage = "fdt";
+	PHASE(9); stage = "fdt";
 	dump_fdt(dtb);
 
-	stage = "done";
+	PHASE(10); stage = "done";
 #if SHIM_HW_DIAG
 	/*
 	 * Last chance to show something on the panel. The bootloader left the
