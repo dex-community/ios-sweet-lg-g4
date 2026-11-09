@@ -2033,3 +2033,20 @@ Per prevenire qualsiasi bootloop in assenza dei tasti fisici:
   - Immagine SystemOS: `087-86593-047.dmg` (2.6 GB)
   - Immagine AppOS: `087-86715-047.dmg` (10 MB)
 - Script di creazione volume nativo su macOS disponibile in `/Users/io/Dev/ios/lg g4/UniXNU-lumia950xl/scripts/mkiosroot-root.sh` (utilizza `hdiutil` e `ditto` preservando permessi, proprietari e link simbolici/hardlink senza richiedere fuse).
+
+### 5. Creazione e Scrittura del Rootfs iOS 16 su `userdata` (Hardware eMMC)
+- **Generazione Volume HFS+**:
+  - Creato `/Users/io/Dev/ios/ios-root-work/ios-root.sparseimage` (17.5 GB, HFS+ Journaled Case-Sensitive, etichetta `iOSRoot`, UUID `CBE356DE-75C3-3B85-9FF5-4531C519AE23`).
+  - Copiati decompressi con `ditto` OS Root, SystemOS Cryptex (`/private/preboot/Cryptexes/OS`) e AppOS Cryptex (`/private/preboot/Cryptexes/App`).
+  - Eseguito `stage-ios-root.py`: 63 hardlink cryptex, 44 file di cache dyld (`/System/Library/Caches/com.apple.dyld`), `/sbin/launchd` proprietario `0:0` permessi `0755`, `launchd.plist` modificato (`_PanicOnCrash` rinominato in `_PanicOnCrasX`, rimossi job `CommCenter`), creati container e marker diagnostici.
+  - Verificato con `fsck_hfs`: `The volume iOSRoot appears to be OK`.
+- **Scrittura Diretta su Partizione Fisica**:
+  - Smontati `/data` e `/sdcard` in TWRP.
+  - Eseguito streaming compresso zlib al volo via `adb exec-in` direttamente su `/dev/block/bootdevice/by-name/userdata` (`mmcblk0p50`).
+  - Scritti tutti i 17.500 MB (17.09 GiB) in 557 secondi (~31.4 MB/s medi) con `sync` finale.
+- **Verifica su Telefono**:
+  - Letto offset 1024 di `/dev/block/bootdevice/by-name/userdata`:
+    ```text
+    00000000  48 58 00 05 80 00 21 00  48 46 53 4a 00 00 00 8a  |HX....!.HFSJ....|
+    ```
+    `HX` (HFS+ Case-Sensitive), versione 5, `HFSJ` (Journaled), 4.478.976 blocchi da 4096 byte. La partizione `userdata` è pronta e integra per il boot di iOS 16.
