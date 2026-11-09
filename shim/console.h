@@ -53,7 +53,7 @@ extern uint32_t con_fb_w, con_fb_h, con_fb_stride;
  * shim copies it into scratch RAM, where it survives the reset and can be
  * read back from a recovery with /dev/mem.
  */
-#define CON_LOG_SIZE	16384
+#define CON_LOG_SIZE	32768
 extern char con_log[];
 extern int con_log_len;
 

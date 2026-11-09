@@ -21,7 +21,9 @@
  * one of our own rings): on a busy area the trail simply stays off and
  * nothing is written. Override with -DG4_TRAIL_OFF=0x... -DG4_TRAIL_SIZE=0x...
  *
- * Everything is a no-op in the QEMU build (SHIM_HW_DIAG=0).
+ * Everything is a no-op in the QEMU build (SHIM_HW_DIAG=0) and in the
+ * model build (SHIM_EMMC_MODEL=1): IMEM does not exist under QEMU, so
+ * writing the trail there would be a data abort.
  */
 #pragma once
 #include <stdint.h>
@@ -40,7 +42,7 @@
 #define TRAIL_HDR	16u
 #define TRAIL_N		((G4_TRAIL_SIZE - TRAIL_HDR) / 8u)
 
-#if SHIM_HW_DIAG
+#if SHIM_HW_DIAG && !SHIM_EMMC_MODEL
 
 #ifndef TRAIL_MS
 static inline uint32_t trail_ms(void)
@@ -96,7 +98,37 @@ static inline void trail(uint32_t code, uint32_t val)
 	TRAIL_DSB();
 }
 
+/*
+ * Has a code ever been written to the trail?
+ *
+ * The ring survives a reset (that is the point of IMEM), so this answers
+ * "did a PREVIOUS boot already do this?". The shim uses it to make a hang
+ * self-limiting: a phase that hangs leaves its marker behind, and the next
+ * boot (the watchdog reset, or the manual power cycle) skips that phase
+ * instead of hanging again. Without it a hanging phase would hang the phone
+ * on every single boot, forever.
+ */
+static inline int trail_seen(uint32_t code)
+{
+	volatile uint32_t *p = (volatile uint32_t *)TRAIL_BASE;
+	uint32_t n, i;
+
+	if (p[0] != TRAIL_MAGIC)
+		return 0;
+	n = p[1];
+	if (n > TRAIL_N)
+		n = TRAIL_N;
+	for (i = 0; i < n; i++) {
+		uint32_t slot = (n - 1 - i) % TRAIL_N;
+
+		if ((p[4 + slot * 2] & 0xffffu) == (code & 0xffffu))
+			return 1;
+	}
+	return 0;
+}
+
 #else
 static inline void trail_init(void) {}
 static inline void trail(uint32_t code, uint32_t val) { (void)code; (void)val; }
+static inline int trail_seen(uint32_t code) { (void)code; return 0; }
 #endif

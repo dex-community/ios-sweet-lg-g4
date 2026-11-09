@@ -50,9 +50,10 @@ if [ -z "$found" ]; then
 	exit 1
 fi
 
-python3 - "$t0" "$t_fastboot_exit" "$t1" <<'EOF'
+python3 - "$t0" "$t_fastboot_exit" "$t1" "${MODE:-events}" <<'EOF'
 import sys
 t0, tf, t1 = (float(x) if x else 0.0 for x in sys.argv[1:4])
+mode = sys.argv[4] if len(sys.argv) > 4 else "events"
 
 EVENTS = [
     "ALL OK: the log was written to the card and read back",
@@ -80,6 +81,30 @@ EVENTS = [
     "the controller was gating the card clock (CORE_CLK_PWRSAVE)",
 ]
 
+# The diagnostic build sweeps the bring-up variants in one boot and reports
+# the matrix variant x stage through the wait time:
+#
+#   wait = 60 s + 25 s * variant + 10 s * stage
+#
+# (see shim/emmc_diag.inc). The units are much bigger than the jitter of the
+# boot time, so the decoding is unambiguous.
+DIAG_VARIANTS = [
+    "control: bus power 3.3 V (0x0f), no extra acknowledgement",
+    "control + the LK's PWRCTL acknowledgement (CORE+0xe8 = 5)",
+    "control + the acknowledgement + 10 s before the identification",
+    "control without writing HC+0x29 at all (H4)",
+    "the voltage the factory LK really uses on this CAPS1 (1.8 V)",
+    "1.8 V + the LK's PWRCTL acknowledgement",
+    "the LK's registers (INT_ENABLE, CTRL1 = 0x10) at 3.3 V",
+    "the LK's registers at 1.8 V",
+]
+DIAG_STAGES = [
+    "nothing answered (CMD0/CMD1)",
+    "CMD1 answered, the card never became ready",
+    "CMD1 ready, CMD2/CMD3/CMD7 failed",
+    "the card is identified",
+]
+
 print(f"elapsed from fastboot reboot : {t1 - t0:.1f} s")
 if tf:
     e = t1 - tf
@@ -92,7 +117,13 @@ if tf:
     # (FORCE_WAIT_S=5 -> 40.2 s, FORCE_WAIT_S=60 -> 95.1 s: a
     # difference of 54.9 s for a difference of 55 s of wait). The boot
     # time jitters by a few seconds, which is why the event unit is 20 s.
-    BOOT_OVERHEAD = 35.2
+    #
+    # The two real runs of the eMMC builds (2026-11-05) give a smaller
+    # overhead: 467.5 s elapsed with the event 20 (deadline 440 s) -> 27.5 s,
+    # and 486.6 s with the event 21 (deadline 460 s) -> 26.6 s. The value
+    # below is the average of the two: the two runs decode to the same
+    # events with it as with 35.2 s.
+    BOOT_OVERHEAD = 27.0
     wait = e - BOOT_OVERHEAD
     print(f"shim wait                   : {wait:.1f} s")
     if wait < 0:
@@ -109,6 +140,19 @@ if tf:
         else:
             print(f"  -> CRASH: the fault was {off} x 32 bytes after "
                   f"shim_main (0x{off * 32:x})")
+    elif mode == "diag":
+        if n < 60:
+            print(f"  -> too short to decode ({n} s): the overhead estimate "
+                  "is off, or the shim died early")
+        else:
+            k = n - 60
+            var = k // 25
+            stage = (k % 25) // 5
+            if var >= len(DIAG_VARIANTS):
+                print(f"  -> diagnostic code out of range ({n} s)")
+            else:
+                print(f"  -> variant {var}: {DIAG_VARIANTS[var]}")
+                print(f"  -> stage   {stage}: {DIAG_STAGES[stage]}")
     elif n >= 40:
         ev = int(round((n - 40) / 20.0))
         ev = max(0, min(ev, len(EVENTS) - 1))

@@ -1022,3 +1022,767 @@ immagine e guardare se XNU arriva almeno a "init alive". Le incognite
 restanti, in ordine: il driver eMMC in XNU (il porting SWEET legge la root
 da UFS), il D22AP ADT per l'identita' del userland, e il display (il
 framebuffer del G4 e' nella secure region, protetto dall'XPU).
+
+### Aggiornamento 2026-11-05 18:10 — raccolta dati grezzi eMMC (sessione di misura)
+
+Obiettivo della sessione: raccogliere dati, non correggere niente. Tutto quello
+che segue e' misura reale; nessuna ipotesi e' stata applicata al codice.
+
+**Run di misura sul telefono (2026-11-05 17:59:32Z - 18:07:47Z)**
+
+Immagine flashata: `shim/out/shim-boot.img` (build `RAW_TIMING=1 FINE_TIMING=1`,
+sha256 `58ffdb5aea3690f51aa41ba89b907a8c45dc8565d7abcb4256dada5bea647ead`).
+Esito grezzo del canale temporale:
+
+```
+elapsed from fastboot reboot : 486.9 s
+elapsed from the bootloader : 486.6 s
+shim wait                   : 451.4 s
+  -> event 21: the card does not answer to the full identification (CMD0/1/2/3/7)
+```
+
+451,4 s contro i 451,3 s della sessione precedente: la misura e' riproducibile.
+Evento 21 = la carta non risponde ne' a CMD0/CMD1/CMD2/CMD3/CMD7.
+
+Dopo il run i 4 settori di log (spare1 LBA 259328/259329, spare2 LBA 385280/385281)
+sono **tutti zero** (512 byte di 0x00): il shim non ha scritto niente, la carta
+e' muta. Marcatori `G4SHIMLG` / `G4SHIMDG` assenti.
+
+**Vicoli morti (errori esatti)**
+
+- Lettura della RAM / IMEM dal recovery: `/dev/mem` non esiste; `mknod /dev/mem c 1 1`
+  va a buon fine ma l'apertura fallisce con `No such device or address` (ENXIO).
+  Idem `/dev/kmem` (`mknod /dev/kmem c 1 2` -> ENXIO).
+- `/proc/kcore`, `/dev/fb0`, `/proc/device-tree`, `/sys/firmware/devicetree/base`:
+  assenti. `/sys/class/remaproc` assente. Nessun `/proc/config.gz`.
+- `clk_summary` non esiste in questo kernel: esistono le directory per clock.
+- `tools/fb2text.py` sul dump QEMU non riconosce i glifi (geometria diversa dal
+  default 640x480); il testo del console e' stato quindi letto direttamente dal
+  dump di RAM di QEMU (buffer `con_log`).
+
+**Dati nuovi raccolti**
+
+- `mmc0:0001/state` = `0x00000209`, `mmc0:0001/status` = `00000900`.
+- `ios` mostra `clock: 200000000 Hz / actual clock: 172000000 Hz` **subito dopo
+  il boot** e `clock: 0 Hz` nei campioni successivi (1 s dopo): il clock della
+  carta viene gatingato quando la carta e' inattiva. `max_clock` = 344000000.
+- `gcc_sdcc1_apps_clk` CBCR = 0x80004ff0, rate 344 MHz; `sdcc1_apps_clk_src`
+  CMD_RCGR 0x80000000, CFG_RCGR 0x00000501 (M=0, N=0, D=0xff);
+  `gcc_sdcc1_ahb_clk` CBCR 0x8000cff0, rate 0.
+- LK di fabbrica: `target_uninit` (0x0f900574) chiama `mmc_put_card_to_sleep`
+  (0x0f916a6c) e poi `sdhci_mode_disable` (0x0f914940). `mmc_put_card_to_sleep`
+  emette **CMD7** (arg 0, deselect) e **CMD5** (arg = (RCA<<16)|0x8000 =
+  0x00028000, sleep) e non scrive nessun registro 0xf9824xxx / 0xfc40xxxx.
+  `sdhci_mode_disable` scrive solo CORE+0x78 (HC_MODE) azzerando il bit 0.
+
+Gli artefatti grezzi sono in `research/raw-2026-11-05/`, il disassembly del LK in
+`research/lk-g4/dis-4.*.txt`.
+
+Il telefono e' stato ripristinato con `backup/boot-stock.img` e verificato su
+Android 13 (`sys.boot_completed=1`).
+
+### Aggiornamento 2026-11-05 22:20 — run 3 (bring-up che replica l'init dell'LK) e disegno del run 4 diagnostico
+
+**Run 3 sul telefono (2026-11-05 20:56-21:05 UTC)**
+
+Immagine: `shim/out/shim-boot.img`, build `RAW_TIMING=1 FINE_TIMING=1`,
+sha256 `8033989a56c69d079afafd3b8eb89965ce5dc75606d92434e716746ed2ce0ee6`.
+
+```
+elapsed from fastboot reboot : 467.8 s
+elapsed from the bootloader : 467.5 s
+shim wait                   : 432.3 s
+  -> event 20: the controller is fine but the card does not answer
+```
+
+Evento 20 = `EV_CARD_ABSENT`: il controller e' sano (capabilities lette, clock
+interno stabile, software-reset azzerato, HC mode riattivato) ma la carta
+**non risponde a CMD0/CMD1**. I 4 settori di log (spare1 LBA 259328/259329,
+spare2 LBA 385280/385281) sono **tutti 0x00**: il shim non ha scritto nulla,
+quindi il fallimento e' avvenuto prima. Dati grezzi e checksum in
+`research/raw-2026-11-05/run-3-bringup/` (README.md + run-output.txt + 4 .bin).
+Telefono ripristinato su Android 13 con `boot` stock (`sys.boot_completed=1`).
+
+L'evento 20 e' una codifica **nuova**, aggiunta in questa sessione: prima,
+"CMD0/CMD1 senza risposta" e "CMD1 risposta ma mai pronta" finivano entrambi
+sull'evento 21. Ora il primo e' l'evento 20 (`CLASS_CARD_ABSENT`) e il secondo
+l'evento 21 (`STAGE_REINIT`).
+
+**Modifiche fatte al codice dell'altra AI (solo integzione e diagnostica)**
+
+1. `shim/emmc.c`: ripristinati `unsigned emmc_class` e l'enum `CLASS_*`,
+   piu' `STAGE_REINIT`. Senza, `shim.c` non linkava:
+   `undefined reference to 'emmc_class'` (l'altra AI aveva cancellato la
+   variabile insieme a `emmc_classify()`).
+2. `shim/emmc_lk_bringup.inc`: ogni punto di fallimento imposta ora
+   `emmc_last_stage` / `emmc_class`.
+3. `shim/emmc.c`: `emmc_wake()` (solo percorso legacy) condizionato a
+   `!EMMC_LK_BRINGUP` (warning `-Wunused-function`).
+4. `tools/run-shim.sh`: `BOOT_OVERHEAD` ricalibrato da 35,2 s a **27,0 s**.
+   Con 35,2 i due run reali (evento 21 e evento 20) venivano decodificati
+   bene per caso (scarto < 1 slot); il valore vero, ricavato dai due run
+   (467,5 - 440 = 27,5 s e 486,6 - 460 = 26,6 s), e' 27 s.
+
+**Verifica delle affermazioni della seconda AI (7/7 confermate a suo favore)**
+
+| affermazione | esito | fonte |
+|---|---|---|
+| la polarita' del loop CMD1 (uscire quando bit31 e' attivo) | **confermata** | `dis-4.9-c`: `cmp r3,#0; blt` sulla risposta R3 letta come valore con segno -> esce con bit31 = 1; e `lk-source-recovered/mmc.c:751` (`if (!(mmc_resp & MMC_BOOT_OCR_BUSY)) return CARD_BUSY`) |
+| OCR `0x40ff8000` | **confermato** (e con un dettaglio in piu') | `MMC_BOOT_OCR_27_36 = (0x1FF << 15)` e `MMC_BOOT_OCR_SEC_MODE = (2 << 29)` -> `host->ocr = 0x40ff8000` (`lk-source-recovered/mmc.h:322`, `mmc.c:1900`) |
+| `HC+0x11c` = caps override | **confermato**, ed e' un indirizzo **HC**, non CORE | il driver CAF scrive `host->ioaddr + CORE_VENDOR_SPEC_CAPABILITIES0` dove `host->ioaddr` e' la base HC: l'indirizzo assoluto e' 0xf9824a1c = HC+0x11c, come nell'LK (`dis-4.9-d` 0x0f914038) |
+| clock: divisore pari 2..2046 in campo 10 bit | **confermato** | `dis-4.9-m-0f912ec4.txt`: `mov r4,#2` ... `cmp r4,#0x7fe`, `lsr #1`, `ubfx #8,#2`, `lsl #8`, `orr #1` |
+| base clock = `caps[15:8] x 1e6` | **confermato** | `dis-4.9-m-0f913954.txt`: `ubfx ip, r3, #8, #8` + `mul r0, r0, ip` con r0 = 0xf4240 |
+| maschera SW reset = 1 | **confermato** | `dis-4.9-a`: `mov r1,#1` |
+| `HC+0x29` scritto dall'LK | **confermato** ma con un valore diverso: 14 e 15 = 3,3 V | `dis-4.9-m-0f913954.txt` 0x0f913a0c/0x0f913a14; il sorgente CAF spiega: `SDHCI_VOL_3_3 = 7`, `voltage <<= 1`, `|= SDHCI_BUS_PWR_EN` |
+
+**Fatti nuovi trovati nel binario (che la seconda AI non aveva)**
+
+- **LK non fa il core reset "a vuoto"**: `sdhci_msm_init` (0x0f913f10) scrive
+  CORE+0x78 &= ~1, poi CORE+0x00 |= 0x80 (core reset), `delay(1)` (1 ms),
+  CORE+0x78 |= 1, CORE+0x78 |= 0x2000. Il nostro codice fa lo stesso (con
+  10 ms di attesa invece di 1 ms).
+- **Il primo OCR di LK e' `0x40ff0000`**, non `0x40ff8000`: `str r3,[r4,#0x3c]`
+  con r3 = 0x40ff0000 a 0x0f91571c, e CMD1 usa `[dev+0x3c]` come argomento
+  (0x0f915760). Dopo la risposta, LK ci rimette dentro l'OCR **della carta**
+  (0x0f9157cc) e usa quello per i retry.
+- **Il clock target di LK e' `0x60000` = 393216 Hz** (0x0f9156ec/0x0f9156f0),
+  non 400000. Con base 200 MHz: divisore 510 (n = 255, clk = 0xFF01); noi
+  con 400000: divisore 500 (n = 250, clk = 0xFA01). Entrambi ~400 kHz.
+- **LK scrive `HC+0x29 = 0x0e` poi `0x0f`** a ogni boot: nel encoding CAF
+  (`SDHCI_VOL_3_3 = 7`, `<<1`, `|= BIT(0)`) questo vuol dire **3,3 V**,
+  non 1,8 V. Il nostro codice scriveva `0x0b` (= 1,8 V, `SDHCI_VOL_1_8 = 5`)
+  **solo se il bit di power era spento**: differenza reale, non equivalente.
+- **LK non scrive `HC+0x3e` in questa fase**, e `HC+0x28 = 0x10` (ADMA 32 bit,
+  non il bit 1,8 V: `SDHCI_ADMA_32BIT = BIT(4)`).
+- Gli offset GCC **0x4c4 / 0x4c8** sono confermati da due fonti indipendenti:
+  la tabella clock dell'LK (`dis-4.9-k`: `sdc1_core_clk -> 0x4c4`,
+  `sdc1_iface_clk -> 0x4c8`) e `clock-gcc-8992.c` (`SDCC1_APPS_CBCR 0x04C4`,
+  `SDCC1_AHB_CBCR 0x04C8`).
+- Il **driver Linux CAF** (quello che funziona con questa carta) fa la stessa
+  cosa: CORE+0x78 = 0, CORE+0x00 |= CORE_SW_RST e **poll fino a che il bit 7
+  si azzera** (10 us x 1000), CORE+0x78 = 1, poi |= FF_CLK_SW_RST_DIS, poi
+  la stessa handshake PWRCTL. Nota: il driver non usa `HC+0x29` per la
+  potenza ("Bus power control is handled by interacting with PMIC",
+  quirk `SDHCI_QUIRK_SINGLE_POWER_WRITE`).
+
+**Run 4 diagnostico (in corso)**
+
+Il trail in IMEM non e' leggibile, quindi l'unico canale e' il tempo. Invece
+di un evento per run, il build diagnostico (`DIAG_VARIANTS=1 DIAG_TIMING=1`)
+prova **8 varianti del bring-up nella stessa esecuzione** e riporta quella
+che e' andata piu' lontano:
+
+```
+wait = 40 s + 50 s * variante + 10 s * stadio
+```
+
+con stadio 0 = niente risponde, 1 = CMD1 risponde ma la carta non e' pronta,
+2 = CMD1 pronta ma CMD2/3/7 falliscono, 3 = carta identificata.
+
+Le 8 varianti sono le differenze reali trovate sopra:
+
+| # | variante | ipotesi che testa |
+|---|---|---|
+| 0 | senza core reset | il core reset rompe la sincronizzazione con la carta |
+| 1 | azzera CORE+0x10c bit 1 (CLK_PWRSAVE) | il controller gatea il clock della carta da solo (come nel driver Linux) |
+| 2 | potenza bus 3,3 V (0x0f) | il valore di HC+0x29 conta, e l'LK usa 3,3 V |
+| 3 | potenza bus 1,8 V (0x0b) forzato | la carta va tenuta a 1,8 V |
+| 4 | potenza bus non toccata | la scrittura di HC+0x29 e' io stessa il problema |
+| 5 | clock 393216 Hz + INT_ENABLE/CTRL1 dell'LK | i valori dei registri contano |
+| 6 | ordine dell'LK (niente CMD5) + OCR 0x40ff0000 | il risveglio e l'OCR contano |
+| 7 | niente software reset (HC+0x2f) | il reset delle linee confonde la carta |
+
+Codice: `shim/emmc_lk_bringup.inc` (bring-up parametrizzato),
+`shim/emmc_diag.inc` (tabella + sweep), `shim/shim.c` (codifica del tempo),
+`tools/run-shim.sh` (`MODE=diag`).
+
+**Run 4 diagnostico (8 varianti) — risultato: nessuna variante funziona**
+
+```
+elapsed from fastboot reboot : 67.6 s
+elapsed from the bootloader : 67.3 s
+shim wait                   : 40.3 s
+  -> variant 0: no core reset
+  -> stage   0: nothing answered (CMD0/CMD1)
+```
+
+Decodifica: `wait = 40 + 50*var + 10*stage` con 40,3 s → variante 0, stadio 0.
+Il codice riporta la variante **migliore**: siccome tutte e 8 hanno finito a
+stadio 0, il risultato e' "nessuna delle 8 fa rispondere la carta". Quindi
+non e' la causa: il core reset, il gating del clock (CORE_CLK_PWRSAVE), il
+valore di HC+0x29 (3,3 V / 1,8 V / non toccato), il clock target, gli
+INT_ENABLE/CTRL1, l'ordine CMD5/CMD0, il primo OCR e il software reset.
+
+**Errore trovato nel run 4: il registro vendor spec e' a HC+0x10c**
+
+La variante 1 (clear di CORE_CLK_PWRSAVE) scriveva a `CORE + 0x10c`
+(0xf982410c). Il registro giusto e' **`HC + 0x10c` = 0xf9824a0c**: il driver
+CAF lo raggiunge come `host->ioaddr + CORE_VENDOR_SPEC`, e `host->ioaddr` e'
+la base SDHCI (0xf9824900); l'LK scrive la stessa indirizzo
+(`dis-4.9-d` 0x0f913f98, `str r2, [r3, #0x10c]` con r3 = &HC). La variante 1
+del run 4 ha quindi provato un indirizzo sbagliato.
+
+**Nuova ipotesi, dal driver Linux funzionante**
+
+`sdhci-msm.c` (riga ~2905), quando la carta **non** e' in HS400:
+
+```c
+	/* Select the default clock (free running MCLK) */
+	writel_relaxed(((readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC)
+				& ~CORE_HC_MCLK_SEL_MASK)
+				| CORE_HC_MCLK_SEL_DFLT),
+				host->ioaddr + CORE_VENDOR_SPEC);
+	/* Disable HC_SELECT_IN ... */
+	writel_relaxed((readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC)
+			& ~CORE_HC_SELECT_IN_EN
+			& ~CORE_HC_SELECT_IN_MASK),
+			host->ioaddr + CORE_VENDOR_SPEC);
+```
+
+`CORE_HC_MCLK_SEL` (bit 9:8) = 2 di default, **3 = HS400**;
+`CORE_HC_SELECT_IN` (bit 21:19) = 6 in HS400, `CORE_HC_SELECT_IN_EN` (bit 18).
+Dopo una sessione HS400 (che e' quello che fa l'LK a ogni boot) il MCI resta
+con la sorgente clock e il select CDC **in modalita' HS400**: il nostro shim
+non ha mai toccato quel registro, e identifica la carta a 400 kHz con il
+controller ancora puntato sul percorso HS400. E' la differenza piu'
+plausibile rimasta.
+
+**Run 5 diagnostico (16 varianti)**: le 8 precedenti (con la variante 1
+corretta sull'indirizzo giusto) piu' 8 nuove che azzerano il vendor spec
+(MCLK_SEL = default, SELECT_IN = 0) da sole o in combinazione con il resto.
+Codifica del tempo aggiornata: `wait = 60 + 25*var + 10*stage` (massimo
+465 s, sotto la base dei crash a 500 s).
+
+### Aggiornamento 2026-11-05 23:20 — run 5 (16 varianti) e run 6 (fix 3,3 V): cosa e' cambiato
+
+**Run 5 diagnostico (16 varianti in un solo boot) — LA CARTA HA RISPOSTO.**
+
+`shim wait 139.7 s`. La codizione del tempo e' `wait = 60 + 25*var + 5*stage`
+(il canale e' il tempo di attesa prima del reset; 25 s e 5 s sono divisori
+coprimi, quindi la decodifica e' univoca). Decodifica: **variante 2,
+stadio 3**.
+
+- variante 2 = `{ power 0x0f, clk 400000, flags 0 }`: potenza bus a 3,3 V
+  (0x0f, lo stesso valore che l'LK scrive a ogni boot: prima 0x0e e poi 0x0f),
+  clock di identificazione 400 kHz, nessun flag speciale (core reset fatto,
+  vendor spec non toccato, CMD5 di sveglia sì, OCR 0x40ff8000).
+- stadio 3 = carta identificata: CMD0 e CMD1 rispondono, CMD2/CMD3/CMD7
+  riescono. RCA = 2, R1 di CMD16 = 0x00000900.
+
+**Stato dei registri misurato (settore di diagnostica, run 5)**
+
+| registro | valore | nota |
+|---|---|---|
+| HC+0x29 (power) | 0x00 | a ingresso: potenza bus spenta |
+| HC+0x40 (CAPS1) | 0x342dc8b2 | base clock = caps[15:8] MHz |
+| HC+0x44 (CAPS2) | 0x00008007 | |
+| HC+0x2c (CLK_CTRL) | 0x000ffa07 | |
+| HC+0x10c (vendor spec) | 0x00000a1c | |
+| CORE+0x78 (HC_MODE) | 0x01 | HC mode attivo |
+| CORE+0x50 (MCI_VER) | 0x1000003e | major != 0, minor != 0x11/0x12 => caps override |
+| EXT_CSD SEC_COUNT | 0x03a3e000 | |
+| EXT_CSD EXT_MODE | 0x57380000 | |
+| ADDR_MODE | 1 | indirizzamento a settore |
+| FAIL_INT | 0x00018000 | |
+
+**Run 6 (percorso normale, `lk_var_default = { 0x0f, 400000, 0 }`) — FALLITO.**
+
+`shim wait 439.6 s` -> **evento 20** (controller sano, carta muta). La
+variante di default del run 6 e' letteralmente la variante 2 del run 5.
+
+**FATTO NUOVO (run 6, verificato il 2026-11-05 23:15): i 4 settori di log
+del run 6 sono byte-per-byte IDENTICI a quelli del run 5.**
+
+```
+sp1a.bin  run5=84edac3e...  run6=84edac3e...  IDENTICI
+sp1b.bin  run5=2e4dee7f...  run6=2e4dee7f...  IDENTICI
+```
+
+Il settore di log del run 6 dice `stage=7 (write), error=0, R1 CMD16=0x900,
+rca=2` — cioe' **lo stato di successo del run 5**, non quello del run 6.
+Conclusione: **il run 6 non ha scritto assolutamente nulla sulla carta**,
+perche' la carta era muta e la scrittura dei log non e' riuscita. I dati
+"col marker" che sembravano nuovi nel run 6 sono materiale lasciato dal
+run 5. Corregge la lettura precedente.
+
+**DEDUZIONE (non un fatto): perche' la stessa configurazione funziona nel
+run 5 e non nel run 6.**
+
+L'unica differenza osservabile e' **la cronologia**, non la configurazione:
+
+1. nel run 5 la variante vincente era **preceduta da due varianti fallite**
+   (var 0 senza core reset, var 1 con clear di CORE_CLK_PWRSAVE): la carta
+   aveva gia' ricevuto due sequenze CMD5/CMD0/CMD1 a vuoto, e il controller
+   era stato resettato (core reset + SW reset ALL) piu' volte;
+2. `CMD_TIMEOUT_US` = 1 s, quindi ogni variante fallita costa ~3 s di
+   timeout (CMD5 + CMD0 + CMD1): nel run 5 la variante 2 e' partita circa
+   6+ s dopo l'ingresso dello shim, nel run 6 subito.
+
+Ipotesi in ordine di costo di verifica:
+
+- H1 **tempo**: la carta (o il suo alimentatore / il PMIC) ha bisogno di
+  qualche secondo di rampa dopo che il bus e' stato spento dall'LK
+  (HC+0x29 = 0x00) prima di rispondere. Test: inserire un delay di 5-15 s
+  prima di CMD5/CMD0/CMD1 nel percorso normale.
+- H2 **stato del controller**: il numero di core reset / SW reset ALL
+  conta (il run 5 ne ha fatti 3, il run 6 uno).
+- H3 **sequenza**: le CMD a vuoto (senza potenza) " svegliano" la carta, che
+  altrimenti resta in uno stato in cui non risponde al primo CMD1.
+- H4 **potenza pilotata dal PMIC e non dal registro SDHCI**: il driver Linux
+  funzionante non usa HC+0x29 ("Bus power control is handled by interacting
+  with PMIC", quirk `SDHCI_QUIRK_SINGLE_POWER_WRITE`). Scritto cosi' in
+  HC+0x29 potrebbe essere un semplice effetto collaterale, non la causa.
+
+Il run diagnostico successivo dovrebbe testare H1/H2/H3 insieme: due
+varianti "identiche" alla vincente, una lanciata subito e una dopo un delay
+di 10 s, nello stesso boot.
+
+**Stato del telefono a fine sessione**: Android 13, `boot` stock
+(`backup/boot-stock.img`), `sys.boot_completed=1` verificato.
+
+---
+
+## Sessione 2026-11-08/09: T1-T4 (analisi statica, modello QEMU, canale pstore)
+
+### FATTO — T1: la tensione del bus (D1 era giusta, ma per il motivo opposto)
+
+Il disassembly esteso (`research/lk-g4/dis-4.9-p-sdhci_setup_host-full.txt`,
+233 righe) mostra che `sdhci_setup_host` (0x0f913954) contiene tre rami di
+tensione: 3.3 V (0x0f9139b8), 3.0 V (0x0f913a6c), 1.8 V (0x0f913a88).
+Con CAPS1 = 0x342dc8b2 (bit24=0, bit25=0, bit26=1) il ramo preso e' quello
+da 1.8 V: `movne ip,#0xb` / `movne r0,#0xa`, cioe' HC+0x29 = **0x0a poi
+0x0b**. Non 0x0e/0x0f (3.3 V) come scriveva il commento del bring-up.
+
+La deduzione D1 dell'utente era dunque corretta sul fatto (il LK NON scrive
+3.3 V con questo CAPS1) e la sua conseguenza (che il percorso dello shim
+dovesse usare 1.8 V) e' ora la base delle varianti V4/V5.
+
+### FATTO — T1: il handshake PWRCTL (D3 va corretta)
+
+Il handler IRQ di potenza (0x0f913ac0) scrive CORE+0xe8 = 5
+(BUS_ON_OFF_SUCC | IO_SIG_SUCC, calcolato dal MASK 0xf). L'init ack
+(0x0f913fa0-0x0f913fc4) copia STATUS->0xe4 e OR-bita 1/4 su 0xe8; poi
+CORE+0xe0 = 0xf. Dopo le due scritture di HC+0x29 l'LK esegue
+`bl 0xf92e360` = **event_wait(&sdhc_event)** e BLOCCA finche' l'handler non
+ha scritto l'ack.
+
+Correzione rispetto a D3: l'ack non e' "dopo ogni scrittura di HC+0x29" ma
+un handshake interrupt-driven: l'LK scrive HC+0x29, il controller alza
+l'IRQ di potenza, l'handler scrive 5 su CORE+0xe8 e l'LK prosegue. Lo
+shim non ha gli IRQ, quindiPuo' solo farlo a mano (variante V1/V5) o
+lasciare fare al controller (V0/V3).
+
+### FATTO — T2: modello del controller nel guest
+
+Su `virt` non esiste un MMIO pluggabile a 0xf9824000 (`generic-sdhci` non
+esiste su virt, `sdhci-pci` sta su bus PCI, `-m 4G` fa coprire l'indirizzo
+dalla RAM). Il modello e' quindi dentro il guest (`shim/emmc_model.inc`),
+con 4 modalita': mute, ack, delay, always. Il modello e' dichiarato
+ipotetico: non prova nulla sull'hardware del telefono.
+
+FATTO (QEMU, modalita' "ack", build diagnostica): **V0 fallisce (stadio 0,
+rc=-12) e V1 identifica la carta (stadio 3, rc=0)**, con la sequenza
+CMD5, CMD0, CMD1, CMD2, CMD3, CMD7, CMD16, CMD8, 4xCMD24, CMD17. Il test
+"ack" e' quindi discriminante: senza ack la carta resta muta, con ack
+(CORE+0xe8 = 5) risponde. Questo e' il modello che dice H5, non
+l'hardware.
+
+### FATTO — T3: il canale pstore/ramoops (nuovo, risolve il canale di misura)
+
+FATTO (dal dmesg del telefono): `ramoops: attached 0x100000@0xff00000,
+ecc: 16/0` e `console [pstore0] enabled`. Il recovery e Android hanno
+entrambi il driver ramoops con la stessa identica zona (file
+console-ramoops-0 da 116488 byte in entrambi).
+
+DEDUZIONE (dal DT + dal codice del driver): record-size = 0xffffa >
+spazio per le record zone (0xc0000) => max_dump_cnt = 0 => **nessuna
+record zone** => la zona console parte da 0xff00000. Confermato dal
+dimensionamento: 116468 byte di dati + 20 di avviso ECC = 116488, il
+file che il telefono produce.
+
+FATTO: 0xff00000 e' sopra la secure_region da 150 MiB (0x9600000) che
+l'XPU protegge, quindi e' DRAM scrivibile dal mondo non sicuro dove gira
+lo shim.
+
+Implementato: `shim/pstore.c` (scrive il record nel formato del ramoops,
+con la parita' Reed-Solomon) e `shim/rs8.c` (l'encoder del kernel,
+ridotto). Verificati offline contro il codice del kernel:
+- `tools/rs8-test.sh`: l'encoder del shim e' identico byte per byte a
+  quello di lib/reed_solomon (lunghezze 0..239, 40 prove casuali ciascuna);
+- `tools/pstore-test.sh`: il record che il kernel leggerebbe torna intero,
+  l'intestazione e tutti i 911 blocchi passano il decoder DEL KERNEL senza
+  che modifichi un byte;
+- QEMU end-to-end: record trovato, CRC ok, end marker presente.
+
+FATTO: senza la parita' il decoder del kernel "correggerebbe" il blocco e
+rimetterebbe i byte vecchi; sull'intestazione (che cambia solo start e
+size) la correzione e' sempre possibile, quindi la parita' e' obbligatoria.
+
+### Strumentazione aggiunta (T3)
+
+Il bring-up ora legge e mette nel log CORE+0xdc, CORE+0xe0, CORE+0xe4,
+CORE+0xe8 e HC+0x29: all'ingresso (step 30), dopo la scrittura 0x0e
+(step 33), dopo la 0x0f (34), dopo l'ack (35), dopo l'ack PWRCTL (37) e al
+fallimento (90/91). L'etichetta delle righe (PV0..PV5) dice a quale
+variante della sweep appartiene la lettura.
+
+FATTO (QEMU): le righe PV/VAR compaiono correttamente e distinguono V0
+(stadio 0) da V1 (stadio 3).
+
+### FATTO — run 2 e run 3 sul telefono (2026-11-09): cosa dice davvero l'hardware
+
+Il canale pstore ha funzionato: il record e' arrivato integro (CRC ok,
+end marker presente), 10439 byte nel run 2 e 15291 nel run 3 (con le sonde
+per comando).
+
+**1. La zona console non e' sempre allo stesso indirizzo.** Il
+/proc/iomem del recovery elenca tre regioni persistent_ram:
+0ff00000-0ff7ffff (512 KiB di record zone), **0ff80000-0ff9ffff (128 KiB:
+la zona console)** e 0ffa0000-0ffbffff (pmsg). Il DT del telefono chiede
+invece record-size 0xffffa, che non sta nello spazio delle record zone:
+per Android non ce ne sono e la console parte da 0xff00000. Lo shim
+scrive in entrambe le zone, prima 0xff80000 (il recovery e' il primo
+kernel che parte e quello che legge).
+
+**2. FATTO, e corregge una nota precedente: all'ingresso dello shim
+HC+0x29 = 0x0b, NON 0x00.** Il bus e' ACCESO a 1.8 V: e' esattamente il
+valore che il LK scrive con questo CAPS1 (0x0a poi 0x0b, vedi T1). Il
+valore 0x00 riportato nel handover 2.1 non era lo stato all'ingresso: era
+quello letto DOPO il reset software dell'SDHCI (HC+0x2f = 1), che azzera
+i registri del blocco HC. **La deduzione "l'LK ha spento il bus prima di
+saltare al kernel" e' quindi falsa**, e con lei la parte di H1 che
+riposava su quella.
+
+**3. FATTO: il bus si accende davvero.** Dopo la scrittura di HC+0x29 =
+0x0f, CORE+0xdc = 0x02. I bit del driver Linux (sdhci-msm.c:70-71) sono
+CORE_PWRCTL_BUS_OFF = 0x01 e CORE_PWRCTL_BUS_ON = (1 << 1): **0x02 vuol
+dire BUS ON**. (Nelle note precedenti i due bit erano scambiati.) La
+transizione di potenza del bus completa e il controller la segnala: la
+mano mancante (H5) non e' quello che blocca la carta.
+
+**4. FATTO: l'ack PWRCTL non cambia niente.** V0 (ack=1, cioe' quello
+scritto dal shim) e V1 (ack=5, come l'handler del LK) danno lo stesso
+risultato, e lo stesso vale per V2 (ack + 10 s di attesa), V3 (HC+0x29 non
+scritto), V4 (1.8 V) e V5 (1.8 V + ack): **tutte e sei le varianti si
+fermano allo stadio 0**, la carta non risponde ne' a CMD0 ne' a CMD1.
+
+**5. FATTO (run 3, sonde per comando): il controller MANDA i comandi e
+scade il timeout.** Per CMD5 e CMD1: INT_STATUS = 0x00018000, cioe' il
+bit di errore (15) piu' il **Command Timeout Error** (bit 16), e il
+registro risposta (HC+0x10) resta 0x00000000. CMD0 invece "riusce"
+(rc=0) solo perche' non ha risposta: il controller lo considera finito
+appena lo ha spedito. Il PRESENT register durante CMD5 vale 0x01e80007
+(CMD_INHIBIT attivo) e durante CMD1 0x01f80001.
+
+**⇒ La carta e' SILENZIOSA sulla linea CMD**: non e' un problema di
+potenza, di tensione, di ack, ne' di clock. Le piste rimaste sono la
+configurazione dei registri (CTRL1, INT_ENABLE) e lo stato in cui il
+controller si trova dopo il reset software (che azzera HC+0x29 e quindi
+spegne il bus sul registro).
+
+**6. FATTO: HC+0x29 = 0x0b dopo il reset software.** Il reset software
+dell'SDHCI (HC+0x2f = 1) azzera il blocco HC, quindi il registro di
+potenza torna a 0 e il shim deve riscriverlo: e' quello che vede la
+sonda subito dopo (0x0e, poi 0x0f). Questo e' anche il motivo per cui la
+sonda "all'ingresso" delle run precedenti leggeva 0x00.
+
+### FATTO — run 4 (2026-11-09): otto varianti, tutte mute
+
+Aggiunte due varianti con i registri che scrive il LK:
+
+- V6 = INT_ENABLE 0x000b/0xffff, INT_SIGNAL 0x000b/0xffff, **CTRL1 = 0x10**;
+- V7 = idem a 1.8 V.
+
+CTRL1 bit 4 e' "SD Bus Power Control Mode": con quel bit l'SD Bus Power
+diventa read-only e la potenza del bus la gestisce il PMIC, non il
+registro SDHCI (e' il quirk che il driver Linux funzionante commenta:
+"Bus power control is handled by interacting with PMIC").
+
+FATTO: anche V6 e V7 danno stadio 0, e le sonde per comando sono
+identiche a quelle delle altre varianti: CMD5 e CMD1 finiscono con
+INT_STATUS = 0x00018000 (errore + Command Timeout Error) e risposta 0.
+**Otto varianti, tre run, stesso risultato: la carta e' muta e il
+controller manda i comandi.**
+
+### IPOTESI H7 (nuova, la piu' promettente): la VCC della carta e' spenta
+
+FATTO (DT del telefono, nodo sdhci@f9824900, righe 6411-6417):
+
+```
+vdd-supply      = <0x11d>;      /* pm8994_l20, un regolatore RPM SMD */
+vdd-io-supply   = <0x39>;
+qcom,vdd-voltage-level   = <0x2d0370 0x2d0370>;   /* 2.95 V */
+qcom,vdd-io-voltage-level = <0x1b7740 0x1b7740>;  /* 1.8 V   */
+```
+
+FATTO (driver Linux funzionante, sdhci-msm.c): il driver chiama
+regulator_enable()/regulator_set_voltage() sui due regolatori prima di
+parlare con la carta (`msm_hs_power_on`, `vdd_data`/`vdd_io_data` presi
+dal DT). Lo shim non ha un driver dei regolatori.
+
+DEDUZIONE: se il LK spegne la VCC della carta prima di saltare al kernel
+(perche' il driver Linux la riaccende), allora allo shim la carta e'
+completamente senza alimentazione: il controller puo' dire BUS_ON (e lo
+dice: CORE+0xdc = 0x02) e puo' mandare i comandi (e li manda: il timeout
+di comando scade con la risposta a zero), ma la carta non ha tensione e
+non risponde. **Questo spiegherebbe tutto quello che e' rimasto fermo,
+perche' spiega anche perche' il run 5 (unico run positivo) non e'
+riproducibile: nel run 5 la sequenza di reset e la messa in tensione era
+diversa.**
+
+COME VERIFICARLA (prossimo passo):
+1. leggere dal telefono, in Android, lo stato del regolatore:
+   `adb shell dmesg | grep -i "pm8994_l20\\|regulator"` (il driver stampa
+   "supply disabled" / "already enabled");
+2. leggere il registro di stato dell'LDO20 del PM8994 via SPMI (il shim ha
+   gia' le costanti SPMI in shim/g4.h) per vedere se la VCC e' accesa;
+3. se e' spenta, accenderla dallo shim (RPM SMD: la sequenza di enable
+   del driver linux e' in drivers/regulator/qcom_rpm_smd.c) e ripetere la
+   sweep.
+
+---
+
+## Sessione 2026-11-09 (T0/T1/T2): la strada SDCC2 e un HANG del telefono
+
+### FATTO — T0: lo slot microSD (SDCC2) FUNZIONA sotto Android
+
+La microSD (SanDisk SS32G, 32 GB, CID 035344535333324780a468430e010a00)
+e' stata inserita e il kernel Android la enumera senza problemi:
+
+```
+mmc1: SDHCI controller on f98a4900.sdhci [f98a4900.sdhci] using 32-bit ADMA
+mmc1: new ultra high speed DDR50 SDHC card at address aaaa
+mmcblk1: mmc1:aaaa SS32G 29.7 GiB
+```
+
+Dati grezzi: `research/raw-2026-11-09/t0-live.txt`, `t0-live2.txt`
+(script ripetibile: `tools/t0-sd-live.sh`).
+
+FATTO: `mmc1` = `f98a4900.sdhci` (SDCC2), `mmc0` = `f9824900.sdhci` (eMMC),
+`mmc2` = `f9864900.sdhci` (SDIO/WLAN).
+
+FATTO: i regolatori dello slot SD (`pm8994_l21` = VDD, `pm8994_l13` = VDD-IO,
+DTS:6445-6450) sono **"disabled"** nel framework dei regolatori mentre la
+carta funziona; il dmesg dice anche `mmc1: no vqmmc regulator found` /
+`no vmmc regulator found`. **DEDUZIONE: per lo slot SD non c'e' nessun
+regolatore da accendere** (a differenza dell'eMMC, dove `pm8994_l20` e'
+"enabled").
+
+FATTO: il card-detect di SDCC2 e' `cd-gpios = <0xd2 0x08 0x01>`
+(pm8994-gpio indice 8, ACTIVE_HIGH); il kernel lo mostra come
+`gpio-873 (f98a4900.sdhci cd) in lo`.
+
+FATTO (non leggibile): `/sys/kernel/debug/mmc1/ios` e' Permission denied
+(il telefono non ha root in Android, `adb root` e' disabilitato). Quindi
+clock/bus width/tensione della carta SD **non** sono stati letti
+direttamente: vengono dalla tabella clock e dal DT.
+
+### FATTO — T1: A1 (il divisore SDHCI e' ignorato su MSM) e' ora un FATTO
+
+`sdhci-msm.c:3488-3489`:
+
+```c
+host->quirks |= SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN;
+host->quirks2 |= SDHCI_QUIRK2_ALWAYS_USE_BASE_CLOCK;
+```
+
+Con quel quirk il driver SDHCI generico **non programma il divisore**: il
+clock della carta e' il *base clock*, cioe' quello che fornisce il SoC, e
+`sdhci_msm_set_clock()` lo imposta con `clk_set_rate(msm_host->clk, ...)`
+(sdhci-msm.c:2929), cioe' sul **GCC**. Conclusione: **il clock reale della
+carta eMMC lo pilota il RCG di SDCC1 (0xfc4004d0), che il nostro shim non
+ha MAI scritto**. Le 8 varianti dei run precedenti non hanno mai controllato
+la velocita' con cui parlavano alla carta.
+
+FATTO: `CORE_IO_PAD_PWR_SWITCH` e' il **bit 16** di HC+0x10c
+(sdhci-msm.c:102), non il 15: `REQ_IO_HIGH` lo azzera, `REQ_IO_LOW` lo
+accende (2441-2448). La nota precedente che diceva "bit 15/16" era imprecisa.
+
+FATTO: `CORE_CLK_PWRSAVE` e' il bit 1 di HC+0x10c (sdhci-msm.c:97) e il
+driver lo **toglie** durante l'identificazione (2800-2810). Il nostro shim
+lo toglie solo con la variante `LK_F_CLR_PWRSAVE`, che **non** e' nella
+configurazione di default.
+
+FATTO: **il LK non inizializza SDCC2**. Nel binario non c'e' alcun
+riferimento a sdc2/sdcc2 (grep su `research/lk-g4/`); la tabella clock del LK
+ha solo `sdc1_core_clk`/`sdc1_iface_clk`. Quindi, a differenza dell'eMMC,
+lo shim **non trova nulla di gia' fatto** su SDCC2: e' la strada piu'
+promettente, non un ripiego.
+
+FATTO: `set_sdc_core_clk` dell'LK accetta frequenze 393216, 49152000,
+96000000, 191500000, 200000000, 400000000 (dis-4.9-h-set_sdc_core_clk.txt):
+il clock dell'SDCC1 e' pilotato dal GCC dal bootloader, non dal divisore.
+
+Dettaglio completo: `research/lk-g4/T1B-SDCC2.md`.
+
+### FATTO — T2 run 1: HANG. Il telefono si e' bloccato con il logo LG
+
+Costruita la prima versione della sonda T2 (`shim/sd_probe.inc`,
+`shim/sd_probe.c`, build `SHIM_SD_PROBE=1`), pensata per essere "di sola
+lettura". NON lo era:
+
+```
+SD_PROBE(0xb0): wr32(G4_SD_CORE_BASE + CORE_HC_MODE, ...);
+SD_PROBE(0xb2): wr8(G4_SD_BASE + HC_SWRST, 1);     /* software reset SDCC2 */
+```
+
+**FATTO (l'errore esatto)**: il flash e' riuscito
+(`fastboot flash boot` -> "OKAY [0.070s]", "Finished. Total time: 0.393s"),
+il reboot e' partito, e **il telefono non e' piu' comparso ne' in adb ne' in
+fastboot**: dopo 600 s (10 min) di `tools/run-shim.sh` in attesa della
+recovery, il telefono era ancora sul logo LG e non risultava su USB
+(`adb devices` vuoto, `fastboot devices` vuoto).
+
+FATTO: il watchdog e' fermato dal shim all'avvio (`stop_watchdog()`), quindi
+un hang del bus non ha niente che lo resetti: il telefono resta fermo.
+
+DEDUZIONE (la spiegazione piu' probabile): la scrittura di HC+0x2f su un
+controller SDCC2 che **nessuno ha mai inizializzato** (core clock spento)
+ha bloccato l'AXI: la transazione non si completa e il processore si
+ferma lì. Il boot logo e' il bootloader che non trova un boot image
+avviabile.
+
+**Due lezioni, messe nel codice:**
+
+1. **MAI scrivere su un controller non inizializzato.** Una lettura di una
+   finestra morta e' innocua (legge 0xffffffff); una scrittura puo' bloccare
+   il bus. Il reset software di SDCC2 e' ora la fase D, spenta di default,
+   e gira solo in una build dedicata.
+2. **Ogni fase lascia un marker nel trail IMEM** prima di toccare qualcosa:
+   il trail sopravvive al reset e si legge dalla recovery con
+   `tools/read-trail-imem.py`, cosi' anche un hang dice DOVE si e' bloccato.
+
+La sonda e' stata riscritta con le fasi A (eMMC sola lettura), B (eMMC dopo
+il reset, finestra viva: e' lo stesso reset che fa il bring-up), C (SDCC2
+sola lettura, nessuna scrittura ai registri SDCC2) e D (reset SDCC2,
+pericolosa, off). `SHIM_SD_PROBE_PHASE` seleziona le fasi: una
+configurazione per boot.
+
+FATTO: il recupero del telefono richiede **la combinazione dei tasti**
+(volume giù + power sul G4) per tornare in fastboot; da fastboot
+`tools/recover-boot.sh` rimette `backup/boot-stock.img` e riavvia.
+
+### FATTO — T2 v2 (2026-11-09, secondo tentativo): ANCORA UN HANG
+
+Dopo il ripristino del telefono (ROM stock reinstallata dall'utente, Android 13,
+`sys.boot_completed=1`) e la riscrittura della sonda a fasi, il run e' stato
+ripetuto. FATTO: la ROM stock **ignora** `adb reboot bootloader` e
+`adb reboot recovery` (3 tentativi, il telefono torna sempre su Android), quindi
+il bootloader si raggiunge solo con i tasti (volume giu' + power).
+
+FATTO: la build `SD_PROBE_PHASE=7` (fasi A = eMMC sola lettura, B = eMMC dopo
+il software reset, C = lettura dei pin TLMM; **nessuna scrittura su SDCC2**) e'
+stata flashata con successo (`fastboot flash boot` -> OKAY 0.232 s) e il
+telefono **non e' piu' tornato su USB**: 240 s di attesa, 40 s di campionamento
+continuo, `adb devices` e `fastboot devices` entrambi vuoti. **Secondo hang.**
+
+FATTO: il telefono era in fastboot grazie ai tasti; la sequenza
+`tools/run-t2.sh` (flash -> attesa -> lettura pstore + trail -> ripristino di
+`boot` stock) non e' arrivata al passo 4, perche' il telefono non e' tornato.
+
+IPOTESI (non verificata: manca il trail, che si legge solo con root): le
+cause candidate sono (a) la lettura dei registri TLMM a 0xfd510000 dalla
+posizione non sicura (XPU) o dal bus, (b) il software reset dell'eMMC fatto
+**senza** il core reset che il driver fa prima (la sequenza del LK e' core
+reset e poi SW reset: la fase B fa solo il SW reset), (c) un'interazione con
+la ROM stock reinstallata.
+
+**Regola che ne deriva (per i prossimi run):** prima di ogni misura nova si
+ri-stabilisce la **baseline** (la build collaudata delle run precedenti, senza
+sonda) e si verifica che torni: cosi' si distingue "la sonda blocca" da "il
+telefono/ROM non regge piu' lo shim". Poi si aggiunge una fase sola per volta.
+E il prologo del prossimo run e' il **ripristino immediato di `boot` stock**,
+non la sonda.
+
+---
+
+## Sessione 2026-11-09, seconda parte: il telefono non deve piu' bloccarsi
+
+L'utente ha ripristinato il telefono (ROM stock reinstallata) e ha chiesto
+che il codice non possa piu' causare un hang. Quello segue.
+
+### FATTO — la causa dei due hang
+
+Non era il driver eMMC: era una **scrittura MMIO a un controller mai
+inizializzato**. Il meccanismo:
+
+1. SDCC2 (`0xf98a4900`) non e' mai stato inizializzato: il bootloader LK non
+   lo tocca (FATTO: nessun riferimento a `sdc2` nel binario) e il kernel
+   Android non e' ancora partito;
+2. il suo clock e' quindi spento;
+3. la scrittura di `HC+0x2f = 1` su un blocco con il clock spento non si
+   completa: la transazione resta sul bus;
+4. il bus AXI e' bloccato e con lui la CPU: l'accesso MMIO non ritorna piu';
+5. **non e' una fault** (nessuna eccezione, nessun handler) e **il watchdog
+   non e' armato** (FATTO: nei log dei run collaudati non c'e' nessuna riga
+   `WDT`, quindi `WDT0_EN` era 0 all'ingresso dello shim): niente reset, il
+   telefono resta sul logo LG per sempre, irraggiungibile da USB.
+
+La seconda versione della sonda ha ripetuto la cosa **leggendo** il TLMM
+(`0xfd510000`), una finestra mai toccata: stesso esito. Il principio e'
+generale: qualunque accesso a una finestra non inizializzata puo' fermare il
+telefono.
+
+### FATTO — le difese messe in atto (tutte verificate offline)
+
+1. **Allowlist MMIO a runtime** (`shim/mmio.h`): ogni accesso passa per
+   accessori che rifiutano quello che non e' in allowlist. Le finestre
+   consentite sono solo quelle gia' pilotate con successo su questo
+   telefono: il controller eMMC (il LK ci ha appena letto il boot image), il
+   GCC (il LK ci abilita i clock di SDCC1), il watchdog, l'IMEM, il GIC,
+   PSHOLD; piu' le finestre di memoria (immagine, DTB, ramoops, scratch, i
+   due banchi RAM) e, in sola lettura, il framebuffer (l'XPU ne rifiuta la
+   scrittura). **Gli indirizzi non sono dalla memoria**: vengono dal log dei
+   run collaudati (`IMAGE lo=00080000 hi=000D0000`, `DTB at=02000000`) e da
+   `/proc/iomem` del telefono.
+2. **La deny-path non usa la console**: la console scrive nel framebuffer,
+   che sul telefono e' protetto dall'XPU, e una scrittura li' e' un data
+   abort: l'abort dentro la deny-path trasformerebbe una scrittura rifiutata
+   in una fault. La prima versione lo faceva e il self-test e' andato in
+   panic con `FAR=0xfc4004c4`, esattamente l'indirizzo che stava rifiutando.
+   Ora la deny-path scrive solo nel trail e conta le refuse.
+3. **Guardia del watchdog** (`shim/wdt.c`): i registri sono quelli di
+   `drivers/soc/qcom/watchdog_v2.c:40-46` (tree CAF), non scelti a memoria;
+   i tempi sono scritti come li scrive il driver. La guardia e' armata prima
+   dei controller e spara dopo che il log e' al sicuro, e i loop di attesa
+   la accarezzano. Limite onesto: il DT ha `qcom,ipi-ping`, quindi il
+   firmware sicuro puo' accarezzare il watchdog da solo: e' una rete, non
+   una garanzia. La garanzia e' la allowlist.
+4. **Un hang e' self-limiting**: `trail_seen()` (shim/trail.h) fa saltare la
+   fase che ha bloccato al boot successivo, perche' il trail IMEM sopravvive
+   al reset.
+5. **Audit statico** (`tools/check-mmio-writes.py`), eseguito dalla build:
+   fallisce se una scrittura grezza bypassa la allowlist su una finestra
+   device.
+
+### FATTO — i test, tutti offline, e il loro esito
+
+- `python3 tools/qemu-mmio-guard.py` → **tutti i check passano**: nessun
+  accesso alla finestra SDCC2 e' arrivato al bus, una scrittura alla
+  finestra GCC consentita e' passata, il self-test ha contato le refuse.
+- `python3 tools/qemu-emmc.py --mode always` → la sequenza completa e'
+  quella giusta (CMD5, CMD0, CMD1, CMD2, CMD3, CMD7, CMD16, CMD8, CMD24 x4,
+  CMD17) con 768 accessi al buffer: il bring-up non e' rotto.
+- `mute` e `ack` → comportamento identico a prima della allowlist.
+- `python3 tools/check-mmio-writes.py` → `ok: no raw store bypasses the MMIO
+  allowlist (6 device windows checked)`.
+- Le build per il telefono (baseline e sonda) compilano e l'audit gira in
+  entrambe.
+
+FATTO: durante questi test il modello QEMU serviva il GCC solo per 4 KB
+(0x1000) mentre il registro reale e' a `0xfc4004c4`: l'accesso usciva dal
+modello e andava all'indirizzo vero (panic con `FAR=0xfc4004c4`). Il modello
+e' stato allargato a 0x2000, la dimensione reale della finestra GCC
+(`qcom,gcc@fc400000`, reg size 0x2000).
+
+### La regola per i prossimi run
+
+1. prima la **baseline** (build collaudata, senza sonda);
+2. una fase sola per volta;
+3. il ripristino di `boot` stock e' dentro la sequenza (`tools/run-t2.sh`);
+4. ogni accesso nuovo passa dalla allowlist; se serve una finestra nuova,
+   prima in QEMU, poi in `shim/mmio.h` con la prova che e' viva;
+5. le misure che richiedono hardware non inizializzato si fanno dalla
+   recovery (`tools/read-mmc-registers.sh`), dove c'e' un kernel vero.
+
+Guida completa: `GUIDE-05-MMIO-SAFE.md`.

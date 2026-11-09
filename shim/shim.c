@@ -23,6 +23,9 @@
 #include "mmu.h"
 #include "loader.h"
 #include "trail.h"
+#include "pstore.h"
+#include "mmio.h"
+#include "wdt.h"
 
 int emmc_write_log(const char *text, unsigned len);
 extern unsigned emmc_last_stage;
@@ -37,6 +40,24 @@ extern int emmc_first_cmd_error;
 extern unsigned emmc_step;
 /* Why the card did not answer (emmc.c). */
 extern unsigned emmc_class;
+/* The diagnostic build: which bring-up variant got the furthest, and how
+ * far it got (shim/emmc_diag.inc). */
+extern unsigned emmc_diag_variant;
+extern unsigned emmc_diag_stage;
+
+/* The QEMU model of the controller (only in the SHIM_EMMC_MODEL build). */
+void emmc_model_config(uintptr_t dtb);
+
+/* The self-test of the MMIO allowlist (shim/mmio_selftest.c). */
+void mmio_selftest(void);
+
+/* The T2 read-only probe of the eMMC host (shim/sd_probe.inc). */
+#if SHIM_SD_PROBE
+void sd_probe_before(void);
+void sd_probe_after(void);
+int sd_probe_should_run(unsigned phase);
+#endif
+void emmc_model_finish(void);
 
 /*
  * The stage of the eMMC bring-up is encoded in the time the phone stays up
@@ -242,10 +263,11 @@ static unsigned shim_event_index(void)
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
 #define isb() __asm__ volatile("isb" ::: "memory")
 
-static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
-static inline uint64_t rd64(uintptr_t a) { return *(volatile uint64_t *)a; }
-static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
-static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
+/* Guarded by the MMIO allowlist (shim/mmio.h). */
+static inline uint32_t rd32(uintptr_t a) { return mmio_rd32(a); }
+static inline uint64_t rd64(uintptr_t a) { return mmio_rd64(a); }
+static inline void wr32(uintptr_t a, uint32_t v) { mmio_wr32(a, v); }
+static inline void wr8(uintptr_t a, uint8_t v) { mmio_wr8(a, v); }
 
 extern char secondary_entry[];
 void shim_main(uint64_t x0, uint64_t x1, uint64_t x2);
@@ -317,7 +339,7 @@ static void delay_ms(unsigned ms)
 
 static void save_log(void)
 {
-#if !SHIM_HW_DIAG
+#if !SHIM_HW_DIAG || SHIM_EMMC_MODEL
 	/* QEMU has no RAM at the scratch address; skip it. */
 	return;
 #endif
@@ -366,6 +388,19 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	 */
 	if (!panic_stage)
 		emmc_write_log(con_log, (unsigned)con_log_len);
+	/*
+	 * And into the ramoops console zone, which the next Android boot
+	 * reads back: /sys/fs/pstore/console-ramoops-0. This is the channel
+	 * that works when the card is mute.
+	 *
+	 * The write is made here even after a fault: the log of the fault is
+	 * exactly what is worth keeping. What keeps it from looping is the
+	 * attempt counter in pstore.c (at most two attempts).
+	 */
+	pstore_console_write(con_log, (unsigned)con_log_len);
+#if SHIM_EMMC_MODEL
+	emmc_model_finish();
+#endif
 #endif
 	/*
 	 * How long to stay up before the reset. Normally this is a fixed
@@ -392,6 +427,29 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 
 			wait_s = (deadline_s > elapsed_s) ?
 				 (unsigned)(deadline_s - elapsed_s) : 0;
+		} else if (SHIM_DIAG_TIMING) {
+			/*
+			 * Diagnostic build: the wait carries the matrix
+			 * variant x stage (see shim/emmc_diag.inc):
+			 *
+			 *   wait = 60 s + 25 s * variant + 5 s * stage
+			 *
+			 * The stage unit divides the variant unit, so the
+			 * decoding is unique. The units are far bigger than
+			 * the jitter of the boot time. The largest value
+			 * (60 + 25*15 + 5*3 = 450 s) stays below the crash
+			 * base (500 s).
+			 */
+			uint64_t hz = rsr("cntfrq_el0");
+			uint64_t elapsed_s = (now() - shim_t0) / hz;
+			uint64_t deadline_s = 60ULL +
+					      25ULL * emmc_diag_variant +
+					      5ULL * emmc_diag_stage;
+
+			wait_s = (deadline_s > elapsed_s) ?
+				 (unsigned)(deadline_s - elapsed_s) : 0;
+			con_hex2("DIAG", "v=", emmc_diag_variant,
+				 "s=", emmc_diag_stage);
 		} else if (SHIM_FINE_TIMING) {
 			uint64_t hz = rsr("cntfrq_el0");
 			uint64_t elapsed_s = (now() - shim_t0) / hz;
@@ -450,7 +508,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 		__asm__ volatile("wfe");
 #else
 	delay_ms(wait_s * 1000);
-#if SHIM_HW_DIAG
+#if SHIM_HW_DIAG && !SHIM_EMMC_MODEL
 	/*
 	 * Ask the bootloader to come up in recovery, so the log that was just
 	 * written to the card can be read back with dd. LK reads this
@@ -488,7 +546,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
  */
 static void stop_watchdog(void)
 {
-#if SHIM_HW_DIAG
+#if SHIM_HW_DIAG && !SHIM_EMMC_MODEL
 	uint32_t en = rd32(G4_WDT_BASE + G4_WDT_EN);
 
 	if (!(en & 1))
@@ -1169,6 +1227,12 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 
 	stop_watchdog();
 
+#if SHIM_MMIO_SELFTEST
+	/* The self-test of the allowlist: it tries the write that hung the
+	 * phone and checks that it is refused. */
+	mmio_selftest();
+#endif
+
 	/*
 	 * The eMMC first: it is the only log channel that survives the reset,
 	 * so it has to be written even if something later goes wrong. The
@@ -1176,12 +1240,55 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 */
 #if SHIM_HW_DIAG
 	PHASE(2); stage = "emmc";
+
+	/*
+	 * The watchdog guard (shim/wdt.c). It is armed BEFORE anything that
+	 * touches the controller and disarmed once the log is safe. The
+	 * watchdog was not armed at the shim's entry (the successful runs
+	 * have no "WDT" line), so a bus hang had nothing to reset the
+	 * phone: with the guard, a hang becomes a reset.
+	 */
+#if SHIM_WDT_GUARD
+	g4_wdt_arm(G4_WDT_GUARD_MS);
+#endif
+
+#if SHIM_EMMC_MODEL
+	/* The model takes its mode from the device tree and starts from the
+	 * register values measured on the phone. */
+	emmc_model_config(dtb);
+#endif
+#if SHIM_SD_PROBE
+	/* The T2 measurement, BEFORE the bring-up: the eMMC controller has
+	 * to be seen exactly as the LK left it. Reads only. */
+	if (sd_probe_should_run(0))
+		sd_probe_before();
+#endif
 	emmc_write_log(con_log, (unsigned)con_log_len);
+#if SHIM_SD_PROBE
+	/* And again AFTER it: the bring-up resets the host, and the question
+	 * is what that reset erases. Reads only. */
+	sd_probe_after();
+#endif
+#if SHIM_EMMC_MODEL
+	emmc_model_finish();
+#endif
 	first_step = emmc_step;
 	trail(0x1100, (uint32_t)emmc_first_error);
 	trail(0x1101, emmc_first_stage);
 	trail(0x1102, (uint32_t)emmc_first_cmd_error);
 	trail(0x1103, first_step);
+	/*
+	 * The log goes into the ramoops console zone: DRAM that survives the
+	 * reset and that the next Android boot reads back as
+	 * /sys/fs/pstore/console-ramoops-0. This is the only channel that
+	 * works when the card is mute, so it is written here, with the MMU
+	 * still off, as soon as the eMMC attempt is over.
+	 */
+	pstore_console_write(con_log, (unsigned)con_log_len);
+#if SHIM_WDT_GUARD
+	/* The log is safe now: the guard has done its job. */
+	g4_wdt_disarm();
+#endif
 #endif
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */

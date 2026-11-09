@@ -42,7 +42,50 @@ CFLAGS="$CFLAGS -DSHIM_FORCE_WAIT_S=$FORCE_WAIT_S"
 CFLAGS="$CFLAGS -DSHIM_RAW_TIMING=${RAW_TIMING:-0}"
 CFLAGS="$CFLAGS -DSHIM_FINE_TIMING=${FINE_TIMING:-0}"
 CFLAGS="$CFLAGS -DSHIM_FINE_BASE_S=${FINE_BASE_S:-40}"
-SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c"
+# The diagnostic build sweeps the bring-up variants in one boot and reports
+# the result through the wait time (see shim/emmc_diag.inc).
+CFLAGS="$CFLAGS -DEMMC_DIAG_VARIANTS=${DIAG_VARIANTS:-0}"
+CFLAGS="$CFLAGS -DSHIM_DIAG_TIMING=${DIAG_TIMING:-0}"
+# The QEMU build serves the eMMC register windows from the software model
+# (shim/emmc_model.inc): there is no SDCC1 controller under QEMU. The model
+# is a made up controller, so this build says nothing about the phone.
+CFLAGS="$CFLAGS -DSHIM_EMMC_MODEL=${SHIM_EMMC_MODEL:-0}"
+# The T2 read-only probe of SDCC1 (eMMC) and SDCC2 (the microSD slot):
+# it reads the controllers and prints what it finds into the pstore log.
+CFLAGS="$CFLAGS -DSHIM_SD_PROBE=${SHIM_SD_PROBE:-0}"
+# Which phases of the T2 probe run in this build (one configuration per boot):
+#   1 = A eMMC read only, 2 = B eMMC after reset, 4 = C SDCC2 read only,
+#   8 = D SDCC2 software reset (DANGEROUS: it hung the phone on 2026-11-09).
+CFLAGS="$CFLAGS -DSHIM_SD_PROBE_PHASE=0x$(printf '%x' "${SD_PROBE_PHASE:-3}")u"
+# The watchdog guard: it turns a bus hang into a reset. The bark time is in
+# milliseconds; the wait loops pet it (shim/emmc.c).
+CFLAGS="$CFLAGS -DSHIM_WDT_GUARD=${SHIM_WDT_GUARD:-1}"
+# The self-test of the MMIO allowlist (the QEMU test uses it to prove that a
+# write outside the allowlist never reaches the bus).
+CFLAGS="$CFLAGS -DSHIM_MMIO_SELFTEST=${SHIM_MMIO_SELFTEST:-0}"
+CFLAGS="$CFLAGS -DG4_WDT_GUARD_MS=${WDT_GUARD_MS:-60000}"
+# The phone has DRAM at 0xff00000, where its ramoops region is. QEMU's
+# virt machine has its RAM at 0x40000000, and only 128 MiB of it (the
+# machine's default: the memory-backend-file is the backing store, not the
+# size), so there the record goes to 0x44000000, inside the RAM and clear
+# of the image (0x40200000), the framebuffer (0x40000000) and the device
+# tree (0x48000000).
+if [ "${SHIM_EMMC_MODEL:-0}" = "1" ]; then
+	CFLAGS="$CFLAGS -DRAMOOPS_BASE=0x44000000UL -DRAMOOPS_BASE2=0"
+fi
+# The T2 probe is a separate translation unit so that the eMMC code stays
+# untouched (the instruction was: do not touch emmc*). It is always compiled
+# (it is small and it has no side effects when SHIM_SD_PROBE=0), so that the
+# link line does not change from one build to the next.
+SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c rs8.c pstore.c wdt.c sd_probe.c mmio_selftest.c"
+
+# The static half of the MMIO allowlist: a raw store on a device window
+# would bypass the protection that keeps a write to a dead controller from
+# hanging the phone (see shim/mmio.h). It fails the build.
+python3 ../tools/check-mmio-writes.py || {
+	echo "error: the MMIO allowlist has a hole (see above)" >&2
+	exit 1
+}
 
 mkdir -p out
 for f in $SRC; do
@@ -50,10 +93,10 @@ for f in $SRC; do
 done
 # The image runs wherever LK puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o | grep -c ABS64 || true)
+abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o 2>/dev/null | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o -o out/shim.elf
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # LK copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 # (BSD awk has no strtonum, so do the hex conversion in the shell.)

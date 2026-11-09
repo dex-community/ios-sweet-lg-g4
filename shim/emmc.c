@@ -56,6 +56,18 @@
 #include "g4.h"
 #include "console.h"
 #include "trail.h"
+#include "mmio.h"
+#include "wdt.h"
+
+/*
+ * Which bring-up path to compile:
+ *   1 = replay the LK init sequence (emmc_lk_bringup.inc), the path the
+ *       factory bootloader takes at every boot;
+ *   0 = the old "re-enable HC mode and hope" path, kept for comparison.
+ */
+#ifndef EMMC_LK_BRINGUP
+#define EMMC_LK_BRINGUP	1
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Register map                                                         */
@@ -87,16 +99,6 @@
 #define CORE_POWER	0x00
 #define CORE_MCI_VER	0x50
 #define CORE_HC_MODE	0x78	/* bit 0 = HC_MODE_EN, bit 13 = FF_CLK_SW_RST_DIS */
-#define CORE_VENDOR_SPEC 0x10c
-
-/*
- * The MSM controller can gate the clock to the card by itself: with
- * CORE_CLK_PWRSAVE set in the vendor spec register the card clock stops
- * as soon as there is no traffic, and then no command ever completes.
- * The Linux driver clears the bit while it talks to the card (and puts it
- * back afterwards).
- */
-#define CORE_CLK_PWRSAVE	(1u << 1)
 
 #define HC_MODE_EN		(1u << 0)
 #define FF_CLK_SW_RST_DIS	(1u << 13)
@@ -129,10 +131,6 @@
 #define INT_ERR_MASK		0xffff8000u	/* error summary + error half */
 
 /* MMC commands. */
-#define CMD_GO_INACTIVE		0
-#define CMD_SEND_OP_COND	1
-#define CMD_ALL_SEND_CID	2
-#define CMD_SEND_RELATIVE_ADDR	3
 #define CMD_SLEEP_AWAKE		5
 #define CMD_SELECT_CARD		7
 #define CMD_SEND_EXT_CSD	8
@@ -140,9 +138,6 @@
 #define CMD_READ_BLOCK		17
 #define CMD_WRITE_BLOCK		24
 #define CMD_SEND_RELATIVE_ADDR	3	/* CMD3: get/set the relative address */
-
-/* The OCR sent with CMD1: 1.8V window, power-up complete, sector access. */
-#define EMMC_OCR		0x41ff8002u
 
 /* Card status (R1). The state is bits 12:9, READY_FOR_DATA is bit 8. */
 #define R1_STATE(r)		(((r) >> 9) & 0xfu)
@@ -198,6 +193,7 @@
 #define STAGE_WRITE		7
 #define STAGE_READBACK		8
 #define STAGE_DONE		9
+/* The card did not answer to the full identification (CMD0/1/2/3/7). */
 #define STAGE_REINIT		10
 
 /*
@@ -230,6 +226,23 @@ int emmc_first_cmd_error = 0;
 int emmc_last_cmd_error = 0;
 
 /*
+ * Why did the card not answer? The host can only report one number, so
+ * the class is what the event table reports. The values are the ones
+ * shim.c switches on (see shim_event_index()).
+ */
+enum {
+	CLASS_NONE = 0,
+	CLASS_INACCESSIBLE,	/* the controller does not answer at all    */
+	CLASS_NO_CAPS,		/* the capability registers are empty        */
+	CLASS_CLOCK_OFF,	/* the card clock is not enabled              */
+	CLASS_CLOCK_UNSTABLE,	/* the internal clock never stabilised        */
+	CLASS_CMD_INHIBIT,	/* the command line is stuck busy             */
+	CLASS_CARD_ABSENT,	/* the controller is fine, the card is not    */
+	CLASS_CLOCK_GATED	/* the controller was gating the card clock   */
+};
+unsigned emmc_class = CLASS_NONE;
+
+/*
  * A fine grained progress counter, updated before every step that can
  * fault (in practice: every MMIO access). If the shim dies in the driver,
  * this is what says where: the panic handler puts it into the wait time.
@@ -248,9 +261,7 @@ static const char *const emmc_step_names[] = {
 	"entry", "snapshot", "hcmode-rd", "hcmode-wr", "caps", "int-enable",
 	"cmd16-1", "wake-select", "wake-cmd5", "cmd16-2", "ext-csd",
 	"build", "write1", "write2", "readback",
-	"reinit-cmd0", "reinit-cmd1", "reinit-cmd2", "reinit-cmd3",
-	"reinit-cmd7",
-	/* the xfer micro-steps (40..47) */
+	/* the xfer micro-steps */
 	"xfer-wait-idle", "xfer-regs", "xfer-cmd", "xfer-cmd-done",
 	"xfer-fifo-space", "xfer-push", "xfer-pull", "xfer-done"
 };
@@ -274,11 +285,6 @@ enum {
 	STEP_WRITE1,
 	STEP_WRITE2,
 	STEP_READBACK,
-	STEP_REINIT_CMD0,
-	STEP_REINIT_CMD1,
-	STEP_REINIT_CMD2,
-	STEP_REINIT_CMD3,
-	STEP_REINIT_CMD7,
 	STEP_COUNT
 };
 
@@ -314,8 +320,6 @@ enum {
 	D_ADDR_MODE,	/* 1 = sector addressing, 0 = byte addressing          */
 	D_FAIL_INT,	/* interrupt status of the last controller error       */
 	D_CMD_ERR,	/* emmc_last_cmd_error when the log was built          */
-	D_CID0,		/* first word of the CID (CMD2) after the re-init    */
-	D_VENDOR_SPEC,	/* core 0x10c, the vendor spec register              */
 	D_COUNT
 };
 
@@ -329,12 +333,78 @@ static uint16_t g_rca;
 /* Low level helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
-static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
-static inline void wr16(uintptr_t a, uint16_t v) { *(volatile uint16_t *)a = v; }
-static inline uint16_t rd16(uintptr_t a) { return *(volatile uint16_t *)a; }
-static inline uint8_t rd8(uintptr_t a) { return *(volatile uint8_t *)a; }
-static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
+/*
+ * The accessors go through the MMIO allowlist (shim/mmio.h): an access
+ * outside the windows the shim is allowed to touch is REFUSED, not
+ * executed. On this SoC a write to a dead window is what hung the phone
+ * twice (see mmio.h).
+ */
+#if SHIM_EMMC_MODEL
+/*
+ * QEMU build: there is no SDCC1 controller there, so the two register
+ * windows are served by the software model (shim/emmc_model.inc), which
+ * logs every access. The model is a made up controller: a green result
+ * under QEMU says nothing about the phone.
+ */
+uint32_t emmc_model_rd(uintptr_t a, unsigned size);
+void emmc_model_wr(uintptr_t a, unsigned size, uint32_t v);
+
+static inline uint32_t rd32(uintptr_t a)
+{
+	if (!mmio_read_ok(a, 4)) {
+		mmio_denied(a, 4);
+		return 0xffffffffu;
+	}
+	return emmc_model_rd(a, 4);
+}
+static inline void wr32(uintptr_t a, uint32_t v)
+{
+	if (!mmio_write_ok(a, 4)) {
+		mmio_denied(a, 4);
+		return;
+	}
+	emmc_model_wr(a, 4, v);
+}
+static inline uint16_t rd16(uintptr_t a)
+{
+	if (!mmio_read_ok(a, 2)) {
+		mmio_denied(a, 2);
+		return 0xffffu;
+	}
+	return (uint16_t)emmc_model_rd(a, 2);
+}
+static inline void wr16(uintptr_t a, uint16_t v)
+{
+	if (!mmio_write_ok(a, 2)) {
+		mmio_denied(a, 2);
+		return;
+	}
+	emmc_model_wr(a, 2, v);
+}
+static inline uint8_t rd8(uintptr_t a)
+{
+	if (!mmio_read_ok(a, 1)) {
+		mmio_denied(a, 1);
+		return 0xffu;
+	}
+	return (uint8_t)emmc_model_rd(a, 1);
+}
+static inline void wr8(uintptr_t a, uint8_t v)
+{
+	if (!mmio_write_ok(a, 1)) {
+		mmio_denied(a, 1);
+		return;
+	}
+	emmc_model_wr(a, 1, v);
+}
+#else
+static inline uint32_t rd32(uintptr_t a) { return mmio_rd32(a); }
+static inline void wr32(uintptr_t a, uint32_t v) { mmio_wr32(a, v); }
+static inline uint16_t rd16(uintptr_t a) { return mmio_rd16(a); }
+static inline void wr16(uintptr_t a, uint16_t v) { mmio_wr16(a, v); }
+static inline uint8_t rd8(uintptr_t a) { return mmio_rd8(a); }
+static inline void wr8(uintptr_t a, uint8_t v) { mmio_wr8(a, v); }
+#endif
 
 static uint64_t emmc_ticks(void)
 {
@@ -360,9 +430,14 @@ static uint64_t emmc_deadline(uint32_t us)
 static void emmc_delay_us(uint32_t us)
 {
 	uint64_t end = emmc_deadline(us);
+	unsigned n = 0;
 
-	while (emmc_ticks() < end)
-		;
+	while (emmc_ticks() < end) {
+		/* The wait loops are where a hang would hide, so the watchdog
+		 * guard is petted from here (shim/wdt.c). */
+		if ((++n & 0x3ffu) == 0)
+			g4_wdt_pet();
+	}
 }
 
 /* Clear the interrupt status (both halves are write-1-to-clear). */
@@ -440,6 +515,21 @@ static void emmc_wait_busy(void)
 }
 
 /*
+ * What the controller has to say about a command. The card does not answer
+ * at all, so this is the only direct measurement of what the controller
+ * did with the command: the interrupt status (did the command complete, did
+ * it fail), the present state (is the command line still busy), the
+ * response register (what came back on CMD) and the argument.
+ */
+static void emmc_cmd_log(uint8_t index, uint32_t argument, uint32_t rc)
+{
+	con_hex2("CMD", "n=", index, "rc=", rc);
+	con_hex2("CMD", "int=", rd32(HC + HC_INT_STATUS),
+		 "pres=", rd32(HC + HC_PRESENT));
+	con_hex2("CMD", "rsp=", rd32(HC + HC_RESPONSE), "arg=", argument);
+}
+
+/*
  * One command without a data phase. Returns 0 on success; on failure the
  * raw error is also in emmc_last_cmd_error. resp_type is CMD_RESP_*; CRC
  * and index checks are added for the 48 bit responses.
@@ -454,13 +544,12 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 	if (emmc_wait_idle()) {
 		emmc_last_cmd_error = -1;
 		trail(0x0200 | index, (uint32_t)-1);
+		emmc_cmd_log(index, argument, (uint32_t)emmc_last_cmd_error);
 		return -1;
 	}
 
 	if (resp_type == CMD_RESP_48 || resp_type == CMD_RESP_48BUSY)
 		flags |= CMD_CRC_CHECK | CMD_IDX_CHECK;
-	else if (resp_type == CMD_RESP_136)
-		flags |= CMD_CRC_CHECK;
 
 	emmc_ack();
 	wr32(HC + HC_ARGUMENT, argument);
@@ -484,10 +573,12 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 		emmc_wait_busy();
 	emmc_ack();
 	trail(0x0100 | index, rd32(HC + HC_RESPONSE));
+	emmc_cmd_log(index, argument, 0);
 	return 0;
 
 fail:
 	trail(0x0200 | index, (uint32_t)emmc_last_cmd_error);
+	emmc_cmd_log(index, argument, (uint32_t)emmc_last_cmd_error);
 	if (emmc_last_cmd_error == -3)
 		trail(0x0300 | index, g_diag[D_FAIL_INT]);
 	emmc_reset_lines();
@@ -678,6 +769,7 @@ static void emmc_snapshot(void)
  * is not answered the card may simply be deselected and awake, so CMD7 is
  * attempted anyway.
  */
+#if !EMMC_LK_BRINGUP		/* only the legacy path uses the wake-up */
 static int emmc_wake(void)
 {
 	static const uint16_t candidates[] = { 2, 1 };
@@ -703,6 +795,7 @@ static int emmc_wake(void)
 	}
 	return -1;
 }
+#endif /* !EMMC_LK_BRINGUP */
 
 static uint32_t le32(const uint8_t *p)
 {
@@ -710,258 +803,57 @@ static uint32_t le32(const uint8_t *p)
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Clock control (0x2c, 16 bit view). */
-#define HC_CLK_CTRL_16	0x2c
-#define CLK_EN		0x0001	/* internal clock enable                  */
-#define CLK_STABLE	0x0002	/* internal clock stable (read only)      */
-#define CLK_CARD_EN	0x0004	/* SDCLK (the clock that reaches the card) */
-#define CLK_DIV_SHIFT	8
-#define CLK_DIV_MASK	0xff
-
+#if EMMC_LK_BRINGUP
 /*
- * The card clock (0x2c).
+ * The knobs of the bring-up.
  *
- * LK leaves it programmed, but a controller reset (or the mode switch)
- * can stop it, and without a clock no command can complete: the card
- * simply never answers. It is programmed the way the Linux driver does
- * it: enable the internal clock, wait for it to be stable, then enable
- * the clock that reaches the card.
- *
- * The divider is kept as LK left it. If the register is empty the
- * divider is set to the standard identification speed (the base clock
- * divided by 2 x 255, about 400 kHz on this controller), which is what
- * a card expects while it is being brought up.
+ * The factory LK, the working Linux driver and this file disagree on a few
+ * points. Each of them is a flag or a value here, so that the diagnostic
+ * build (EMMC_DIAG_VARIANTS) can try them one at a time and find out which
+ * one decides whether the card answers. The default variant is the one that
+ * mimics the LK.
  */
-static void emmc_clock_enable(uint32_t div)
-{
-	uint32_t clk = rd16(HC + HC_CLK_CTRL_16);
-	uint64_t end;
-
-	if (div) {
-		/* The divider can only be changed with the clock stopped. */
-		clk &= ~CLK_EN;
-		wr16(HC + HC_CLK_CTRL_16, (uint16_t)clk);
-		clk &= ~(CLK_DIV_MASK << CLK_DIV_SHIFT);
-		clk |= (div & CLK_DIV_MASK) << CLK_DIV_SHIFT;
-	} else if ((clk & (CLK_EN | CLK_CARD_EN)) == (CLK_EN | CLK_CARD_EN)) {
-		return;			/* already running */
-	}
-
-	if (!(clk & CLK_DIV_MASK))
-		clk |= (CLK_DIV_MASK << CLK_DIV_SHIFT);	/* ~400 kHz */
-
-	clk |= CLK_EN;
-	wr16(HC + HC_CLK_CTRL_16, (uint16_t)clk);
-
-	end = emmc_deadline(20000);
-	while (!(rd16(HC + HC_CLK_CTRL_16) & CLK_STABLE)) {
-		if (emmc_ticks() >= end)
-			break;
-	}
-
-	clk = rd16(HC + HC_CLK_CTRL_16) | CLK_CARD_EN;
-	wr16(HC + HC_CLK_CTRL_16, (uint16_t)clk);
-	trail(0x0018, (uint32_t)rd16(HC + HC_CLK_CTRL_16));
-}
-
-/*
- * Why did the card not answer? The registers say more than a timeout
- * does, and the host can only read one number, so the class is what the
- * event table reports.
- */
-enum {
-	CLASS_NONE = 0,
-	CLASS_INACCESSIBLE,	/* the controller does not answer at all    */
-	CLASS_NO_CAPS,		/* the capability registers are empty        */
-	CLASS_CLOCK_OFF,	/* the card clock is not enabled              */
-	CLASS_CLOCK_UNSTABLE,	/* the internal clock never stabilised        */
-	CLASS_CMD_INHIBIT,	/* the command line is stuck busy             */
-	CLASS_CLOCK_GATED,	/* the card clock was gated by the controller */
-	CLASS_CARD_ABSENT	/* the controller is fine, the card is not    */
+#define LK_PWR_KEEP	0xffffffffu	/* do not write HC+0x29 at all      */
+#define LK_PWR_FORCE	0xfffffffeu	/* write it even if the power is on */
+struct lk_var {
+	uint32_t power_val;	/* value for HC+0x29 (bus power control)   */
+	uint32_t clk_hz;	/* the clock target                         */
+	uint32_t flags;
 };
-unsigned emmc_class = CLASS_NONE;
-/* Set when CORE_CLK_PWRSAVE was set and had to be cleared. */
-static int g_pwrsave_cleared;
+#define LK_F_NO_CORE_RESET	(1u << 0)	/* no CORE+0x00 core reset     */
+#define LK_F_CLR_PWRSAVE	(1u << 1)	/* clear CORE+0x10c bit 1      */
+#define LK_F_NO_SW_RST		(1u << 2)	/* no HC+0x2f software reset  */
+#define LK_F_NO_WAKE		(1u << 3)	/* no CMD5 wake before CMD0    */
+#define LK_F_LK_REGS		(1u << 4)	/* LK's INT_ENABLE/CTRL1      */
+#define LK_F_LK_OCR		(1u << 5)	/* LK's first OCR (0x40ff0000)*/
+#define LK_F_PWR_FORCE		(1u << 6)	/* write HC+0x29 even if on   */
+#define LK_F_VENDOR_RESET	(1u << 7)	/* MCLK_SEL/SELECT_IN default */
+#define LK_F_PWR_ACK		(1u << 8)	/* ack the PWRCTL like the LK */
+#define LK_F_DELAY_10S		(1u << 9)	/* wait 10 s before CMD5/CMD0 */
 
-static unsigned emmc_classify(void)
-{
-	uint32_t hcmode = rd32(CORE + CORE_HC_MODE);
-	uint32_t caps = rd32(HC + HC_CAPS1);
-	uint32_t clk = rd16(HC + HC_CLK_CTRL_16);
-	uint32_t present = rd32(HC + HC_PRESENT);
-
-	if (hcmode == 0xffffffffu || caps == 0xffffffffu)
-		return CLASS_INACCESSIBLE;
-	if (caps == 0)
-		return CLASS_NO_CAPS;
-	if (!(clk & (CLK_EN | CLK_CARD_EN)))
-		return CLASS_CLOCK_OFF;
-	if (!(clk & CLK_STABLE))
-		return CLASS_CLOCK_UNSTABLE;
-	if (present & PS_CMD_INHIBIT)
-		return CLASS_CMD_INHIBIT;
-	if (g_pwrsave_cleared)
-		return CLASS_CLOCK_GATED;
-	return CLASS_CARD_ABSENT;
-}
-
+#if SHIM_EMMC_MODEL
 /*
- * Put the controller back in SDHCI mode.
- *
- * LK leaves it in the "MMC native" mode (sdhci_mode_disable() clears bit 0
- * of CORE+0x78, verified in the factory LK binary at 0x0f914940), so the
- * SDHCI registers are not usable until the bit is set again.
- *
- * There are two ways to do it:
- *
- *   0: just set the bit. The clock, the CDC/DLL calibration and the vendor
- *      registers that LK programmed are still in place.
- *   1: LK's own sequence (sdhci_msm_init(), 0x0f913f10): clear the bit,
- *      pulse the core reset (bit 7 of CORE+0x00), write the register with a
- *      plain 1 and set FF_CLK_SW_RST_DIS (bit 13).
- *
- * The core reset is a double edged sword: it re-synchronises the SDHCI side
- * with the card, but it also resets the clock generation and the DLL that
- * the CDC uses to sample the data lines in HS200/HS400. With the clock
- * gone the card stops answering altogether, which is what the first runs
- * showed. So the plain write is tried first and the core reset only as a
- * second attempt.
+ * The QEMU build serves the HC/CORE windows from the software model.
+ * It is included here so that it can see the accessors above.
  */
-static int emmc_hc_mode(int core_reset)
-{
-	uint32_t mode = rd32(CORE + CORE_HC_MODE);
+#include "fdt.h"
+#include "emmc_model.inc"
+#endif
 
-	if (!core_reset && (mode & HC_MODE_EN))
-		return 0;			/* already in SDHCI mode */
-
-	emmc_last_stage = STAGE_HC_MODE;
-	STEP(STEP_HCMODE_WRITE);
-	/* Disable HC mode. */
-	wr32(CORE + CORE_HC_MODE, mode & ~HC_MODE_EN);
-	if (core_reset) {
-		/* Core power reset (bit 7 of CORE+0x00). */
-		wr32(CORE + CORE_POWER, rd32(CORE + CORE_POWER) | (1u << 7));
-		emmc_delay_us(1000);
-	}
-	/* Enable SDHCI mode. */
-	wr32(CORE + CORE_HC_MODE, HC_MODE_EN);
-	/* FF_CLK_SW_RST_DIS (bit 13). */
-	wr32(CORE + CORE_HC_MODE, rd32(CORE + CORE_HC_MODE) | FF_CLK_SW_RST_DIS);
-
-	g_diag[D_HCMODE_AFTER] = rd32(CORE + CORE_HC_MODE);
-	trail(0x0016, g_diag[D_HCMODE_AFTER]);
-	return (g_diag[D_HCMODE_AFTER] & HC_MODE_EN) ? 0 : -1;
-}
-
+#include "emmc_lk_bringup.inc"
 /*
- * Full identification of the card.
+ * The default variant: what the factory LK does.
  *
- * The wake-up (CMD5 + CMD7) assumes the card kept its relative address
- * and is only asleep. On this phone the card answers nothing at all, so
- * the standard way out is to start over:
- *
- *   CMD0  GO_INACTIVE       the card goes back to the idle state and drops
- *                          the relative address
- *   CMD1  SEND_OP_COND      the OCR, until the card says it is ready
- *   CMD2  ALL_SEND_CID      the card identity
- *   CMD3  SET_RELATIVE_ADDR the new relative address
- *   CMD7  SELECT_CARD       selected, in the transfer state
- *
- * The sequence runs at the identification speed (about 400 kHz), which is
- * what the specification asks for while a card is being brought up.
+ * The bus power goes up at 3.3 V (0x0f), which is what the LK writes at
+ * every boot and what makes the card answer (measured: at the shim entry
+ * HC+0x29 reads 0x00, the power is off; at 1.8 V the card stays mute).
+ * The clock target is 400 kHz.
  */
-static int emmc_reinit(void)
-{
-	uint32_t rsp = 0;
-	int rc, i;
-
-	emmc_clock_enable(CLK_DIV_MASK);		/* ~400 kHz */
-
-	STEP(STEP_REINIT_CMD0);
-	rc = emmc_cmd(CMD_GO_INACTIVE, 0, CMD_RESP_NONE, 0);
-	if (rc)
-		return rc;
-	/* At least 74 clock cycles after CMD0. */
-	emmc_delay_us(2000);
-
-	STEP(STEP_REINIT_CMD1);
-	for (i = 0; i < 5000; i++) {
-		rc = emmc_cmd(CMD_SEND_OP_COND, EMMC_OCR, CMD_RESP_48, &rsp);
-		if (rc)
-			return rc;
-		if (rsp & 0x80000000u)		/* the card is powered up */
-			break;
-		emmc_delay_us(1000);
-	}
-	if (i == 5000)
-		return -1;
-
-	STEP(STEP_REINIT_CMD2);
-	rc = emmc_cmd(CMD_ALL_SEND_CID, 0, CMD_RESP_136, &rsp);
-	if (rc)
-		return rc;
-	g_diag[D_CID0] = rsp;
-
-	STEP(STEP_REINIT_CMD3);
-	rc = emmc_cmd(CMD_SEND_RELATIVE_ADDR, 0, CMD_RESP_48, &rsp);
-	if (rc)
-		return rc;
-	g_rca = (uint16_t)((rsp >> 8) & 0xffffu);
-	g_diag[D_RCA] = g_rca;
-
-	STEP(STEP_REINIT_CMD7);
-	rc = emmc_cmd(CMD_SELECT_CARD, (uint32_t)g_rca << 16,
-		      CMD_RESP_48BUSY, &rsp);
-	if (rc)
-		return rc;
-	g_diag[D_RUNG] = 3;
-	return 0;
-}
-
-/*
- * Bring the card up: select it if it is only asleep, and if it does not
- * answer at all, identify it from scratch. Returns 0 when the card is
- * selected and in the transfer state.
- */
-static int emmc_bring_up_card(void)
-{
-	uint32_t rsp = 0;
-	int rc;
-
-	/* Rung 1: the card may still be selected. */
-	emmc_last_stage = STAGE_BLKLEN;
-	STEP(STEP_CMD16_1);
-	rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
-	g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
-	if (!rc && R1_STATE(rsp) == CARD_STATE_TRAN)
-		return 0;
-
-	/* Rung 2: asleep or deselected. */
-	emmc_last_stage = STAGE_WAKE;
-	STEP(STEP_WAKE_SELECT);
-	if (!emmc_wake()) {
-		g_diag[D_RUNG] = 1;
-		emmc_last_stage = STAGE_BLKLEN2;
-		STEP(STEP_CMD16_2);
-		rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
-		g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
-		if (!rc && R1_STATE(rsp) == CARD_STATE_TRAN)
-			return 0;
-	}
-
-	/* Rung 3: the card does not answer at all: identify it afresh. */
-	emmc_last_stage = STAGE_REINIT;
-	if (emmc_reinit())
-		return -1;
-
-	emmc_last_stage = STAGE_BLKLEN2;
-	STEP(STEP_CMD16_2);
-	rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
-	g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
-	if (!rc && R1_STATE(rsp) == CARD_STATE_TRAN)
-		return 0;
-	return -1;
-}
+#if !EMMC_DIAG_VARIANTS
+static const struct lk_var lk_var_default = { 0x0f, 400000, 0 };
+#endif
+#include "emmc_diag.inc"
+#endif
 
 /*
  * Make sure the card is selected, in the transfer state, on the user
@@ -981,33 +873,67 @@ static int emmc_prepare(uint8_t *scratch)
 	trail(0x0014, g_diag[D_CORE_10C]);
 	trail(0x0015, g_diag[D_HC_10C]);
 
+#if EMMC_LK_BRINGUP
+	(void)caps; (void)ie; (void)want;
+	emmc_last_stage = STAGE_HC_MODE;
+#if EMMC_DIAG_VARIANTS
+	rc = emmc_diag_sweep();
+#else
+	rc = emmc_lk_bringup(&lk_var_default);
+#endif
+	g_diag[D_HCMODE_AFTER] = rd32(CORE + CORE_HC_MODE);
+	if (rc)
+		return rc;
+	/* Same check as the old rung 1: selected and in the transfer state. */
+	emmc_last_stage = STAGE_BLKLEN;
+	STEP(STEP_CMD16_1);
+	rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
+	g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
+	if (rc || R1_STATE(rsp) != CARD_STATE_TRAN)
+		return EMMC_E_BLKLEN;
+#else
 	/*
 	 * HC mode is the one thing LK switches off before jumping to the
-	 * kernel. The plain write comes first, the core reset is the second
-	 * attempt (see emmc_hc_mode()).
+	 * kernel. sdhci_mode_disable() (verified in the factory LK binary
+	 * at 0x0f914940) does exactly this:
+	 *
+	 *   RMWREG32(pwrctl_base + SDCC_MCI_HC_MODE, 0, 1, 0)
+	 *
+	 * that is, it clears bit 0 of CORE+0x78 and nothing else. On the
+	 * G4 pwrctl_base is MSM_SDC1_BASE (0xf9824000) and the SDHCI
+	 * controller is at MSM_SDC1_SDHCI_BASE (0xf9824900), so CORE+0x78
+	 * is the right register.
+	 *
+	 * The reverse operation, sdhci_msm_init() (0x0f913f10), is not just
+	 * "set bit 0 again": it clears bit 0, pulses the core reset (bit 7
+	 * of CORE+0x00), waits a millisecond, writes the HC_MODE register
+	 * (a plain writel of 1, which clobbers the other bits), and finally
+	 * sets FF_CLK_SW_RST_DIS (bit 13).
+	 *
+	 * That core reset is what re-synchronises the SDHCI side with the
+	 * card after the mode switch. Without it the controller can stay
+	 * unresponsive, so it is reproduced here. It resets the CORE (the
+	 * MCI/SDHCI bridge), not the host controller, so it does not touch
+	 * the CDC/DLL calibration that LK set up.
+	 *
+	 * The whole sequence is only run when LK actually left HC mode
+	 * disabled, so the normal case touches nothing.
 	 */
-	emmc_hc_mode(0);
-
-	/*
-	 * The controller may have been left with the automatic clock
-	 * gating on: the card clock would then stop by itself and no
-	 * command would ever complete. Clear it (the Linux driver does the
-	 * same while it talks to the card).
-	 */
-	{
-		uint32_t vspec = rd32(CORE + CORE_VENDOR_SPEC);
-
-		g_diag[D_VENDOR_SPEC] = vspec;
-		trail(0x0019, vspec);
-		if (vspec != 0xffffffffu && (vspec & CORE_CLK_PWRSAVE)) {
-			g_pwrsave_cleared = 1;
-			wr32(CORE + CORE_VENDOR_SPEC, vspec & ~CORE_CLK_PWRSAVE);
-			trail(0x001a, 1);
-		}
+	if (!(rd32(CORE + CORE_HC_MODE) & HC_MODE_EN)) {
+		emmc_last_stage = STAGE_HC_MODE;
+		STEP(STEP_HCMODE_WRITE);
+		/* Disable HC mode. */
+		wr32(CORE + CORE_HC_MODE, rd32(CORE + CORE_HC_MODE) & ~HC_MODE_EN);
+		/* Core power reset (bit 7 of CORE+0x00). */
+		wr32(CORE + CORE_POWER, rd32(CORE + CORE_POWER) | (1u << 7));
+		emmc_delay_us(1000);
+		/* Enable SDHCI mode. */
+		wr32(CORE + CORE_HC_MODE, HC_MODE_EN);
+		/* FF_CLK_SW_RST_DIS (bit 13). */
+		wr32(CORE + CORE_HC_MODE, rd32(CORE + CORE_HC_MODE) | FF_CLK_SW_RST_DIS);
 	}
-
-	/* Without a card clock no command can complete. */
-	emmc_clock_enable(0);
+	g_diag[D_HCMODE_AFTER] = rd32(CORE + CORE_HC_MODE);
+	trail(0x0016, g_diag[D_HCMODE_AFTER]);
 
 	STEP(STEP_CAPS);
 	caps = rd32(HC + HC_CAPS1);
@@ -1025,28 +951,29 @@ static int emmc_prepare(uint8_t *scratch)
 	if ((ie & want) != want)
 		wr32(HC + HC_INT_ENABLE, ie | want);
 
-	/*
-	 * Bring the card up. Three rungs, in emmc_bring_up_card(): the card
-	 * may still be selected, it may be asleep (CMD5 + CMD7), and if it
-	 * does not answer at all it is identified from scratch.
-	 */
-	if (emmc_bring_up_card()) {
-		/*
-		 * Nothing worked. Classify the controller before touching
-		 * anything else (the class is what the host gets to see),
-		 * then try LK's own sequence, core reset included, as the
-		 * last resort.
-		 */
-		emmc_class = emmc_classify();
-		emmc_hc_mode(1);
-		emmc_clock_enable(0);
-		if (emmc_bring_up_card())
-			return EMMC_E_BLKLEN;
-		g_diag[D_RUNG] = 2;
-	}
-	goto card_ready;
+	/* Rung 1: is the card still selected? */
+	emmc_last_stage = STAGE_BLKLEN;
+	STEP(STEP_CMD16_1);
+	rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
+	g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
+	if (rc || R1_STATE(rsp) != CARD_STATE_TRAN) {
+		/* Rung 2: asleep or deselected. */
+		emmc_last_stage = STAGE_WAKE;
+		STEP(STEP_WAKE_SELECT);
+		if (emmc_wake())
+			return EMMC_E_WAKE;
+		g_diag[D_RUNG] = 1;
 
-card_ready:
+		emmc_last_stage = STAGE_BLKLEN2;
+		STEP(STEP_CMD16_2);
+		rc = emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_48, &rsp);
+		g_diag[D_CMD16_R1] = rc ? (0xdead0000u | (uint16_t)rc) : rsp;
+		if (rc || R1_STATE(rsp) != CARD_STATE_TRAN)
+			return EMMC_E_BLKLEN;
+	}
+
+#endif
+
 	/* Rung 3: what is this card? */
 	emmc_last_stage = STAGE_EXTCSD;
 	STEP(STEP_EXT_CSD);
@@ -1188,7 +1115,7 @@ int emmc_write_log(const char *text, unsigned len)
 
 	for (unsigned i = 0; i < D_COUNT; i++)
 		g_diag[i] = 0;
-	g_diag[D_FORMAT] = 3;
+	g_diag[D_FORMAT] = 2;
 	g_have_dat0 = 0;
 	g_sector_mode = 0;
 	g_sec_count = 0;
