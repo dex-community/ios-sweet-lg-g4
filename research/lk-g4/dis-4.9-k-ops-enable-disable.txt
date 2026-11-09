@@ -1,0 +1,108 @@
+================================================================================
+LG G4 (H815) FACTORY LK -- disassembly
+file      : research/lk-g4/aboot-lk-g4-h815.elf   (ELF32 ARM, single PT_LOAD)
+mapping   : vaddr 0x0f900000 -> file offset 0x8000, filesz 0xe93d8
+tooling   : capstone 5.0.7 (CS_ARCH_ARM/CS_MODE_ARM), analisi con propagazione
+            dei valori in /tmp/lkg/an.py (ricostruzione movw/movt, literal pool,
+            mappa delle struct dev->plat->CORE e dev->HC)
+
+HOW EVERY REFERENCE WAS RESOLVED
+  (a) coppie movw/movt: dalla mezza-bassa si risale al movt che scrive lo
+      stesso registro; il risultato e' riportato su entrambe le istruzioni.
+  (b) literal pool: `ldr rX,[pc,#imm]` -> word letta a (addr+8)&~3 + imm.
+  (c) struct: i puntatori HC/CORE non sono immediati ma arrivano da una
+      struttura.  Mappa usata (ricavata dal codice, non dal nome delle funzioni):
+          dev/host +0x00  -> HC   = 0xf9824900   (finestra "hc_mem")
+          dev/host +0x30  -> plat
+          plat     +0x00  -> CORE = 0xf9824000   (finestra "core_mem")
+      Proof: sdhci_mode_disable (0x0f914940) fa  ldr r2,[r0,#0x30] ; ldr r2,[r2]
+      e scrive CORE+0x78, che e' HC_MODE sia nel driver CAF sia nel registro che
+      la funzione dice di modificare.
+  (d) tabella clock: gli indirizzi GCC NON stanno nel codice ma nella tabella
+      dei clock in .data; sono stati decodificati leggendo le coppie
+      {nome_clock, puntatore_struct} e i campi dei struct.
+
+CONVENZIONE SUI NOMI DEI REGISTRI
+  I nomi dei registri SDHCI/CORE ripresi dal driver Linux CAF
+  (G4-Titan-Kernel/drivers/mmc/host/sdhci-msm.c) sono **IPOTESI**: il binario
+  LK e' strippato e non contiene nomi di registro.  Tutto quello che segue e'
+  marcato "ipotesi(nome Linux)".  Gli indirizzi, i valori e la sequenza delle
+  scritture sono fatti.
+================================================================================
+
+================================================================================
+FUNCTION: 0x0f9184b8  -- clk_ops->enable  e 0x0f91850c clk_ops->disable
+runtime   : 0x0f9184b8
+================================================================================
+Chiamate con r0 = puntatore alla struct del clock (P).
+[P-0x0c] = puntatore al CBCR del clock (GCC).
+Per sdc1_core_clk (alias) P = 0x0f9e3cb4  ->  CBCR = GCC+0x4c4.
+Per sdc1_iface_clk (alias) P = 0x0f9e390c ->  CBCR = GCC+0x4c8.
+--------------------------------------------------------------------------------
+calls     : 0x0f918508, 0x0f918558
+--------------------------------------------------------------------------------
+0x0f9184b8  98150de3   movw     r1, #0xd598    ; r67 = 0x0000d598  (movw lo half)
+0x0f9184bc  9f1f40e3   movt     r1, #0xf9f    ; r67 = 0x0f9fd598  (movt completes the pair at 0x0f9184b8)
+0x0f9184c0  0c2010e5   ldr      r2, [r0, #-0xc]    ; r68 = &clk+0x-c
+0x0f9184c4  003091e5   ldr      r3, [r1]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f9184c8  04e02de5   str      lr, [sp, #-4]!
+0x0f9184cc  0cd04de2   sub      sp, sp, #0xc
+0x0f9184d0  04308de5   str      r3, [sp, #4]
+0x0f9184d4  003092e5   ldr      r3, [r2]    ; r69 = &clk+0x-c
+0x0f9184d8  013083e3   orr      r3, r3, #1
+0x0f9184dc  003082e5   str      r3, [r2]
+0x0f9184e0  003092e5   ldr      r3, [r2]    ; r69 = &clk+0x-c
+0x0f9184e4  000053e3   cmp      r3, #0
+0x0f9184e8  fcffffba   blt      #0xf9184e0
+0x0f9184ec  04209de5   ldr      r2, [sp, #4]
+0x0f9184f0  0000a0e3   mov      r0, #0    ; r66 = 0
+0x0f9184f4  003091e5   ldr      r3, [r1]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f9184f8  030052e1   cmp      r2, r3
+0x0f9184fc  0100001a   bne      #0xf918508
+0x0f918500  0cd08de2   add      sp, sp, #0xc
+0x0f918504  04f09de4   pop      {pc}
+0x0f918508  338f00eb   bl       #0xf93c1dc
+0x0f91850c  98150de3   movw     r1, #0xd598    ; r67 = 0x0000d598  (movw lo half)
+0x0f918510  9f1f40e3   movt     r1, #0xf9f    ; r67 = 0x0f9fd598  (movt completes the pair at 0x0f91850c)
+0x0f918514  0c2010e5   ldr      r2, [r0, #-0xc]
+0x0f918518  003091e5   ldr      r3, [r1]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f91851c  04e02de5   str      lr, [sp, #-4]!
+0x0f918520  0cd04de2   sub      sp, sp, #0xc
+0x0f918524  04308de5   str      r3, [sp, #4]
+0x0f918528  003092e5   ldr      r3, [r2]
+0x0f91852c  0130c3e3   bic      r3, r3, #1
+0x0f918530  003082e5   str      r3, [r2]
+0x0f918534  003092e5   ldr      r3, [r2]
+0x0f918538  000053e3   cmp      r3, #0
+0x0f91853c  fcffffaa   bge      #0xf918534
+0x0f918540  04209de5   ldr      r2, [sp, #4]
+0x0f918544  003091e5   ldr      r3, [r1]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f918548  030052e1   cmp      r2, r3
+0x0f91854c  0100001a   bne      #0xf918558
+0x0f918550  0cd08de2   add      sp, sp, #0xc
+0x0f918554  04f09de4   pop      {pc}
+0x0f918558  1f8f00eb   bl       #0xf93c1dc
+0x0f91855c  100040e2   sub      r0, r0, #0x10
+0x0f918560  98350de3   movw     r3, #0xd598    ; r69 = 0x0000d598  (movw lo half)
+0x0f918564  9f3f40e3   movt     r3, #0xf9f    ; r69 = 0x0f9fd598  (movt completes the pair at 0x0f918560)
+0x0f918568  24c090e5   ldr      ip, [r0, #0x24]
+0x0f91856c  04e02de5   str      lr, [sp, #-4]!
+0x0f918570  0cd04de2   sub      sp, sp, #0xc
+0x0f918574  002093e5   ldr      r2, [r3]    ; r68 = [0x0f9fd598]=0x00000000
+0x0f918578  00005ce3   cmp      ip, #0
+0x0f91857c  04208de5   str      r2, [sp, #4]
+0x0f918580  04209de5   ldr      r2, [sp, #4]
+0x0f918584  0600001a   bne      #0xf9185a4
+0x0f918588  003093e5   ldr      r3, [r3]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f91858c  030052e1   cmp      r2, r3
+0x0f918590  0900001a   bne      #0xf9185bc
+0x0f918594  0c0090e5   ldr      r0, [r0, #0xc]
+0x0f918598  0cd08de2   add      sp, sp, #0xc
+0x0f91859c  04e09de4   pop      {lr}
+0x0f9185a0  e1feffea   b        #0xf91812c
+0x0f9185a4  003093e5   ldr      r3, [r3]
+
+MMIO SUMMARY (writes resolved to HC / CORE / GCC)
+--------------------------------------------------------------------------------
+  (nessuna scrittura a 0xf9824xxx / 0xfc40xxxx / 0xfc4cxxxx risolta in questa funzione)
+

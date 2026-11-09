@@ -1,0 +1,181 @@
+================================================================================
+LG G4 (H815) LK bootloader - RAW DISASSEMBLY / RESOLVED CONSTANTS
+file          : research/lk-g4/aboot-lk-g4-h815.elf  (read-only, unmodified)
+tooling       : Capstone 5.0.7, CS_ARCH_ARM / CS_MODE_ARM (ARMv7-A, ARM state)
+produced by   : /tmp/lkwork/g2.py  (analysis scaffolding kept out of the repo)
+
+HOW EVERY REFERENCE WAS RESOLVED
+--------------------------------------------------------------------------------
+1. ADDRESS MAP.  The ELF has exactly one PT_LOAD: vaddr 0x0f900000, p_offset
+   0x8000, filesz 0xe93d8, memsz 0xfe53c.  Therefore
+       file_offset = vaddr - 0x0f900000 + 0x8000
+   and 0x8000..0xf73d8 of the file is the only file-backed code/data.
+   (PH1 at 0x1000 is PT_NULL - not a segment.  PH2 at 0x8ce80 is
+   PT_ARM_EXIDX, vaddr 0x0f984e80, which maps consistently with the formula
+   above: 0x0f984e80-0x0f900000+0x8000 = 0x8ce80.)
+
+2. FUNCTION BOUNDARIES.  The image is stripped (no symbol table, no section
+   headers).  A function start is taken as the next address that is either
+   (a) the target of a `bl`, or (b) a `push {... lr}` prologue.  A function
+   ends at the next such address; the `pop {..., pc}` / `bx lr` epilogues are
+   marked in the listing.  Where a function ends with a `bl <noreturn>`
+   (e.g. 0x0f93c1dc, the assert/panic helper) that trailing call is kept
+   inside the function.  A trailing `bl` to a noreturn helper is the only
+   code after the last `pop {..,pc}`.
+
+3. PC-RELATIVE / CONSTANT RESOLUTION (exact method):
+   a) LK builds every 32-bit constant with a register pair, never with an
+      absolute literal pool.  Two encodings are used and BOTH are paired
+      here:
+        - `mov  rD,#lo16` + `movt rD,#hi16`   (lo16 as an ARM rotated imm)
+        - `movw rD,#lo12` + `movt rD,#hi16`
+      Pairing rule: scan forward from the low-half instruction for the first
+      `movt` writing the SAME register; the intervening instructions must be
+      only movw/movt, otherwise the pair is rejected.  The reconstructed
+      value is printed in the comment of BOTH instructions.
+   b) `ldr rX,[pc,#imm]` literal pools: the pool word is read at
+      (addr+8)&~3 + imm and printed as "literal pool @0x... = 0x...".
+      LK's *code* uses these only for branch/jump-table data; all hardware
+      addresses come from (a) or from (d).
+   c) `str/strh/strb rS,[rB,#disp]`: the destination is resolved as
+      value(rB)+disp whenever value(rB) is a known absolute address.
+      For that, a per-function constant propagation is run (movw/movt pairs,
+      mov #imm, add/sub #imm, ldr from a literal pool, and the structure
+      model of section 4).
+   d) HARDWARE BASES THAT LIVE IN STRUCTURES.  The CORE/HC bases are not
+      immediates; they are copied out of a platform descriptor at runtime.
+      They were resolved by following the data flow, and the resulting
+      structure map is reproduced in the header of each file:
+        plat_struct (built on the stack by target/msm8992_alphap/init.c):
+            +0x00 u8  = 1              (controller/slot id)
+            +0x04 u32 = 0xaa           (quirks)      [2nd attempt: 0xfd]
+            +0x08 u32 = 0xf9824900     (hc_mem  = SDHCI HC block)
+            +0x0c u32 = 0xf9824000     (core_mem= MCI/SDHCI CORE block)
+            +0x10 u16 = 2              (bus width)
+            +0x14 u32 = 0x0b71b000     (ioaddr / DLL base)
+            +0x18 u32 = 0
+            +0x1c u32 = *(0x0f9fd598)  (not copied: memcpy size is 0x1c)
+          the 0x1c-byte descriptor is memcpy'd to host+0xf8, so:
+            host+0xf8 = 1, host+0xfc = 0xaa, host+0x100 = 0xf9824900 (HC),
+            host+0x104 = 0xf9824000 (CORE), host+0x108 = 2,
+            host+0x10c = 0x0b71b000, host+0x110 = 0
+          and the "plat" object handed to sdhci_msm_init is built as:
+            plat+0x00 = 0xf9824000 (CORE)   plat+0x04 = 0xaa (quirks)
+            plat+0x08 = 0   plat+0x0b = 1 (u8)  plat+0x0c = 0 (u8)
+            plat+0x10 = <ptr>  plat+0xe8 = <flags>
+          The global `dev` (0x0f9fd588) points at the same "host" object
+          (init_entry returns it), hence dev+0x30 = plat and *plat = CORE.
+   e) STRING REFERENCES: every movw/movt pair whose value is a printable
+      string address is printed as  string "...".
+
+4. FORMAT
+   <addr>  <8 hex bytes in memory order>  <mnemonic> <operands>   ; <comment>
+   The byte column is the 4-byte instruction word in little-endian memory
+   order.  "WRITE 0x........" marks a resolved store destination.
+
+5. LIMITS / HONEST CAVEATS
+   - The image is stripped: no symbol names, no DWARF.  Function names in
+     this report are the names given in the task brief, or descriptive
+     labels derived from the strings/arguments inside the function.
+   - Register values loaded from memory are opaque unless the memory
+     location is covered by the structure map of section 3(d).
+   - SDHCI/Qualcomm register *names* are only asserted where the task brief
+     or the binary itself fixes them; elsewhere only the offset is given.
+   - The linker places literal pools and .rodata inline in the code stream;
+     where the linear disassembly walks over such data it is marked
+     ".byte".
+
+================================================================================
+D3 - mmc_put_card_to_sleep   runtime 0x0f916a6c
+================================================================================
+--------------------------------------------------------------------------------
+FUNCTION: mmc_put_card_to_sleep  (runtime 0x0f916a6c)
+runtime range : 0x0f916a6c .. 0x0f916b38   (51 instructions)
+arguments      : r0 = dev (the mmc/sdhci host object; global `dev` @0x0f9fd588)
+struct mmc_cmd layout as read by mmc_send_cmd (0x0f913128):
+    +0x00 u16 = command index      +0x04 u32 = argument
+    +0x08 u8  = blk/data flags     +0x09 u8  = data direction
+    +0x0a u16 = response type      +0x0c u32 = response word 0
+    response-type enum as dispatched inside mmc_send_cmd:
+        0 = NONE, 1 = R1, 2 = R2, 3 = R3, 4 = R4, 5 = R5, 6 = R6
+epilogues     : 0x0f916b00
+calls         : 0x0f93d800, 0x0f913128, 0x0f913128, 0x0f93c008, 0x0f93c008, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f916a6c  30 40 2d e9  push        {r4, r5, lr}                      
+0f916a70  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f916a74  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f916a70)  <- global word @0x0f9fd598 (role not asserted)
+0f916a78  4c d0 4d e2  sub         sp, sp, #0x4c                     
+0f916a7c  00 50 a0 e1  mov         r5, r0                            
+0f916a80  00 10 a0 e3  mov         r1, #0                             ; r1 = 0x0
+0f916a84  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f916a88  40 20 a0 e3  mov         r2, #0x40                          ; r2 = 0x40
+0f916a8c  0d 00 a0 e1  mov         r0, sp                            
+0f916a90  44 30 8d e5  str         r3, [sp, #0x44]                    ; [sp,#0x44]
+0f916a94  59 9b 00 eb  bl          #0xf93d800                         ; call 0x0f93d800
+0f916a98  05 00 a0 e1  mov         r0, r5                            
+0f916a9c  0d 10 a0 e1  mov         r1, sp                            
+0f916aa0  07 30 a0 e3  mov         r3, #7                             ; r3 = 0x7
+0f916aa4  b0 30 cd e1  strh        r3, [sp]                           ; [sp]
+0f916aa8  9e f1 ff eb  bl          #0xf913128                         ; call 0x0f913128
+0f916aac  00 30 50 e2  subs        r3, r0, #0                        
+0f916ab0  13 00 00 1a  bne         #0xf916b04                        
+0f916ab4  38 e0 95 e5  ldr         lr, [r5, #0x38]                    ; lr = [r5,#0x38]  (value not statically resolvable)
+0f916ab8  0d 10 a0 e1  mov         r1, sp                            
+0f916abc  09 30 cd e5  strb        r3, [sp, #9]                       ; [sp,#0x9]
+0f916ac0  05 00 a0 e1  mov         r0, r5                            
+0f916ac4  05 c0 a0 e3  mov         ip, #5                             ; r12 = 0x5
+0f916ac8  02 20 a0 e3  mov         r2, #2                             ; r2 = 0x2
+0f916acc  0e 38 a0 e1  lsl         r3, lr, #0x10                     
+0f916ad0  b0 c0 cd e1  strh        ip, [sp]                           ; [sp]
+0f916ad4  02 39 83 e3  orr         r3, r3, #0x8000                   
+0f916ad8  ba 20 cd e1  strh        r2, [sp, #0xa]                     ; [sp,#0xa]
+0f916adc  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f916ae0  90 f1 ff eb  bl          #0xf913128                         ; call 0x0f913128
+0f916ae4  00 00 50 e3  cmp         r0, #0                            
+0f916ae8  0b 00 00 1a  bne         #0xf916b1c                        
+0f916aec  44 20 9d e5  ldr         r2, [sp, #0x44]                    ; r2 = [sp,#0x44]  (value not statically resolvable)
+0f916af0  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f916af4  03 00 52 e1  cmp         r2, r3                            
+0f916af8  0d 00 00 1a  bne         #0xf916b34                        
+0f916afc  4c d0 8d e2  add         sp, sp, #0x4c                     
+0f916b00  30 80 bd e8  pop         {r4, r5, pc}                      
+0f916b04  80 04 0c e3  movw        r0, #0xc480                        ; r0 = 0x0f96c480  <- string "card deselect error: %s"
+0f916b08  38 15 0c e3  movw        r1, #0xc538                        ; r1 = 0x0f96c538  <- string "mmc_put_card_to_sleep"
+0f916b0c  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96c480 (high half; completes the pair at 0x0f916b04)  <- string "card deselect error: %s"
+0f916b10  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f96c538 (high half; completes the pair at 0x0f916b08)  <- string "mmc_put_card_to_sleep"
+0f916b14  3b 95 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f916b18  f3 ff ff ea  b           #0xf916aec                        
+0f916b1c  9c 04 0c e3  movw        r0, #0xc49c                        ; r0 = 0x0f96c49c  <- string "card sleep error: %s"
+0f916b20  38 15 0c e3  movw        r1, #0xc538                        ; r1 = 0x0f96c538  <- string "mmc_put_card_to_sleep"
+0f916b24  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96c49c (high half; completes the pair at 0x0f916b1c)  <- string "card sleep error: %s"
+0f916b28  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f96c538 (high half; completes the pair at 0x0f916b20)  <- string "mmc_put_card_to_sleep"
+0f916b2c  35 95 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f916b30  ed ff ff ea  b           #0xf916aec                        
+0f916b34  a8 95 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+MMC COMMANDS EMITTED BY THIS FUNCTION (in execution order)
+--------------------------------------------------------------------------------
+ #  index  argument                    rsp_type    rsp field write        send call
+    (cmd)  (cmd.arg)                  (cmd+0x0a)  instruction            site
+--------------------------------------------------------------------------------
+ 1  CMD7   0x00000000 (not written -> 0)   0 = NONE  (memset, +0x0a left 0)   0x0f916aa8
+    (DESELECT CARD)
+ 2  CMD5   0x00028000                  2 = R2     strh r2,[sp,#0xa]       0x0f916ae0
+    (SLEEP / AWAKEN)                  at 0x0f916ad8
+    argument built at 0x0f916acc-0x0f916ad4:
+        ldr  lr,[r5,#0x38]      -> dev+0x38 = the card RCA
+        lsl  r3,lr,#0x10       -> RCA << 16
+        orr  r3,r3,#0x8000     -> | 0x8000
+        str  r3,[sp,#4]        -> cmd.arg
+    => cmd.arg = (RCA << 16) | 0x8000, with RCA = dev+0x38.
+       The task brief fixes MMC_RCA = 2, so cmd.arg = 0x00028000.
+--------------------------------------------------------------------------------
+Failure paths (both loop back to the lock check at 0x0f916aec):
+  0x0f916b04  printf("card deselect error: %s", "mmc_put_card_to_sleep")
+  0x0f916b1c  printf("card sleep error: %s",     "mmc_put_card_to_sleep")
+
+MMIO SUMMARY
+--------------------------------------------------------------------------------
+  (none - this function performs no store to 0xf9824xxx / 0xfc40xxxx / 0xfc4cxxxx)
+  The only store to the SDHCI blocks happens in sdhci_mode_disable, which
+  target_uninit calls immediately after this function (see D5).

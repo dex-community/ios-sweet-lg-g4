@@ -1,0 +1,103 @@
+================================================================================
+LG G4 (H815) FACTORY LK -- disassembly
+file      : research/lk-g4/aboot-lk-g4-h815.elf   (ELF32 ARM, single PT_LOAD)
+mapping   : vaddr 0x0f900000 -> file offset 0x8000, filesz 0xe93d8
+tooling   : capstone 5.0.7 (CS_ARCH_ARM/CS_MODE_ARM), analisi con propagazione
+            dei valori in /tmp/lkg/an.py (ricostruzione movw/movt, literal pool,
+            mappa delle struct dev->plat->CORE e dev->HC)
+
+HOW EVERY REFERENCE WAS RESOLVED
+  (a) coppie movw/movt: dalla mezza-bassa si risale al movt che scrive lo
+      stesso registro; il risultato e' riportato su entrambe le istruzioni.
+  (b) literal pool: `ldr rX,[pc,#imm]` -> word letta a (addr+8)&~3 + imm.
+  (c) struct: i puntatori HC/CORE non sono immediati ma arrivano da una
+      struttura.  Mappa usata (ricavata dal codice, non dal nome delle funzioni):
+          dev/host +0x00  -> HC   = 0xf9824900   (finestra "hc_mem")
+          dev/host +0x30  -> plat
+          plat     +0x00  -> CORE = 0xf9824000   (finestra "core_mem")
+      Proof: sdhci_mode_disable (0x0f914940) fa  ldr r2,[r0,#0x30] ; ldr r2,[r2]
+      e scrive CORE+0x78, che e' HC_MODE sia nel driver CAF sia nel registro che
+      la funzione dice di modificare.
+  (d) tabella clock: gli indirizzi GCC NON stanno nel codice ma nella tabella
+      dei clock in .data; sono stati decodificati leggendo le coppie
+      {nome_clock, puntatore_struct} e i campi dei struct.
+
+CONVENZIONE SUI NOMI DEI REGISTRI
+  I nomi dei registri SDHCI/CORE ripresi dal driver Linux CAF
+  (G4-Titan-Kernel/drivers/mmc/host/sdhci-msm.c) sono **IPOTESI**: il binario
+  LK e' strippato e non contiene nomi di registro.  Tutto quello che segue e'
+  marcato "ipotesi(nome Linux)".  Gli indirizzi, i valori e la sequenza delle
+  scritture sono fatti.
+================================================================================
+
+================================================================================
+FUNCTION: 0x0f91855c  -- clk_ops->set_rate  e 0x0f9188fc clk_ops->set_flag
+runtime   : 0x0f91855c
+================================================================================
+calls     : 0x0f9185bc, 0x0f9185f4
+--------------------------------------------------------------------------------
+0x0f91855c  100040e2   sub      r0, r0, #0x10
+0x0f918560  98350de3   movw     r3, #0xd598    ; r69 = 0x0000d598  (movw lo half)
+0x0f918564  9f3f40e3   movt     r3, #0xf9f    ; r69 = 0x0f9fd598  (movt completes the pair at 0x0f918560)
+0x0f918568  24c090e5   ldr      ip, [r0, #0x24]
+0x0f91856c  04e02de5   str      lr, [sp, #-4]!
+0x0f918570  0cd04de2   sub      sp, sp, #0xc
+0x0f918574  002093e5   ldr      r2, [r3]    ; r68 = [0x0f9fd598]=0x00000000
+0x0f918578  00005ce3   cmp      ip, #0
+0x0f91857c  04208de5   str      r2, [sp, #4]
+0x0f918580  04209de5   ldr      r2, [sp, #4]
+0x0f918584  0600001a   bne      #0xf9185a4
+0x0f918588  003093e5   ldr      r3, [r3]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f91858c  030052e1   cmp      r2, r3
+0x0f918590  0900001a   bne      #0xf9185bc
+0x0f918594  0c0090e5   ldr      r0, [r0, #0xc]
+0x0f918598  0cd08de2   add      sp, sp, #0xc
+0x0f91859c  04e09de4   pop      {lr}
+0x0f9185a0  e1feffea   b        #0xf91812c
+0x0f9185a4  003093e5   ldr      r3, [r3]
+0x0f9185a8  0000e0e3   mvn      r0, #0
+0x0f9185ac  030052e1   cmp      r2, r3
+0x0f9185b0  0100001a   bne      #0xf9185bc
+0x0f9185b4  0cd08de2   add      sp, sp, #0xc
+0x0f9185b8  04f09de4   pop      {pc}
+0x0f9185bc  068f00eb   bl       #0xf93c1dc
+0x0f9185c0  98350de3   movw     r3, #0xd598    ; r69 = 0x0000d598  (movw lo half)
+0x0f9185c4  9f3f40e3   movt     r3, #0xf9f    ; r69 = 0x0f9fd598  (movt completes the pair at 0x0f9185c0)
+0x0f9185c8  04e02de5   str      lr, [sp, #-4]!
+0x0f9185cc  0cd04de2   sub      sp, sp, #0xc
+0x0f9185d0  002093e5   ldr      r2, [r3]    ; r68 = [0x0f9fd598]=0x00000000
+0x0f9185d4  0000a0e3   mov      r0, #0    ; r66 = 0
+0x0f9185d8  04208de5   str      r2, [sp, #4]
+0x0f9185dc  04209de5   ldr      r2, [sp, #4]
+0x0f9185e0  003093e5   ldr      r3, [r3]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f9185e4  030052e1   cmp      r2, r3
+0x0f9185e8  0100001a   bne      #0xf9185f4
+0x0f9185ec  0cd08de2   add      sp, sp, #0xc
+0x0f9185f0  04f09de4   pop      {pc}
+0x0f9185f4  f88e00eb   bl       #0xf93c1dc
+0x0f9185f8  f0402de9   push     {r4, r5, r6, r7, lr}
+0x0f9185fc  206040e2   sub      r6, r0, #0x20
+0x0f918600  184096e5   ldr      r4, [r6, #0x18]
+0x0f918604  98550de3   movw     r5, #0xd598    ; r71 = 0x0000d598  (movw lo half)
+0x0f918608  9f5f40e3   movt     r5, #0xf9f    ; r71 = 0x0f9fd598  (movt completes the pair at 0x0f918604)
+0x0f91860c  14d04de2   sub      sp, sp, #0x14
+0x0f918610  0e70a0e1   mov      r7, lr    ; r73 = r10
+0x0f918614  003094e5   ldr      r3, [r4]
+0x0f918618  002095e5   ldr      r2, [r5]    ; r68 = [0x0f9fd598]=0x00000000
+0x0f91861c  020073e3   cmn      r3, #2
+0x0f918620  0c208de5   str      r2, [sp, #0xc]
+0x0f918624  0300001a   bne      #0xf918638
+0x0f918628  120000ea   b        #0xf918678
+0x0f91862c  1830b4e5   ldr      r3, [r4, #0x18]!
+0x0f918630  020073e3   cmn      r3, #2
+0x0f918634  0f00000a   beq      #0xf918678
+0x0f918638  010053e1   cmp      r3, r1
+0x0f91863c  faffff1a   bne      #0xf91862c
+0x0f918640  1c3096e5   ldr      r3, [r6, #0x1c]
+0x0f918644  040053e1   cmp      r3, r4
+0x0f918648  1100000a   beq      #0xf918694
+
+MMIO SUMMARY (writes resolved to HC / CORE / GCC)
+--------------------------------------------------------------------------------
+  (nessuna scrittura a 0xf9824xxx / 0xfc40xxxx / 0xfc4cxxxx risolta in questa funzione)
+

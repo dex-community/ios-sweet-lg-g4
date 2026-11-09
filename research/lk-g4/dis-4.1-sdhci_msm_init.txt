@@ -1,0 +1,200 @@
+================================================================================
+LG G4 (H815) LK bootloader - RAW DISASSEMBLY / RESOLVED CONSTANTS
+file          : research/lk-g4/aboot-lk-g4-h815.elf  (read-only, unmodified)
+tooling       : Capstone 5.0.7, CS_ARCH_ARM / CS_MODE_ARM (ARMv7-A, ARM state)
+produced by   : /tmp/lkwork/g2.py  (analysis scaffolding kept out of the repo)
+
+HOW EVERY REFERENCE WAS RESOLVED
+--------------------------------------------------------------------------------
+1. ADDRESS MAP.  The ELF has exactly one PT_LOAD: vaddr 0x0f900000, p_offset
+   0x8000, filesz 0xe93d8, memsz 0xfe53c.  Therefore
+       file_offset = vaddr - 0x0f900000 + 0x8000
+   and 0x8000..0xf73d8 of the file is the only file-backed code/data.
+   (PH1 at 0x1000 is PT_NULL - not a segment.  PH2 at 0x8ce80 is
+   PT_ARM_EXIDX, vaddr 0x0f984e80, which maps consistently with the formula
+   above: 0x0f984e80-0x0f900000+0x8000 = 0x8ce80.)
+
+2. FUNCTION BOUNDARIES.  The image is stripped (no symbol table, no section
+   headers).  A function start is taken as the next address that is either
+   (a) the target of a `bl`, or (b) a `push {... lr}` prologue.  A function
+   ends at the next such address; the `pop {..., pc}` / `bx lr` epilogues are
+   marked in the listing.  Where a function ends with a `bl <noreturn>`
+   (e.g. 0x0f93c1dc, the assert/panic helper) that trailing call is kept
+   inside the function.  A trailing `bl` to a noreturn helper is the only
+   code after the last `pop {..,pc}`.
+
+3. PC-RELATIVE / CONSTANT RESOLUTION (exact method):
+   a) LK builds every 32-bit constant with a register pair, never with an
+      absolute literal pool.  Two encodings are used and BOTH are paired
+      here:
+        - `mov  rD,#lo16` + `movt rD,#hi16`   (lo16 as an ARM rotated imm)
+        - `movw rD,#lo12` + `movt rD,#hi16`
+      Pairing rule: scan forward from the low-half instruction for the first
+      `movt` writing the SAME register; the intervening instructions must be
+      only movw/movt, otherwise the pair is rejected.  The reconstructed
+      value is printed in the comment of BOTH instructions.
+   b) `ldr rX,[pc,#imm]` literal pools: the pool word is read at
+      (addr+8)&~3 + imm and printed as "literal pool @0x... = 0x...".
+      LK's *code* uses these only for branch/jump-table data; all hardware
+      addresses come from (a) or from (d).
+   c) `str/strh/strb rS,[rB,#disp]`: the destination is resolved as
+      value(rB)+disp whenever value(rB) is a known absolute address.
+      For that, a per-function constant propagation is run (movw/movt pairs,
+      mov #imm, add/sub #imm, ldr from a literal pool, and the structure
+      model of section 4).
+   d) HARDWARE BASES THAT LIVE IN STRUCTURES.  The CORE/HC bases are not
+      immediates; they are copied out of a platform descriptor at runtime.
+      They were resolved by following the data flow, and the resulting
+      structure map is reproduced in the header of each file:
+        plat_struct (built on the stack by target/msm8992_alphap/init.c):
+            +0x00 u8  = 1              (controller/slot id)
+            +0x04 u32 = 0xaa           (quirks)      [2nd attempt: 0xfd]
+            +0x08 u32 = 0xf9824900     (hc_mem  = SDHCI HC block)
+            +0x0c u32 = 0xf9824000     (core_mem= MCI/SDHCI CORE block)
+            +0x10 u16 = 2              (bus width)
+            +0x14 u32 = 0x0b71b000     (ioaddr / DLL base)
+            +0x18 u32 = 0
+            +0x1c u32 = *(0x0f9fd598)  (not copied: memcpy size is 0x1c)
+          the 0x1c-byte descriptor is memcpy'd to host+0xf8, so:
+            host+0xf8 = 1, host+0xfc = 0xaa, host+0x100 = 0xf9824900 (HC),
+            host+0x104 = 0xf9824000 (CORE), host+0x108 = 2,
+            host+0x10c = 0x0b71b000, host+0x110 = 0
+          and the "plat" object handed to sdhci_msm_init is built as:
+            plat+0x00 = 0xf9824000 (CORE)   plat+0x04 = 0xaa (quirks)
+            plat+0x08 = 0   plat+0x0b = 1 (u8)  plat+0x0c = 0 (u8)
+            plat+0x10 = <ptr>  plat+0xe8 = <flags>
+          The global `dev` (0x0f9fd588) points at the same "host" object
+          (init_entry returns it), hence dev+0x30 = plat and *plat = CORE.
+   e) STRING REFERENCES: every movw/movt pair whose value is a printable
+      string address is printed as  string "...".
+
+4. FORMAT
+   <addr>  <8 hex bytes in memory order>  <mnemonic> <operands>   ; <comment>
+   The byte column is the 4-byte instruction word in little-endian memory
+   order.  "WRITE 0x........" marks a resolved store destination.
+
+5. LIMITS / HONEST CAVEATS
+   - The image is stripped: no symbol names, no DWARF.  Function names in
+     this report are the names given in the task brief, or descriptive
+     labels derived from the strings/arguments inside the function.
+   - Register values loaded from memory are opaque unless the memory
+     location is covered by the structure map of section 3(d).
+   - SDHCI/Qualcomm register *names* are only asserted where the task brief
+     or the binary itself fixes them; elsewhere only the offset is given.
+   - The linker places literal pools and .rodata inline in the code stream;
+     where the linear disassembly walks over such data it is marked
+     ".byte".
+
+================================================================================
+D1 - sdhci_msm_init   runtime 0x0f913f10
+================================================================================
+--------------------------------------------------------------------------------
+FUNCTION: sdhci_msm_init  (runtime 0x0f913f10)
+runtime range : 0x0f913f10 .. 0x0f914068   (86 instructions)
+arguments      : r0 = host/dev object, r1 = plat object (plat+0x00 = CORE 0xf9824000)
+epilogues     : 0x0f914060
+calls         : 0x0f917a78, 0x0f912e20, 0x0f917f4c, 0x0f917f14, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f913f10  70 40 2d e9  push        {r4, r5, r6, lr}                  
+0f913f14  98 65 0d e3  movw        r6, #0xd598                        ; r6 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f913f18  9f 6f 40 e3  movt        r6, #0xf9f                         ; r6 = 0x0f9fd598 (high half; completes the pair at 0x0f913f14)  <- global word @0x0f9fd598 (role not asserted)
+0f913f1c  00 30 91 e5  ldr         r3, [r1]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913f20  08 d0 4d e2  sub         sp, sp, #8                        
+0f913f24  01 40 a0 e1  mov         r4, r1                            
+0f913f28  00 20 96 e5  ldr         r2, [r6]                           ; r2 = [0x0f9fd598]
+0f913f2c  00 50 a0 e1  mov         r5, r0                            
+0f913f30  01 00 a0 e3  mov         r0, #1                             ; r0 = 0x1
+0f913f34  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f913f38  78 20 93 e5  ldr         r2, [r3, #0x78]                    ; r2 = [0xf9824078]  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))
+0f913f3c  01 20 c2 e3  bic         r2, r2, #1                        
+0f913f40  78 20 83 e5  str         r2, [r3, #0x78]                    ; WRITE 0xf9824078  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))  <- <r2, opaque>
+0f913f44  00 30 91 e5  ldr         r3, [r1]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913f48  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0xf9824000]  (CORE+0x00 (core ctrl/reset: bit7 = core reset, per known facts))
+0f913f4c  80 20 82 e3  orr         r2, r2, #0x80                     
+0f913f50  00 20 83 e5  str         r2, [r3]                           ; WRITE 0xf9824000  (CORE+0x00 (core ctrl/reset: bit7 = core reset, per known facts))  <- <r2, opaque>
+0f913f54  c7 0e 00 eb  bl          #0xf917a78                         ; call 0x0f917a78
+0f913f58  00 30 94 e5  ldr         r3, [r4]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913f5c  01 10 a0 e3  mov         r1, #1                             ; r1 = 0x1
+0f913f60  05 00 a0 e1  mov         r0, r5                            
+0f913f64  78 20 93 e5  ldr         r2, [r3, #0x78]                    ; r2 = [0xf9824078]  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))
+0f913f68  01 20 82 e1  orr         r2, r2, r1                        
+0f913f6c  78 20 83 e5  str         r2, [r3, #0x78]                    ; WRITE 0xf9824078  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))  <- <r2, opaque>
+0f913f70  00 30 94 e5  ldr         r3, [r4]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913f74  78 20 93 e5  ldr         r2, [r3, #0x78]                    ; r2 = [0xf9824078]  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))
+0f913f78  02 2a 82 e3  orr         r2, r2, #0x2000                   
+0f913f7c  78 20 83 e5  str         r2, [r3, #0x78]                    ; WRITE 0xf9824078  (CORE+0x78 (MCI/SDHCI clock-control: bit0 = clk enable, bit13 = FF_CLK_SW_RST_DIS))  <- <r2, opaque>
+0f913f80  a6 fb ff eb  bl          #0xf912e20                         ; call 0x0f912e20
+0f913f84  0c 30 d4 e5  ldrb        r3, [r4, #0xc]                    
+0f913f88  00 00 53 e3  cmp         r3, #0                            
+0f913f8c  00 30 95 15  ldrne       r3, [r5]                          
+0f913f90  0c 21 93 15  ldrne       r2, [r3, #0x10c]                  
+0f913f94  06 29 82 13  orrne       r2, r2, #0x18000                  
+0f913f98  0c 21 83 15  strne       r2, [r3, #0x10c]                  
+0f913f9c  00 30 94 e5  ldr         r3, [r4]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913fa0  dc 20 93 e5  ldr         r2, [r3, #0xdc]                    ; r2 = [0xf98240dc]  (CORE+0xdc)
+0f913fa4  03 00 12 e3  tst         r2, #3                            
+0f913fa8  e4 20 83 e5  str         r2, [r3, #0xe4]                    ; WRITE 0xf98240e4  (CORE+0xe4)  <- <r2, opaque>
+0f913fac  00 10 94 e5  ldr         r1, [r4]                           ; r1 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913fb0  e8 30 91 e5  ldr         r3, [r1, #0xe8]                    ; r3 = [0xf98240e8]  (CORE+0xe8)
+0f913fb4  01 30 83 13  orrne       r3, r3, #1                        
+0f913fb8  0c 00 12 e3  tst         r2, #0xc                          
+0f913fbc  04 30 83 13  orrne       r3, r3, #4                        
+0f913fc0  04 20 a0 e1  mov         r2, r4                            
+0f913fc4  e8 30 81 e5  str         r3, [r1, #0xe8]                    ; WRITE 0xf98240e8  (CORE+0xe8)  <- <r3, opaque>
+0f913fc8  c0 1a 03 e3  movw        r1, #0x3ac0                        ; r1 = 0x0f913ac0
+0f913fcc  04 00 94 e5  ldr         r0, [r4, #4]                       ; r0 = 0x000000aa
+0f913fd0  91 1f 40 e3  movt        r1, #0xf91                         ; r1 = 0x0f913ac0 (high half; completes the pair at 0x0f913fc8)
+0f913fd4  dc 0f 00 eb  bl          #0xf917f4c                         ; call 0x0f917f4c
+0f913fd8  04 00 94 e5  ldr         r0, [r4, #4]                       ; r0 = 0x000000aa
+0f913fdc  cc 0f 00 eb  bl          #0xf917f14                         ; call 0x0f917f14
+0f913fe0  00 20 94 e5  ldr         r2, [r4]                           ; r2 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913fe4  30 30 95 e5  ldr         r3, [r5, #0x30]                    ; r3 = PLAT (object pointer)
+0f913fe8  0f 10 a0 e3  mov         r1, #0xf                           ; r1 = 0xf
+0f913fec  e0 10 82 e5  str         r1, [r2, #0xe0]                    ; WRITE 0xf98240e0  (CORE+0xe0)  <- 0xf
+0f913ff0  00 30 93 e5  ldr         r3, [r3]                           ; r3 = 0xf9824000  <- MCI/SDHCI CORE base ("core_mem")
+0f913ff4  50 20 93 e5  ldr         r2, [r3, #0x50]                    ; r2 = [0xf9824050]  (CORE+0x50)
+0f913ff8  22 3e a0 e1  lsr         r3, r2, #0x1c                     
+0f913ffc  72 20 ef e6  uxtb        r2, r2                            
+0f914000  00 00 53 e3  cmp         r3, #0                            
+0f914004  10 30 c5 e5  strb        r3, [r5, #0x10]                    ; [r5,#0x10]
+0f914008  b2 21 c5 e1  strh        r2, [r5, #0x12]                    ; [r5,#0x12]
+0f91400c  0a 00 00 0a  beq         #0xf91403c                        
+0f914010  11 20 42 e2  sub         r2, r2, #0x11                     
+0f914014  72 20 ff e6  uxth        r2, r2                            
+0f914018  01 00 52 e3  cmp         r2, #1                            
+0f91401c  06 00 00 9a  bls         #0xf91403c                        
+0f914020  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f914024  0b 20 d4 e5  ldrb        r2, [r4, #0xb]                    
+0f914028  01 00 52 e3  cmp         r2, #1                            
+0f91402c  40 20 93 e5  ldr         r2, [r3, #0x40]                    ; r2 = [0xf9824940]  (HC+0x40 (SDHC_SDMMC_INT_STATUS / Interrupt Status))
+0f914030  01 23 82 03  orreq       r2, r2, #0x4000000                
+0f914034  02 24 82 13  orrne       r2, r2, #0x2000000                
+0f914038  1c 21 83 e5  str         r2, [r3, #0x11c]                   ; WRITE 0xf9824a1c  (HC+0x11c)  <- <r2, opaque>
+0f91403c  04 10 9d e5  ldr         r1, [sp, #4]                       ; r1 = [sp,#0x4]  (value not statically resolvable)
+0f914040  00 30 a0 e3  mov         r3, #0                             ; r3 = 0x0
+0f914044  00 20 96 e5  ldr         r2, [r6]                           ; r2 = [0x0f9fd598]
+0f914048  08 30 c4 e5  strb        r3, [r4, #8]                       ; [r4,#0x8]
+0f91404c  02 00 51 e1  cmp         r1, r2                            
+0f914050  09 30 c4 e5  strb        r3, [r4, #9]                       ; [r4,#0x9]
+0f914054  0c 30 85 e5  str         r3, [r5, #0xc]                     ; [r5,#0xc]
+0f914058  01 00 00 1a  bne         #0xf914064                        
+0f91405c  08 d0 8d e2  add         sp, sp, #8                        
+0f914060  70 80 bd e8  pop         {r4, r5, r6, pc}                  
+0f914064  5c a0 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+MMIO SUMMARY (resolved stores inside this function)
+--------------------------------------------------------------------------------
+0f913f40  CORE+0x78 (0xf9824078)  <- (old & ~0x1)            clear bit0 (clock disable)
+0f913f50  CORE+0x00 (0xf9824000)  <- (old | 0x80)           pulse core reset (bit7)
+0f913f6c  CORE+0x78 (0xf9824078)  <- (old | 0x1)             set bit0 (clock enable)
+0f913f7c  CORE+0x78 (0xf9824078)  <- (old | 0x2000)         set bit13 FF_CLK_SW_RST_DIS
+0f913f98  CORE+0x10c(0xf982410c)  <- (old | 0x18000)        conditional (plat+0x0c != 0)
+0f913fa8  CORE+0x0e4(0xf98240e4)  <- value read from CORE+0xdc
+0f913fc4  CORE+0x0e8(0xf98240e8)  <- (old | 0x1) / (old | 0x4)  conditional
+0f913fec  CORE+0x0e0(0xf98240e0)  <- 0xf
+0f914038  HC  +0x11c(0xf9824a1c)  <- HC+0x40 with bit26 or bit25 set
+--------------------------------------------------------------------------------
+NOTES ON THE TWO ARGUMENTS
+  r1 (arg1) = "plat":  plat+0x00 = CORE 0xf9824000, plat+0x04 = quirks (0xaa).
+  r0 (arg0) = host/dev: host+0x00 = HC 0xf9824900, host+0x30 = plat.
+  Call sites: 0x0f9156dc (host init) and 0x0f914ba8 / 0x0f914e34 / 0x0f914e90.

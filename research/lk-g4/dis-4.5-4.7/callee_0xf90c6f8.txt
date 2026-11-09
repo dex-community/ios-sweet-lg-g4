@@ -1,0 +1,42 @@
+### callee_0xf90c6f8  start=0x0f90c6f8  next_func_start=0x0f90c79c  epilogue_end=0xf90c76c
+0x0f90c6f8  30402de9   push      {r4, r5, lr}
+0x0f90c6fc  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f90c700  9f4f40e3   movt      r4, #0xf9f
+0x0f90c704  14d04de2   sub       sp, sp, #0x14
+0x0f90c708  020050e3   cmp       r0, #2
+0x0f90c70c  0e50a0e1   mov       r5, lr
+0x0f90c710  003094e5   ldr       r3, [r4]
+0x0f90c714  0c308de5   str       r3, [sp, #0xc]
+0x0f90c718  1300000a   beq       #0xf90c76c
+0x0f90c71c  0010a0e1   mov       r1, r0
+0x0f90c720  080609e3   movw      r0, #0x9608    ; (b) low half 0x9608
+0x0f90c724  960f40e3   movt      r0, #0xf96
+0x0f90c728  36be00eb   bl        #0xf93c008
+0x0f90c72c  0500a0e1   mov       r0, r5
+0x0f90c730  b83b00e3   movw      r3, #0xbb8    ; (b) low half 0x0bb8
+0x0f90c734  ec1804e3   movw      r1, #0x48ec    ; (b) low half 0x48ec
+0x0f90c738  973f40e3   movt      r3, #0xf97
+0x0f90c73c  961f40e3   movt      r1, #0xf96
+0x0f90c740  00308de5   str       r3, [sp]
+0x0f90c744  242409e3   movw      r2, #0x9424    ; (b) low half 0x9424
+0x0f90c748  033100e3   movw      r3, #0x103    ; (b) low half 0x0103
+0x0f90c74c  962f40e3   movt      r2, #0xf96
+0x0f90c750  7fbe00eb   bl        #0xf93c154
+0x0f90c754  0c209de5   ldr       r2, [sp, #0xc]
+0x0f90c758  003094e5   ldr       r3, [r4]
+0x0f90c75c  030052e1   cmp       r2, r3
+0x0f90c760  0c00001a   bne       #0xf90c798
+0x0f90c764  14d08de2   add       sp, sp, #0x14
+0x0f90c768  3080bde8   pop       {r4, r5, pc}
+0x0f90c76c  0c209de5   ldr       r2, [sp, #0xc]
+0x0f90c770  003094e5   ldr       r3, [r4]
+0x0f90c774  030052e1   cmp       r2, r3
+0x0f90c778  0600001a   bne       #0xf90c798
+0x0f90c77c  080503e3   movw      r0, #0x3508    ; (b) low half 0x3508
+0x0f90c780  1810a0e3   mov       r1, #0x18    ; (b) low half 0x0018
+0x0f90c784  9e0f40e3   movt      r0, #0xf9e
+0x0f90c788  0020a0e3   mov       r2, #0    ; (b) low half 0x0000
+0x0f90c78c  14d08de2   add       sp, sp, #0x14
+0x0f90c790  3040bde8   pop       {r4, r5, lr}
+0x0f90c794  7b1600ea   b         #0xf912188
+0x0f90c798  8fbe00eb   bl        #0xf93c1dc

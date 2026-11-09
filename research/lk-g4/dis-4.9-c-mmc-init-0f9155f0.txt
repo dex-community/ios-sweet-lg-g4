@@ -1,0 +1,503 @@
+================================================================================
+LG G4 (H815) FACTORY LK -- disassembly
+file      : research/lk-g4/aboot-lk-g4-h815.elf   (ELF32 ARM, single PT_LOAD)
+mapping   : vaddr 0x0f900000 -> file offset 0x8000, filesz 0xe93d8
+tooling   : capstone 5.0.7 (CS_ARCH_ARM/CS_MODE_ARM), analisi con propagazione
+            dei valori in /tmp/lkg/an.py (ricostruzione movw/movt, literal pool,
+            mappa delle struct dev->plat->CORE e dev->HC)
+
+HOW EVERY REFERENCE WAS RESOLVED
+  (a) coppie movw/movt: dalla mezza-bassa si risale al movt che scrive lo
+      stesso registro; il risultato e' riportato su entrambe le istruzioni.
+  (b) literal pool: `ldr rX,[pc,#imm]` -> word letta a (addr+8)&~3 + imm.
+  (c) struct: i puntatori HC/CORE non sono immediati ma arrivano da una
+      struttura.  Mappa usata (ricavata dal codice, non dal nome delle funzioni):
+          dev/host +0x00  -> HC   = 0xf9824900   (finestra "hc_mem")
+          dev/host +0x30  -> plat
+          plat     +0x00  -> CORE = 0xf9824000   (finestra "core_mem")
+      Proof: sdhci_mode_disable (0x0f914940) fa  ldr r2,[r0,#0x30] ; ldr r2,[r2]
+      e scrive CORE+0x78, che e' HC_MODE sia nel driver CAF sia nel registro che
+      la funzione dice di modificare.
+  (d) tabella clock: gli indirizzi GCC NON stanno nel codice ma nella tabella
+      dei clock in .data; sono stati decodificati leggendo le coppie
+      {nome_clock, puntatore_struct} e i campi dei struct.
+
+CONVENZIONE SUI NOMI DEI REGISTRI
+  I nomi dei registri SDHCI/CORE ripresi dal driver Linux CAF
+  (G4-Titan-Kernel/drivers/mmc/host/sdhci-msm.c) sono **IPOTESI**: il binario
+  LK e' strippato e non contiene nomi di registro.  Tutto quello che segue e'
+  marcato "ipotesi(nome Linux)".  Gli indirizzi, i valori e la sequenza delle
+  scritture sono fatti.
+================================================================================
+
+================================================================================
+FUNCTION: 0x0f9155f0  -- mmc_init (contiene il call site 0x0f9156dc)
+runtime   : 0x0f9155f0
+================================================================================
+calls     : 0x0f915614, 0x0f91563c, 0x0f91564c, 0x0f91565c, 0x0f915680, 0x0f9156b8, 0x0f9156c4, 0x0f9156dc, 0x0f9156e4, 0x0f9156f4, 0x0f915720, 0x0f91573c, 0x0f91575c, 0x0f915784, 0x0f9157a0, 0x0f9157b4, 0x0f9157c0, 0x0f9157e8, 0x0f915810, 0x0f915828, 0x0f91583c, 0x0f915910, 0x0f915920, 0x0f915960, 0x0f915978, 0x0f915988, 0x0f915994, 0x0f9159a0, 0x0f9159b8, 0x0f9159e4, 0x0f915a04, 0x0f915a34, 0x0f915a4c, 0x0f915a6c, 0x0f915a7c, 0x0f915ac0, 0x0f915adc, 0x0f915ae4, 0x0f915af8, 0x0f915b20, 0x0f915b4c, 0x0f915b58, 0x0f915ba4, 0x0f915bb8, 0x0f915bc8, 0x0f915c70, 0x0f915c88, 0x0f915c98, 0x0f915ca8
+--------------------------------------------------------------------------------
+0x0f9155f0  f04f2de9   push     {r4, r5, r6, r7, r8, sb, sl, fp, lr}
+0x0f9155f4  98550de3   movw     r5, #0xd598    ; r71 = 0x0000d598  (movw lo half)
+0x0f9155f8  9f5f40e3   movt     r5, #0xf9f    ; r71 = 0x0f9fd598  (movt completes the pair at 0x0f9155f4)
+0x0f9155fc  ecd04de2   sub      sp, sp, #0xec
+0x0f915600  0060a0e1   mov      r6, r0    ; r72 = r66
+0x0f915604  460fa0e3   mov      r0, #0x118    ; r66 = 280
+0x0f915608  003095e5   ldr      r3, [r5]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f91560c  0e90a0e1   mov      sb, lr    ; r75 = r10
+0x0f915610  e4308de5   str      r3, [sp, #0xe4]
+0x0f915614  ba9f00eb   bl       #0xf93d504
+0x0f915618  004050e2   subs     r4, r0, #0
+0x0f91561c  ad03000a   beq      #0xf9164d8
+0x0f915620  000056e3   cmp      r6, #0
+0x0f915624  bc03000a   beq      #0xf91651c
+0x0f915628  387084e2   add      r7, r4, #0x38
+0x0f91562c  0610a0e1   mov      r1, r6    ; r67 = r72
+0x0f915630  1c20a0e3   mov      r2, #0x1c    ; r68 = 28
+0x0f915634  20608de2   add      r6, sp, #0x20
+0x0f915638  f80084e2   add      r0, r4, #0xf8
+0x0f91563c  2ca000eb   bl       #0xf93d6f4
+0x0f915640  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f915644  c020a0e3   mov      r2, #0xc0    ; r68 = 192
+0x0f915648  0700a0e1   mov      r0, r7    ; r66 = r73
+0x0f91564c  6ba000eb   bl       #0xf93d800
+0x0f915650  0600a0e1   mov      r0, r6    ; r66 = r72
+0x0f915654  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f915658  0120a0e3   mov      r2, #1    ; r68 = 1
+0x0f91565c  006300eb   bl       #0xf92e264
+0x0f915660  001194e5   ldr      r1, [r4, #0x100]
+0x0f915664  1021d4e5   ldrb     r2, [r4, #0x110]
+0x0f915668  1400a0e3   mov      r0, #0x14    ; r66 = 20
+0x0f91566c  1131d4e5   ldrb     r3, [r4, #0x111]
+0x0f915670  186084e5   str      r6, [r4, #0x18]
+0x0f915674  001084e5   str      r1, [r4]
+0x0f915678  2b20c4e5   strb     r2, [r4, #0x2b]
+0x0f91567c  2c30c4e5   strb     r3, [r4, #0x2c]
+0x0f915680  9f9f00eb   bl       #0xf93d504
+0x0f915684  008050e2   subs     r8, r0, #0
+0x0f915688  9803000a   beq      #0xf9164f0
+0x0f91568c  f830d4e5   ldrb     r3, [r4, #0xf8]
+0x0f915690  04c194e5   ldr      ip, [r4, #0x104]
+0x0f915694  fc1094e5   ldr      r1, [r4, #0xfc]
+0x0f915698  1221d4e5   ldrb     r2, [r4, #0x112]
+0x0f91569c  0300a0e1   mov      r0, r3    ; r66 = r69
+0x0f9156a0  00c088e5   str      ip, [r8]
+0x0f9156a4  041088e5   str      r1, [r8, #4]
+0x0f9156a8  0b30c8e5   strb     r3, [r8, #0xb]
+0x0f9156ac  0c20c8e5   strb     r2, [r8, #0xc]
+0x0f9156b0  106088e5   str      r6, [r8, #0x10]
+0x0f9156b4  308084e5   str      r8, [r4, #0x30]
+0x0f9156b8  05dbffeb   bl       #0xf90c2d4
+0x0f9156bc  f800d4e5   ldrb     r0, [r4, #0xf8]
+0x0f9156c0  0c1194e5   ldr      r1, [r4, #0x10c]
+0x0f9156c4  2bdbffeb   bl       #0xf90c378
+0x0f9156c8  f800d4e5   ldrb     r0, [r4, #0xf8]
+0x0f9156cc  010050e3   cmp      r0, #1
+0x0f9156d0  0301000a   beq      #0xf915ae4
+0x0f9156d4  0810a0e1   mov      r1, r8    ; r67 = r74
+0x0f9156d8  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f9156dc  0bfaffeb   bl       #0xf913f10
+0x0f9156e0  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f9156e4  9af8ffeb   bl       #0xf913954
+0x0f9156e8  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f9156ec  6a1da0e3   mov      r1, #0x1a80    ; r67 = 6784
+0x0f9156f0  061040e3   movt     r1, #6    ; r67 = 0x00060000  (movt, no matching movw seen)
+0x0f9156f4  f2f5ffeb   bl       #0xf912ec4
+0x0f9156f8  7080efe6   uxtb     r8, r0
+0x0f9156fc  000058e3   cmp      r8, #0
+0x0f915700  f900001a   bne      #0xf915aec
+0x0f915704  0810a0e1   mov      r1, r8    ; r67 = r74
+0x0f915708  548084e5   str      r8, [r4, #0x54]
+0x0f91570c  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f915710  0239a0e3   mov      r3, #0x8000    ; r69 = 32768
+0x0f915714  a0008de2   add      r0, sp, #0xa0
+0x0f915718  ff3044e3   movt     r3, #0x40ff    ; r69 = 0x40ff0000  (movt, no matching movw seen)
+0x0f91571c  3c3084e5   str      r3, [r4, #0x3c]
+0x0f915720  36a000eb   bl       #0xf93d800
+0x0f915724  a0108de2   add      r1, sp, #0xa0
+0x0f915728  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f91572c  b08acde1   strh     r8, [sp, #0xa0]
+0x0f915730  a4808de5   str      r8, [sp, #0xa4]
+0x0f915734  a980cde5   strb     r8, [sp, #0xa9]
+0x0f915738  ba8acde1   strh     r8, [sp, #0xaa]
+0x0f91573c  79f6ffeb   bl       #0xf913128
+0x0f915740  7080efe6   uxtb     r8, r0
+0x0f915744  000058e3   cmp      r8, #0
+0x0f915748  8c00001a   bne      #0xf915980
+0x0f91574c  0810a0e1   mov      r1, r8    ; r67 = r74
+0x0f915750  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f915754  a0008de2   add      r0, sp, #0xa0
+0x0f915758  fa9fa0e3   mov      sb, #0x3e8    ; r75 = 1000
+0x0f91575c  27a000eb   bl       #0xf93d800
+0x0f915760  3c2094e5   ldr      r2, [r4, #0x3c]
+0x0f915764  0110a0e3   mov      r1, #1    ; r67 = 1
+0x0f915768  0830a0e3   mov      r3, #8    ; r69 = 8
+0x0f91576c  a980cde5   strb     r8, [sp, #0xa9]
+0x0f915770  b01acde1   strh     r1, [sp, #0xa0]
+0x0f915774  a4208de5   str      r2, [sp, #0xa4]
+0x0f915778  ba3acde1   strh     r3, [sp, #0xaa]
+0x0f91577c  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915780  a0108de2   add      r1, sp, #0xa0
+0x0f915784  67f6ffeb   bl       #0xf913128
+0x0f915788  000050e3   cmp      r0, #0
+0x0f91578c  0900001a   bne      #0xf9157b8
+0x0f915790  ac309de5   ldr      r3, [sp, #0xac]
+0x0f915794  000053e3   cmp      r3, #0
+0x0f915798  0a0000ba   blt      #0xf9157c8
+0x0f91579c  0100a0e3   mov      r0, #1    ; r66 = 1
+0x0f9157a0  b40800eb   bl       #0xf917a78
+0x0f9157a4  019059e2   subs     sb, sb, #1
+0x0f9157a8  f3ffff1a   bne      #0xf91577c
+0x0f9157ac  e0000ce3   movw     r0, #0xc0e0    ; r66 = 0x0000c0e0  (movw lo half)
+0x0f9157b0  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96c0e0  (movt completes the pair at 0x0f9157ac) | <- string 'Card has busy status set. Init did not complete'
+0x0f9157b4  139a00eb   bl       #0xf93c008
+0x0f9157b8  480f0be3   movw     r0, #0xbf48    ; r66 = 0x0000bf48  (movw lo half)
+0x0f9157bc  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bf48  (movt completes the pair at 0x0f9157b8) | <- string 'Failure getting OCR response from MMC Card'
+0x0f9157c0  109a00eb   bl       #0xf93c008
+0x0f9157c4  700000ea   b        #0xf91598c
+0x0f9157c8  010113e3   tst      r3, #0x40000000
+0x0f9157cc  3c3084e5   str      r3, [r4, #0x3c]
+0x0f9157d0  0430a003   moveq    r3, #4
+0x0f9157d4  50308405   streq    r3, [r4, #0x50]
+0x0f9157d8  9d00001a   bne      #0xf915a54
+0x0f9157dc  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f9157e0  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f9157e4  a0008de2   add      r0, sp, #0xa0
+0x0f9157e8  04a000eb   bl       #0xf93d800
+0x0f9157ec  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f9157f0  a0108de2   add      r1, sp, #0xa0
+0x0f9157f4  0030a0e3   mov      r3, #0    ; r69 = 0
+0x0f9157f8  0220a0e3   mov      r2, #2    ; r68 = 2
+0x0f9157fc  a4308de5   str      r3, [sp, #0xa4]
+0x0f915800  b02acde1   strh     r2, [sp, #0xa0]
+0x0f915804  0420a0e3   mov      r2, #4    ; r68 = 4
+0x0f915808  a930cde5   strb     r3, [sp, #0xa9]
+0x0f91580c  ba2acde1   strh     r2, [sp, #0xaa]
+0x0f915810  44f6ffeb   bl       #0xf913128
+0x0f915814  003050e2   subs     r3, r0, #0
+0x0f915818  0f00000a   beq      #0xf91585c
+0x0f91581c  a40f0be3   movw     r0, #0xbfa4    ; r66 = 0x0000bfa4  (movw lo half)
+0x0f915820  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bfa4  (movt completes the pair at 0x0f91581c) | <- string "Failure getting card's CID number!"
+0x0f915824  0360a0e1   mov      r6, r3    ; r72 = r69
+0x0f915828  f69900eb   bl       #0xf93c008
+0x0f91582c  ff0016e3   tst      r6, #0xff
+0x0f915830  e100001a   bne      #0xf915bbc
+0x0f915834  240f0be3   movw     r0, #0xbf24    ; r66 = 0x0000bf24  (movw lo half)
+0x0f915838  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bf24  (movt completes the pair at 0x0f915834) | <- string 'Done initialization of the card'
+0x0f91583c  f19900eb   bl       #0xf93c008
+0x0f915840  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915844  e4209de5   ldr      r2, [sp, #0xe4]
+0x0f915848  003095e5   ldr      r3, [r5]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f91584c  030052e1   cmp      r2, r3
+0x0f915850  2503001a   bne      #0xf9164ec
+0x0f915854  ecd08de2   add      sp, sp, #0xec
+0x0f915858  f08fbde8   pop      {r4, r5, r6, r7, r8, sb, sl, fp, pc}
+0x0f91585c  503094e5   ldr      r3, [r4, #0x50]
+0x0f915860  010053e3   cmp      r3, #1
+0x0f915864  da00009a   bls      #0xf915bd4
+0x0f915868  b8209de5   ldr      r2, [sp, #0xb8]
+0x0f91586c  67c08de2   add      ip, sp, #0x67
+0x0f915870  6030a0e3   mov      r3, #0x60    ; r69 = 96
+0x0f915874  5214efe7   ubfx     r1, r2, #8, #0x10
+0x0f915878  64108de5   str      r1, [sp, #0x64]
+0x0f91587c  222ca0e1   lsr      r2, r2, #0x18
+0x0f915880  60208de5   str      r2, [sp, #0x60]
+0x0f915884  070083e2   add      r0, r3, #7
+0x0f915888  a322a0e1   lsr      r2, r3, #5
+0x0f91588c  e8a08de2   add      sl, sp, #0xe8
+0x0f915890  1f1003e2   and      r1, r3, #0x1f
+0x0f915894  a002a0e1   lsr      r0, r0, #5
+0x0f915898  02e18ae0   add      lr, sl, r2, lsl #2
+0x0f91589c  000052e1   cmp      r2, r0
+0x0f9158a0  083043e2   sub      r3, r3, #8
+0x0f9158a4  00018a30   addlo    r0, sl, r0, lsl #2
+0x0f9158a8  3c201ee5   ldr      r2, [lr, #-0x3c]
+0x0f9158ac  3c001035   ldrlo    r0, [r0, #-0x3c]
+0x0f9158b0  3221a0e1   lsr      r2, r2, r1
+0x0f9158b4  20106132   rsblo    r1, r1, #0x20
+0x0f9158b8  10218231   orrlo    r2, r2, r0, lsl r1
+0x0f9158bc  300053e3   cmp      r3, #0x30
+0x0f9158c0  0120ece5   strb     r2, [ip, #1]!
+0x0f9158c4  eeffff1a   bne      #0xf915884
+0x0f9158c8  ac209de5   ldr      r2, [sp, #0xac]
+0x0f9158cc  0000a0e3   mov      r0, #0    ; r66 = 0
+0x0f9158d0  b0109de5   ldr      r1, [sp, #0xb0]
+0x0f9158d4  5236e3e7   ubfx     r3, r2, #0xc, #4
+0x0f9158d8  52c4e3e7   ubfx     ip, r2, #8, #4
+0x0f9158dc  51e8e7e7   ubfx     lr, r1, #0x10, #8
+0x0f9158e0  1f3d83e2   add      r3, r3, #0x7c0
+0x0f9158e4  0118a0e1   lsl      r1, r1, #0x10
+0x0f9158e8  0d3083e2   add      r3, r3, #0xd
+0x0f9158ec  222881e1   orr      r2, r1, r2, lsr #16
+0x0f9158f0  7c308de5   str      r3, [sp, #0x7c]
+0x0f9158f4  74208de5   str      r2, [sp, #0x74]
+0x0f9158f8  70e08de5   str      lr, [sp, #0x70]
+0x0f9158fc  78c08de5   str      ip, [sp, #0x78]
+0x0f915900  6e00cde5   strb     r0, [sp, #0x6e]
+0x0f915904  2020a0e3   mov      r2, #0x20    ; r68 = 32
+0x0f915908  60108de2   add      r1, sp, #0x60
+0x0f91590c  7c0084e2   add      r0, r4, #0x7c
+0x0f915910  779f00eb   bl       #0xf93d6f4
+0x0f915914  a0008de2   add      r0, sp, #0xa0
+0x0f915918  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f91591c  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f915920  b69f00eb   bl       #0xf93d800
+0x0f915924  503094e5   ldr      r3, [r4, #0x50]
+0x0f915928  010053e3   cmp      r3, #1
+0x0f91592c  2300009a   bls      #0xf9159c0
+0x0f915930  0230a0e3   mov      r3, #2    ; r69 = 2
+0x0f915934  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915938  383084e5   str      r3, [r4, #0x38]
+0x0f91593c  a0108de2   add      r1, sp, #0xa0
+0x0f915940  0320a0e3   mov      r2, #3    ; r68 = 3
+0x0f915944  0238a0e3   mov      r3, #0x20000    ; r69 = 131072
+0x0f915948  b02acde1   strh     r2, [sp, #0xa0]
+0x0f91594c  0020a0e3   mov      r2, #0    ; r68 = 0
+0x0f915950  a4308de5   str      r3, [sp, #0xa4]
+0x0f915954  4030a0e3   mov      r3, #0x40    ; r69 = 64
+0x0f915958  a920cde5   strb     r2, [sp, #0xa9]
+0x0f91595c  ba3acde1   strh     r3, [sp, #0xaa]
+0x0f915960  f0f5ffeb   bl       #0xf913128
+0x0f915964  000050e3   cmp      r0, #0
+0x0f915968  2200000a   beq      #0xf9159f8
+0x0f91596c  0060a0e1   mov      r6, r0    ; r72 = r66
+0x0f915970  c80f0be3   movw     r0, #0xbfc8    ; r66 = 0x0000bfc8  (movw lo half)
+0x0f915974  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bfc8  (movt completes the pair at 0x0f915970) | <- string "Failure getting card's RCA!"
+0x0f915978  a29900eb   bl       #0xf93c008
+0x0f91597c  aaffffea   b        #0xf91582c
+0x0f915980  2c0d0be3   movw     r0, #0xbd2c    ; r66 = 0x0000bd2c  (movw lo half)
+0x0f915984  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bd2c  (movt completes the pair at 0x0f915980) | <- string 'Failure resetting MMC cards!'
+0x0f915988  9e9900eb   bl       #0xf93c008
+0x0f91598c  740f0be3   movw     r0, #0xbf74    ; r66 = 0x0000bf74  (movw lo half)
+0x0f915990  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bf74  (movt completes the pair at 0x0f91598c) | <- string 'MMC card failed to respond, try for SD card'
+0x0f915994  9b9900eb   bl       #0xf93c008
+0x0f915998  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f91599c  0710a0e1   mov      r1, r7    ; r67 = r73
+0x0f9159a0  51feffeb   bl       #0xf9152ec
+0x0f9159a4  003050e2   subs     r3, r0, #0
+0x0f9159a8  8bffff0a   beq      #0xf9157dc
+0x0f9159ac  4c0d0be3   movw     r0, #0xbd4c    ; r66 = 0x0000bd4c  (movw lo half)
+0x0f9159b0  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bd4c  (movt completes the pair at 0x0f9159ac) | <- string 'Failed to initialize SD card'
+0x0f9159b4  0360a0e1   mov      r6, r3    ; r72 = r69
+0x0f9159b8  929900eb   bl       #0xf93c008
+0x0f9159bc  9affffea   b        #0xf91582c
+0x0f9159c0  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f9159c4  a0108de2   add      r1, sp, #0xa0
+0x0f9159c8  0030a0e3   mov      r3, #0    ; r69 = 0
+0x0f9159cc  0320a0e3   mov      r2, #3    ; r68 = 3
+0x0f9159d0  a4308de5   str      r3, [sp, #0xa4]
+0x0f9159d4  b02acde1   strh     r2, [sp, #0xa0]
+0x0f9159d8  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f9159dc  a930cde5   strb     r3, [sp, #0xa9]
+0x0f9159e0  ba2acde1   strh     r2, [sp, #0xaa]
+0x0f9159e4  cff5ffeb   bl       #0xf913128
+0x0f9159e8  000050e3   cmp      r0, #0
+0x0f9159ec  deffff1a   bne      #0xf91596c
+0x0f9159f0  be3adde1   ldrh     r3, [sp, #0xae]
+0x0f9159f4  383084e5   str      r3, [r4, #0x38]
+0x0f9159f8  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f9159fc  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f915a00  a0008de2   add      r0, sp, #0xa0
+0x0f915a04  7d9f00eb   bl       #0xf93d800
+0x0f915a08  383094e5   ldr      r3, [r4, #0x38]
+0x0f915a0c  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915a10  a0108de2   add      r1, sp, #0xa0
+0x0f915a14  09c0a0e3   mov      ip, #9    ; r78 = 9
+0x0f915a18  0020a0e3   mov      r2, #0    ; r68 = 0
+0x0f915a1c  0338a0e1   lsl      r3, r3, #0x10
+0x0f915a20  b0cacde1   strh     ip, [sp, #0xa0]
+0x0f915a24  a4308de5   str      r3, [sp, #0xa4]
+0x0f915a28  0430a0e3   mov      r3, #4    ; r69 = 4
+0x0f915a2c  a920cde5   strb     r2, [sp, #0xa9]
+0x0f915a30  ba3acde1   strh     r3, [sp, #0xaa]
+0x0f915a34  bbf5ffeb   bl       #0xf913128
+0x0f915a38  008050e2   subs     r8, r0, #0
+0x0f915a3c  0700000a   beq      #0xf915a60
+0x0f915a40  e80f0be3   movw     r0, #0xbfe8    ; r66 = 0x0000bfe8  (movw lo half)
+0x0f915a44  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bfe8  (movt completes the pair at 0x0f915a40) | <- string "Failure getting card's CSD information!"
+0x0f915a48  0860a0e1   mov      r6, r8    ; r72 = r74
+0x0f915a4c  6d9900eb   bl       #0xf93c008
+0x0f915a50  75ffffea   b        #0xf91582c
+0x0f915a54  0330a0e3   mov      r3, #3    ; r69 = 3
+0x0f915a58  503084e5   str      r3, [r4, #0x50]
+0x0f915a5c  5effffea   b        #0xf9157dc
+0x0f915a60  ac108de2   add      r1, sp, #0xac
+0x0f915a64  1020a0e3   mov      r2, #0x10    ; r68 = 16
+0x0f915a68  5c0084e2   add      r0, r4, #0x5c
+0x0f915a6c  209f00eb   bl       #0xf93d6f4
+0x0f915a70  4020a0e3   mov      r2, #0x40    ; r68 = 64
+0x0f915a74  a0008de2   add      r0, sp, #0xa0
+0x0f915a78  0810a0e1   mov      r1, r8    ; r67 = r74
+0x0f915a7c  5f9f00eb   bl       #0xf93d800
+0x0f915a80  383094e5   ldr      r3, [r4, #0x38]
+0x0f915a84  0720a0e3   mov      r2, #7    ; r68 = 7
+0x0f915a88  a980cde5   strb     r8, [sp, #0xa9]
+0x0f915a8c  000053e3   cmp      r3, #0
+0x0f915a90  b02acde1   strh     r2, [sp, #0xa0]
+0x0f915a94  ba3acd01   strheq   r3, [sp, #0xaa]
+0x0f915a98  0328a0e1   lsl      r2, r3, #0x10
+0x0f915a9c  a4208de5   str      r2, [sp, #0xa4]
+0x0f915aa0  0400000a   beq      #0xf915ab8
+0x0f915aa4  503094e5   ldr      r3, [r4, #0x50]
+0x0f915aa8  010053e3   cmp      r3, #1
+0x0f915aac  0230a093   movls    r3, #2
+0x0f915ab0  0130a083   movhi    r3, #1
+0x0f915ab4  ba3acde1   strh     r3, [sp, #0xaa]
+0x0f915ab8  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915abc  a0108de2   add      r1, sp, #0xa0
+0x0f915ac0  98f5ffeb   bl       #0xf913128
+0x0f915ac4  003050e2   subs     r3, r0, #0
+0x0f915ac8  0d00000a   beq      #0xf915b04
+0x0f915acc  14000ce3   movw     r0, #0xc014    ; r66 = 0x0000c014  (movw lo half)
+0x0f915ad0  381094e5   ldr      r1, [r4, #0x38]
+0x0f915ad4  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96c014  (movt completes the pair at 0x0f915acc) | <- string 'Failure selecting the Card with RCA: %x'
+0x0f915ad8  0360a0e1   mov      r6, r3    ; r72 = r69
+0x0f915adc  499900eb   bl       #0xf93c008
+0x0f915ae0  51ffffea   b        #0xf91582c
+0x0f915ae4  bd5f00eb   bl       #0xf92d9e0
+0x0f915ae8  f9feffea   b        #0xf9156d4
+0x0f915aec  0810a0e1   mov      r1, r8    ; r67 = r74
+0x0f915af0  080d0be3   movw     r0, #0xbd08    ; r66 = 0x0000bd08  (movw lo half)
+0x0f915af4  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bd08  (movt completes the pair at 0x0f915af0) | <- string 'Error Initializing MMC host : %u'
+0x0f915af8  429900eb   bl       #0xf93c008
+0x0f915afc  0000a0e3   mov      r0, #0    ; r66 = 0
+0x0f915b00  4fffffea   b        #0xf915844
+0x0f915b04  503094e5   ldr      r3, [r4, #0x50]
+0x0f915b08  0120a0e3   mov      r2, #1    ; r68 = 1
+0x0f915b0c  542084e5   str      r2, [r4, #0x54]
+0x0f915b10  020053e1   cmp      r3, r2
+0x0f915b14  5300009a   bls      #0xf915c68
+0x0f915b18  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915b1c  0710a0e1   mov      r1, r7    ; r67 = r73
+0x0f915b20  4dfdffeb   bl       #0xf91505c
+0x0f915b24  003050e2   subs     r3, r0, #0
+0x0f915b28  eb00001a   bne      #0xf915edc
+0x0f915b2c  503094e5   ldr      r3, [r4, #0x50]
+0x0f915b30  033043e2   sub      r3, r3, #3
+0x0f915b34  010053e3   cmp      r3, #1
+0x0f915b38  5800009a   bls      #0xf915ca0
+0x0f915b3c  4090a0e3   mov      sb, #0x40    ; r75 = 64
+0x0f915b40  0010a0e3   mov      r1, #0    ; r67 = 0
+0x0f915b44  0920a0e1   mov      r2, sb    ; r68 = r75
+0x0f915b48  a0008de2   add      r0, sp, #0xa0
+0x0f915b4c  2b9f00eb   bl       #0xf93d800
+0x0f915b50  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915b54  381094e5   ldr      r1, [r4, #0x38]
+0x0f915b58  8afbffeb   bl       #0xf914988
+0x0f915b5c  003050e2   subs     r3, r0, #0
+0x0f915b60  4a00001a   bne      #0xf915c90
+0x0f915b64  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915b68  a0108de2   add      r1, sp, #0xa0
+0x0f915b6c  0180a0e3   mov      r8, #1    ; r74 = 1
+0x0f915b70  a4308de5   str      r3, [sp, #0xa4]
+0x0f915b74  a930cde5   strb     r3, [sp, #0xa9]
+0x0f915b78  00a100e3   movw     sl, #0x100    ; r76 = 0x00000100  (movw lo half)
+0x0f915b7c  3330a0e3   mov      r3, #0x33    ; r69 = 51
+0x0f915b80  9faf40e3   movt     sl, #0xf9f    ; r76 = 0x0f9f0100  (movt completes the pair at 0x0f915b78)
+0x0f915b84  b03acde1   strh     r3, [sp, #0xa0]
+0x0f915b88  08b0a0e3   mov      fp, #8    ; r77 = 8
+0x0f915b8c  d4a08de5   str      sl, [sp, #0xd4]
+0x0f915b90  ba8acde1   strh     r8, [sp, #0xaa]
+0x0f915b94  bc808de5   str      r8, [sp, #0xbc]
+0x0f915b98  a880cde5   strb     r8, [sp, #0xa8]
+0x0f915b9c  dc808de5   str      r8, [sp, #0xdc]
+0x0f915ba0  d8b08de5   str      fp, [sp, #0xd8]
+0x0f915ba4  5ff5ffeb   bl       #0xf913128
+0x0f915ba8  00c050e2   subs     ip, r0, #0
+0x0f915bac  cf00000a   beq      #0xf915ef0
+0x0f915bb0  40000ce3   movw     r0, #0xc040    ; r66 = 0x0000c040  (movw lo half)
+0x0f915bb4  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96c040  (movt completes the pair at 0x0f915bb0) | <- string "Failure getting card's SCR register"
+0x0f915bb8  129900eb   bl       #0xf93c008
+0x0f915bbc  f810d4e5   ldrb     r1, [r4, #0xf8]
+0x0f915bc0  000f0be3   movw     r0, #0xbf00    ; r66 = 0x0000bf00  (movw lo half)
+0x0f915bc4  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bf00  (movt completes the pair at 0x0f915bc0) | <- string 'Failed detecting MMC/SDC @ slot%d'
+0x0f915bc8  0e9900eb   bl       #0xf93c008
+0x0f915bcc  0000a0e3   mov      r0, #0    ; r66 = 0
+0x0f915bd0  1bffffea   b        #0xf915844
+0x0f915bd4  b8809de5   ldr      r8, [sp, #0xb8]
+0x0f915bd8  67008de2   add      r0, sp, #0x67
+0x0f915bdc  6030a0e3   mov      r3, #0x60    ; r69 = 96
+0x0f915be0  5824efe7   ubfx     r2, r8, #8, #0x10
+0x0f915be4  64208de5   str      r2, [sp, #0x64]
+0x0f915be8  282ca0e1   lsr      r2, r8, #0x18
+0x0f915bec  60208de5   str      r2, [sp, #0x60]
+0x0f915bf0  a322a0e1   lsr      r2, r3, #5
+0x0f915bf4  e8908de2   add      sb, sp, #0xe8
+0x0f915bf8  07e083e2   add      lr, r3, #7
+0x0f915bfc  1f1003e2   and      r1, r3, #0x1f
+0x0f915c00  02c189e0   add      ip, sb, r2, lsl #2
+0x0f915c04  083043e2   sub      r3, r3, #8
+0x0f915c08  ae0252e1   cmp      r2, lr, lsr #5
+0x0f915c0c  3c201ce5   ldr      r2, [ip, #-0x3c]
+0x0f915c10  3221a0e1   lsr      r2, r2, r1
+0x0f915c14  20106132   rsblo    r1, r1, #0x20
+0x0f915c18  18218231   orrlo    r2, r2, r8, lsl r1
+0x0f915c1c  380053e3   cmp      r3, #0x38
+0x0f915c20  0120e0e5   strb     r2, [r0, #1]!
+0x0f915c24  f1ffff1a   bne      #0xf915bf0
+0x0f915c28  b0109de5   ldr      r1, [sp, #0xb0]
+0x0f915c2c  0020a0e3   mov      r2, #0    ; r68 = 0
+0x0f915c30  ac309de5   ldr      r3, [sp, #0xac]
+0x0f915c34  6d20cde5   strb     r2, [sp, #0x6d]
+0x0f915c38  0104a0e1   lsl      r0, r1, #8
+0x0f915c3c  53c6e7e7   ubfx     ip, r3, #0xc, #8
+0x0f915c40  211ca0e1   lsr      r1, r1, #0x18
+0x0f915c44  230c80e1   orr      r0, r0, r3, lsr #24
+0x0f915c48  70108de5   str      r1, [sp, #0x70]
+0x0f915c4c  5334e3e7   ubfx     r3, r3, #8, #4
+0x0f915c50  7d1e8ce2   add      r1, ip, #0x7d0
+0x0f915c54  74008de5   str      r0, [sp, #0x74]
+0x0f915c58  7c108de5   str      r1, [sp, #0x7c]
+0x0f915c5c  78308de5   str      r3, [sp, #0x78]
+0x0f915c60  6e20cde5   strb     r2, [sp, #0x6e]
+0x0f915c64  26ffffea   b        #0xf915904
+0x0f915c68  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915c6c  0710a0e1   mov      r1, r7    ; r67 = r73
+0x0f915c70  33feffeb   bl       #0xf915544
+0x0f915c74  003050e2   subs     r3, r0, #0
+0x0f915c78  abffff0a   beq      #0xf915b2c
+0x0f915c7c  6c0d0be3   movw     r0, #0xbd6c    ; r66 = 0x0000bd6c  (movw lo half)
+0x0f915c80  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bd6c  (movt completes the pair at 0x0f915c7c) | <- string 'Failed to set HS for SD card'
+0x0f915c84  0360a0e1   mov      r6, r3    ; r72 = r69
+0x0f915c88  de9800eb   bl       #0xf93c008
+0x0f915c8c  e6feffea   b        #0xf91582c
+0x0f915c90  900c0be3   movw     r0, #0xbc90    ; r66 = 0x0000bc90  (movw lo half)
+0x0f915c94  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96bc90  (movt completes the pair at 0x0f915c90) | <- string 'Failed sending App command'
+0x0f915c98  da9800eb   bl       #0xf93c008
+0x0f915c9c  c3ffffea   b        #0xf915bb0
+0x0f915ca0  0400a0e1   mov      r0, r4    ; r66 = r70
+0x0f915ca4  581084e2   add      r1, r4, #0x58
+0x0f915ca8  befbffeb   bl       #0xf914ba8
+0x0f915cac  003050e2   subs     r3, r0, #0
+0x0f915cb0  d901001a   bne      #0xf91641c
+0x0f915cb4  503094e5   ldr      r3, [r4, #0x50]
+0x0f915cb8  68a094e5   ldr      sl, [r4, #0x68]
+0x0f915cbc  010053e3   cmp      r3, #1
+0x0f915cc0  2a3fa0e1   lsr      r3, sl, #0x1e
+0x0f915cc4  20308de5   str      r3, [sp, #0x20]
+0x0f915cc8  be00009a   bls      #0xf915fc8
+0x0f915ccc  da19e3e7   ubfx     r1, sl, #0x13, #4
+0x0f915cd0  5a08e2e7   ubfx     r0, sl, #0x10, #3
+0x0f915cd4  b4270be3   movw     r2, #0xb7b4    ; r68 = 0x0000b7b4  (movw lo half)
+0x0f915cd8  74370be3   movw     r3, #0xb774    ; r69 = 0x0000b774  (movw lo half)
+0x0f915cdc  962f40e3   movt     r2, #0xf96    ; r68 = 0x0f96b7b4  (movt completes the pair at 0x0f915cd4)
+0x0f915ce0  963f40e3   movt     r3, #0xf96    ; r69 = 0x0f96b774  (movt completes the pair at 0x0f915cd8)
+0x0f915ce4  5ce0dde5   ldrb     lr, [sp, #0x5c]
+0x0f915ce8  5a84e7e7   ubfx     r8, sl, #8, #8
+0x0f915cec  000192e7   ldr      r0, [r2, r0, lsl #2]    ; r66 = [0x0f96b7b4]=0x00000001
+0x0f915cf0  cd2c0ce3   movw     r2, #0xcccd    ; r68 = 0x0000cccd  (movw lo half)
+0x0f915cf4  01b193e7   ldr      fp, [r3, r1, lsl #2]    ; r77 = [0x0f96b774]=0x00000000
+0x0f915cf8  cc2c4ce3   movt     r2, #0xcccc    ; r68 = 0xcccccccd  (movt completes the pair at 0x0f915cf0)
+0x0f915cfc  643094e5   ldr      r3, [r4, #0x64]
+0x0f915d00  5aade3e7   ubfx     sl, sl, #0x1a, #4
+0x0f915d04  24a08de5   str      sl, [sp, #0x24]
+0x0f915d08  ff9f00e3   movw     sb, #0xfff    ; r75 = 0x00000fff  (movw lo half)
+0x0f915d0c  9b000be0   mul      fp, fp, r0
+0x0f915d10  d316e0e7   ubfx     r1, r3, #0xd, #1
+0x0f915d14  53c7e0e7   ubfx     ip, r3, #0xe, #1
+0x0f915d18  11e2c4e7   bfi      lr, r1, #4, #1
+0x0f915d1c  d307e0e7   ubfx     r0, r3, #0xf, #1
+
+MMIO SUMMARY (writes resolved to HC / CORE / GCC)
+--------------------------------------------------------------------------------
+  (nessuna scrittura a 0xf9824xxx / 0xfc40xxxx / 0xfc4cxxxx risolta in questa funzione)
+

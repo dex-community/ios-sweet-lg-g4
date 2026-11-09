@@ -1,0 +1,71 @@
+### sdhci_msm_config_dll_0xf913c0c  start=0x0f913c0c  next_func_start=0x0f913d24  epilogue_end=0xf913cfc
+0x0f913c0c  f0412de9   push      {r4, r5, r6, r7, r8, lr}
+0x0f913c10  0050a0e1   mov       r5, r0
+0x0f913c14  0170a0e1   mov       r7, r1
+0x0f913c18  48d04de2   sub       sp, sp, #0x48
+0x0f913c1c  0f00bce8   ldm       ip!, {r0, r1, r2, r3}
+0x0f913c20  04408de2   add       r4, sp, #4
+0x0f913c24  98650de3   movw      r6, #0xd598    ; (b) low half 0xd598
+0x0f913c28  9f6f40e3   movt      r6, #0xf9f
+0x0f913c2c  008096e5   ldr       r8, [r6]
+0x0f913c30  0f00a4e8   stm       r4!, {r0, r1, r2, r3}
+0x0f913c34  0f00bce8   ldm       ip!, {r0, r1, r2, r3}
+0x0f913c38  44808de5   str       r8, [sp, #0x44]
+0x0f913c3c  0f00a4e8   stm       r4!, {r0, r1, r2, r3}
+0x0f913c40  0f00bce8   ldm       ip!, {r0, r1, r2, r3}
+0x0f913c44  0f00a4e8   stm       r4!, {r0, r1, r2, r3}
+0x0f913c48  0f009ce8   ldm       ip, {r0, r1, r2, r3}
+0x0f913c4c  0f0084e8   stm       r4, {r0, r1, r2, r3}
+0x0f913c50  003095e5   ldr       r3, [r5]
+0x0f913c54  002193e5   ldr       r2, [r3, #0x100]
+0x0f913c58  0628c2e3   bic       r2, r2, #0x60000
+0x0f913c5c  092882e3   orr       r2, r2, #0x90000
+0x0f913c60  002183e5   str       r2, [r3, #0x100]
+0x0f913c64  000095e5   ldr       r0, [r5]
+0x0f913c68  012c80e2   add       r2, r0, #0x100
+0x0f913c6c  003092e5   ldr       r3, [r2]
+0x0f913c70  010713e3   tst       r3, #0x40000
+0x0f913c74  fcffff1a   bne       #0xf913c6c
+0x0f913c78  48308de2   add       r3, sp, #0x48
+0x0f913c7c  3240a0e3   mov       r4, #0x32    ; (b) low half 0x0032
+0x0f913c80  077183e0   add       r7, r3, r7, lsl #2
+0x0f913c84  003190e5   ldr       r3, [r0, #0x100]
+0x0f913c88  442017e5   ldr       r2, [r7, #-0x44]
+0x0f913c8c  0f36c3e3   bic       r3, r3, #0xf00000
+0x0f913c90  023a83e1   orr       r3, r3, r2, lsl #20
+0x0f913c94  003180e5   str       r3, [r0, #0x100]
+0x0f913c98  003095e5   ldr       r3, [r5]
+0x0f913c9c  002193e5   ldr       r2, [r3, #0x100]
+0x0f913ca0  012782e3   orr       r2, r2, #0x40000
+0x0f913ca4  002183e5   str       r2, [r3, #0x100]
+0x0f913ca8  030000ea   b         #0xf913cbc
+0x0f913cac  0100a0e3   mov       r0, #1    ; (b) low half 0x0001
+0x0f913cb0  850f00eb   bl        #0xf917acc
+0x0f913cb4  014054e2   subs      r4, r4, #1
+0x0f913cb8  0f00000a   beq       #0xf913cfc
+0x0f913cbc  003095e5   ldr       r3, [r5]
+0x0f913cc0  012c83e2   add       r2, r3, #0x100
+0x0f913cc4  003193e5   ldr       r3, [r3, #0x100]
+0x0f913cc8  010713e3   tst       r3, #0x40000
+0x0f913ccc  f6ffff0a   beq       #0xf913cac
+0x0f913cd0  003092e5   ldr       r3, [r2]
+0x0f913cd4  0000a0e3   mov       r0, #0    ; (b) low half 0x0000
+0x0f913cd8  0237c3e3   bic       r3, r3, #0x80000
+0x0f913cdc  023883e3   orr       r3, r3, #0x20000
+0x0f913ce0  003082e5   str       r3, [r2]
+0x0f913ce4  44209de5   ldr       r2, [sp, #0x44]
+0x0f913ce8  003096e5   ldr       r3, [r6]
+0x0f913cec  030052e1   cmp       r2, r3
+0x0f913cf0  0a00001a   bne       #0xf913d20
+0x0f913cf4  48d08de2   add       sp, sp, #0x48
+0x0f913cf8  f081bde8   pop       {r4, r5, r6, r7, r8, pc}
+0x0f913cfc  003095e5   ldr       r3, [r5]
+0x0f913d00  40050be3   movw      r0, #0xb540    ; (b) low half 0xb540
+0x0f913d04  28150be3   movw      r1, #0xb528    ; (b) low half 0xb528
+0x0f913d08  960f40e3   movt      r0, #0xf96
+0x0f913d0c  961f40e3   movt      r1, #0xf96
+0x0f913d10  002193e5   ldr       r2, [r3, #0x100]
+0x0f913d14  bba000eb   bl        #0xf93c008
+0x0f913d18  0100a0e3   mov       r0, #1    ; (b) low half 0x0001
+0x0f913d1c  f0ffffea   b         #0xf913ce4
+0x0f913d20  2da100eb   bl        #0xf93c1dc

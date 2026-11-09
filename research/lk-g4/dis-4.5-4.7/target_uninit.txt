@@ -1,0 +1,31 @@
+### target_uninit  start=0x0f900574  next_func_start=0x0f9005ec  epilogue_end=0xf9005ec
+0x0f900574  30402de9   push      {r4, r5, lr}
+0x0f900578  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f90057c  9f4f40e3   movt      r4, #0xf9f
+0x0f900580  0cd04de2   sub       sp, sp, #0xc
+0x0f900584  003094e5   ldr       r3, [r4]
+0x0f900588  04308de5   str       r3, [sp, #4]
+0x0f90058c  4a9f00eb   bl        #0xf9282bc
+0x0f900590  000050e3   cmp       r0, #0
+0x0f900594  0c00001a   bne       #0xf9005cc
+0x0f900598  d17c00eb   bl        #0xf91f8e4
+0x0f90059c  000050e3   cmp       r0, #0
+0x0f9005a0  0200000a   beq       #0xf9005b0
+0x0f9005a4  be7e00eb   bl        #0xf9200a4
+0x0f9005a8  0200a0e3   mov       r0, #2    ; (b) low half 0x0002
+0x0f9005ac  513000eb   bl        #0xf90c6f8
+0x0f9005b0  04209de5   ldr       r2, [sp, #4]
+0x0f9005b4  003094e5   ldr       r3, [r4]
+0x0f9005b8  030052e1   cmp       r2, r3
+0x0f9005bc  0900001a   bne       #0xf9005e8
+0x0f9005c0  0cd08de2   add       sp, sp, #0xc
+0x0f9005c4  3040bde8   pop       {r4, r5, lr}
+0x0f9005c8  2c4700ea   b         #0xf912280
+0x0f9005cc  88550de3   movw      r5, #0xd588    ; (b) low half 0xd588
+0x0f9005d0  9f5f40e3   movt      r5, #0xf9f
+0x0f9005d4  000095e5   ldr       r0, [r5]
+0x0f9005d8  235900eb   bl        #0xf916a6c
+0x0f9005dc  000095e5   ldr       r0, [r5]
+0x0f9005e0  d65000eb   bl        #0xf914940
+0x0f9005e4  ebffffea   b         #0xf900598
+0x0f9005e8  fbee00eb   bl        #0xf93c1dc

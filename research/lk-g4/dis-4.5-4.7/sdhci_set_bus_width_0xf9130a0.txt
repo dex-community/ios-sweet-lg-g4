@@ -1,0 +1,35 @@
+### sdhci_set_bus_width_0xf9130a0  start=0x0f9130a0  next_func_start=0x0f913128  epilogue_end=0xf913100
+0x0f9130a0  10402de9   push      {r4, lr}
+0x0f9130a4  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f9130a8  9f4f40e3   movt      r4, #0xf9f
+0x0f9130ac  003090e5   ldr       r3, [r0]
+0x0f9130b0  08d04de2   sub       sp, sp, #8
+0x0f9130b4  010051e3   cmp       r1, #1
+0x0f9130b8  000094e5   ldr       r0, [r4]
+0x0f9130bc  04008de5   str       r0, [sp, #4]
+0x0f9130c0  2800d3e5   ldrb      r0, [r3, #0x28]
+0x0f9130c4  70c0efe6   uxtb      ip, r0
+0x0f9130c8  1300000a   beq       #0xf91311c
+0x0f9130cc  1000003a   blo       #0xf913114
+0x0f9130d0  020051e3   cmp       r1, #2
+0x0f9130d4  0900000a   beq       #0xf913100
+0x0f9130d8  34020be3   movw      r0, #0xb234    ; (b) low half 0xb234
+0x0f9130dc  960f40e3   movt      r0, #0xf96
+0x0f9130e0  c8a300eb   bl        #0xf93c008
+0x0f9130e4  0100a0e3   mov       r0, #1    ; (b) low half 0x0001
+0x0f9130e8  04209de5   ldr       r2, [sp, #4]
+0x0f9130ec  003094e5   ldr       r3, [r4]
+0x0f9130f0  030052e1   cmp       r2, r3
+0x0f9130f4  0a00001a   bne       #0xf913124
+0x0f9130f8  08d08de2   add       sp, sp, #8
+0x0f9130fc  1080bde8   pop       {r4, pc}
+0x0f913100  2020a0e3   mov       r2, #0x20    ; (b) low half 0x0020
+0x0f913104  0cc082e1   orr       ip, r2, ip
+0x0f913108  0000a0e3   mov       r0, #0    ; (b) low half 0x0000
+0x0f91310c  28c0c3e5   strb      ip, [r3, #0x28]
+0x0f913110  f4ffffea   b         #0xf9130e8
+0x0f913114  0020a0e3   mov       r2, #0    ; (b) low half 0x0000
+0x0f913118  f9ffffea   b         #0xf913104
+0x0f91311c  0220a0e3   mov       r2, #2    ; (b) low half 0x0002
+0x0f913120  f7ffffea   b         #0xf913104
+0x0f913124  2ca400eb   bl        #0xf93c1dc

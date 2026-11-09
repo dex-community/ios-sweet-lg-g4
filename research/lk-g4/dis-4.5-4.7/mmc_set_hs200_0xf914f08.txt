@@ -1,0 +1,86 @@
+### mmc_set_hs200_0xf914f08  start=0x0f914f08  next_func_start=0x0f91505c  epilogue_end=0xf914fd4
+0x0f914f08  f0412de9   push      {r4, r5, r6, r7, r8, lr}
+0x0f914f0c  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f914f10  9f4f40e3   movt      r4, #0xf9f
+0x0f914f14  10d04de2   sub       sp, sp, #0x10
+0x0f914f18  0050a0e1   mov       r5, r0
+0x0f914f1c  0160a0e1   mov       r6, r1
+0x0f914f20  003094e5   ldr       r3, [r4]
+0x0f914f24  0280a0e1   mov       r8, r2
+0x0f914f28  0c308de5   str       r3, [sp, #0xc]
+0x0f914f2c  c0ffffeb   bl        #0xf914e34
+0x0f914f30  007050e2   subs      r7, r0, #0
+0x0f914f34  2600001a   bne       #0xf914fd4
+0x0f914f38  0230a0e3   mov       r3, #2    ; (b) low half 0x0002
+0x0f914f3c  0500a0e1   mov       r0, r5
+0x0f914f40  00308de5   str       r3, [sp]
+0x0f914f44  0610a0e1   mov       r1, r6
+0x0f914f48  0320a0e3   mov       r2, #3    ; (b) low half 0x0003
+0x0f914f4c  b930a0e3   mov       r3, #0xb9    ; (b) low half 0x00b9
+0x0f914f50  71ffffeb   bl        #0xf914d1c
+0x0f914f54  007050e2   subs      r7, r0, #0
+0x0f914f58  1200001a   bne       #0xf914fa8
+0x0f914f5c  0500a0e1   mov       r0, r5
+0x0f914f60  0310a0e3   mov       r1, #3    ; (b) low half 0x0003
+0x0f914f64  07f8ffeb   bl        #0xf912f88
+0x0f914f68  2c30d5e5   ldrb      r3, [r5, #0x2c]
+0x0f914f6c  000053e3   cmp       r3, #0
+0x0f914f70  1d00001a   bne       #0xf914fec
+0x0f914f74  0610a0e1   mov       r1, r6
+0x0f914f78  0820a0e1   mov       r2, r8
+0x0f914f7c  0500a0e1   mov       r0, r5
+0x0f914f80  78fcffeb   bl        #0xf914168
+0x0f914f84  006050e2   subs      r6, r0, #0
+0x0f914f88  2500001a   bne       #0xf915024
+0x0f914f8c  083095e5   ldr       r3, [r5, #8]
+0x0f914f90  030053e3   cmp       r3, #3
+0x0f914f94  0230a0e3   mov       r3, #2    ; (b) low half 0x0002
+0x0f914f98  08308515   strne     r3, [r5, #8]
+0x0f914f9c  2400000a   beq       #0xf915034
+0x0f914fa0  0600a0e1   mov       r0, r6
+0x0f914fa4  040000ea   b         #0xf914fbc
+0x0f914fa8  f00a0be3   movw      r0, #0xbaf0    ; (b) low half 0xbaf0
+0x0f914fac  691300e3   movw      r1, #0x369    ; (b) low half 0x0369
+0x0f914fb0  960f40e3   movt      r0, #0xf96
+0x0f914fb4  139c00eb   bl        #0xf93c008
+0x0f914fb8  0700a0e1   mov       r0, r7
+0x0f914fbc  0c209de5   ldr       r2, [sp, #0xc]
+0x0f914fc0  003094e5   ldr       r3, [r4]
+0x0f914fc4  030052e1   cmp       r2, r3
+0x0f914fc8  2200001a   bne       #0xf915058
+0x0f914fcc  10d08de2   add       sp, sp, #0x10
+0x0f914fd0  f081bde8   pop       {r4, r5, r6, r7, r8, pc}
+0x0f914fd4  001096e5   ldr       r1, [r6]
+0x0f914fd8  c40a0be3   movw      r0, #0xbac4    ; (b) low half 0xbac4
+0x0f914fdc  960f40e3   movt      r0, #0xf96
+0x0f914fe0  089c00eb   bl        #0xf93c008
+0x0f914fe4  0700a0e1   mov       r0, r7
+0x0f914fe8  f3ffffea   b         #0xf914fbc
+0x0f914fec  203096e5   ldr       r3, [r6, #0x20]
+0x0f914ff0  c430d3e5   ldrb      r3, [r3, #0xc4]
+0x0f914ff4  c00013e3   tst       r3, #0xc0
+0x0f914ff8  ddffff0a   beq       #0xf914f74
+0x0f914ffc  0330a0e3   mov       r3, #3    ; (b) low half 0x0003
+0x0f915000  0500a0e1   mov       r0, r5
+0x0f915004  083085e5   str       r3, [r5, #8]
+0x0f915008  16fcffeb   bl        #0xf914068
+0x0f91500c  303095e5   ldr       r3, [r5, #0x30]
+0x0f915010  211ba0e3   mov       r1, #0x8400    ; (b) low half 0x8400
+0x0f915014  d71741e3   movt      r1, #0x17d7
+0x0f915018  0b00d3e5   ldrb      r0, [r3, #0xb]
+0x0f91501c  d5dcffeb   bl        #0xf90c378
+0x0f915020  d3ffffea   b         #0xf914f74
+0x0f915024  100b0be3   movw      r0, #0xbb10    ; (b) low half 0xbb10
+0x0f915028  960f40e3   movt      r0, #0xf96
+0x0f91502c  f59b00eb   bl        #0xf93c008
+0x0f915030  d5ffffea   b         #0xf914f8c
+0x0f915034  0500a0e1   mov       r0, r5
+0x0f915038  083085e5   str       r3, [r5, #8]
+0x0f91503c  09fcffeb   bl        #0xf914068
+0x0f915040  303095e5   ldr       r3, [r5, #0x30]
+0x0f915044  0b1aa0e3   mov       r1, #0xb000    ; (b) low half 0xb000
+0x0f915048  711b40e3   movt      r1, #0xb71
+0x0f91504c  0b00d3e5   ldrb      r0, [r3, #0xb]
+0x0f915050  c8dcffeb   bl        #0xf90c378
+0x0f915054  d1ffffea   b         #0xf914fa0
+0x0f915058  5f9c00eb   bl        #0xf93c1dc

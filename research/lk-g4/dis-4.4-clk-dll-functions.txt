@@ -1,0 +1,1351 @@
+================================================================================
+LG G4 (H815) LK bootloader - RAW DISASSEMBLY / RESOLVED CONSTANTS
+file          : research/lk-g4/aboot-lk-g4-h815.elf  (read-only, unmodified)
+tooling       : Capstone 5.0.7, CS_ARCH_ARM / CS_MODE_ARM (ARMv7-A, ARM state)
+produced by   : /tmp/lkwork/g2.py  (analysis scaffolding kept out of the repo)
+
+HOW EVERY REFERENCE WAS RESOLVED
+--------------------------------------------------------------------------------
+1. ADDRESS MAP.  The ELF has exactly one PT_LOAD: vaddr 0x0f900000, p_offset
+   0x8000, filesz 0xe93d8, memsz 0xfe53c.  Therefore
+       file_offset = vaddr - 0x0f900000 + 0x8000
+   and 0x8000..0xf73d8 of the file is the only file-backed code/data.
+   (PH1 at 0x1000 is PT_NULL - not a segment.  PH2 at 0x8ce80 is
+   PT_ARM_EXIDX, vaddr 0x0f984e80, which maps consistently with the formula
+   above: 0x0f984e80-0x0f900000+0x8000 = 0x8ce80.)
+
+2. FUNCTION BOUNDARIES.  The image is stripped (no symbol table, no section
+   headers).  A function start is taken as the next address that is either
+   (a) the target of a `bl`, or (b) a `push {... lr}` prologue.  A function
+   ends at the next such address; the `pop {..., pc}` / `bx lr` epilogues are
+   marked in the listing.  Where a function ends with a `bl <noreturn>`
+   (e.g. 0x0f93c1dc, the assert/panic helper) that trailing call is kept
+   inside the function.  A trailing `bl` to a noreturn helper is the only
+   code after the last `pop {..,pc}`.
+
+3. PC-RELATIVE / CONSTANT RESOLUTION (exact method):
+   a) LK builds every 32-bit constant with a register pair, never with an
+      absolute literal pool.  Two encodings are used and BOTH are paired
+      here:
+        - `mov  rD,#lo16` + `movt rD,#hi16`   (lo16 as an ARM rotated imm)
+        - `movw rD,#lo12` + `movt rD,#hi16`
+      Pairing rule: scan forward from the low-half instruction for the first
+      `movt` writing the SAME register; the intervening instructions must be
+      only movw/movt, otherwise the pair is rejected.  The reconstructed
+      value is printed in the comment of BOTH instructions.
+   b) `ldr rX,[pc,#imm]` literal pools: the pool word is read at
+      (addr+8)&~3 + imm and printed as "literal pool @0x... = 0x...".
+      LK's *code* uses these only for branch/jump-table data; all hardware
+      addresses come from (a) or from (d).
+   c) `str/strh/strb rS,[rB,#disp]`: the destination is resolved as
+      value(rB)+disp whenever value(rB) is a known absolute address.
+      For that, a per-function constant propagation is run (movw/movt pairs,
+      mov #imm, add/sub #imm, ldr from a literal pool, and the structure
+      model of section 4).
+   d) HARDWARE BASES THAT LIVE IN STRUCTURES.  The CORE/HC bases are not
+      immediates; they are copied out of a platform descriptor at runtime.
+      They were resolved by following the data flow, and the resulting
+      structure map is reproduced in the header of each file:
+        plat_struct (built on the stack by target/msm8992_alphap/init.c):
+            +0x00 u8  = 1              (controller/slot id)
+            +0x04 u32 = 0xaa           (quirks)      [2nd attempt: 0xfd]
+            +0x08 u32 = 0xf9824900     (hc_mem  = SDHCI HC block)
+            +0x0c u32 = 0xf9824000     (core_mem= MCI/SDHCI CORE block)
+            +0x10 u16 = 2              (bus width)
+            +0x14 u32 = 0x0b71b000     (ioaddr / DLL base)
+            +0x18 u32 = 0
+            +0x1c u32 = *(0x0f9fd598)  (not copied: memcpy size is 0x1c)
+          the 0x1c-byte descriptor is memcpy'd to host+0xf8, so:
+            host+0xf8 = 1, host+0xfc = 0xaa, host+0x100 = 0xf9824900 (HC),
+            host+0x104 = 0xf9824000 (CORE), host+0x108 = 2,
+            host+0x10c = 0x0b71b000, host+0x110 = 0
+          and the "plat" object handed to sdhci_msm_init is built as:
+            plat+0x00 = 0xf9824000 (CORE)   plat+0x04 = 0xaa (quirks)
+            plat+0x08 = 0   plat+0x0b = 1 (u8)  plat+0x0c = 0 (u8)
+            plat+0x10 = <ptr>  plat+0xe8 = <flags>
+          The global `dev` (0x0f9fd588) points at the same "host" object
+          (init_entry returns it), hence dev+0x30 = plat and *plat = CORE.
+   e) STRING REFERENCES: every movw/movt pair whose value is a printable
+      string address is printed as  string "...".
+
+4. FORMAT
+   <addr>  <8 hex bytes in memory order>  <mnemonic> <operands>   ; <comment>
+   The byte column is the 4-byte instruction word in little-endian memory
+   order.  "WRITE 0x........" marks a resolved store destination.
+
+5. LIMITS / HONEST CAVEATS
+   - The image is stripped: no symbol names, no DWARF.  Function names in
+     this report are the names given in the task brief, or descriptive
+     labels derived from the strings/arguments inside the function.
+   - Register values loaded from memory are opaque unless the memory
+     location is covered by the structure map of section 3(d).
+   - SDHCI/Qualcomm register *names* are only asserted where the task brief
+     or the binary itself fixes them; elsewhere only the offset is given.
+   - The linker places literal pools and .rodata inline in the code stream;
+     where the linear disassembly walks over such data it is marked
+     ".byte".
+
+================================================================================
+D4 - clock / DLL / CDC / UHS / bus-width / power functions
+================================================================================
+
+HOW THE TWO "sdc" CLOCK FUNCTIONS WERE LOCATED
+--------------------------------------------------------------------------------
+  strings -t x aboot-lk-g4-h815.elf
+      464136 -> "failed to set sdc%u_iface_clk ret = %d"   (file off 0x71638)
+      464232 -> "failed to set sdc%u_core_clk ret = %d"    (file off 0x71698)
+      472340 -> "sdhci_msm_init_dll"                       (file off 0x73684)
+  file offset -> runtime vaddr with vaddr = 0x0f900000 + (file_off - 0x8000):
+      0x71638 -> 0x0f969508      0x71698 -> 0x0f969568      0x73684 -> 0x0f96b514
+  xrefs (movw/movt pairs that build those addresses):
+      0x0f969508 <- movw@0x0f90c328 / movt@0x0f90c32c   (function 0x0f90c2d4)
+      0x0f969568 <- movw@0x0f90c484 / movt@0x0f90c488   (function 0x0f90c378)
+      0x0f96b514 <- movw@0x0f913e48 / movt@0x0f913e50   (function 0x0f913d24)
+
+SOURCE FILES NAMED BY THE ASSERT STRINGS IN THESE FUNCTIONS
+--------------------------------------------------------------------------------
+  0x0f969424 = "platform/msm8994/acpuclock.c"   (set_sdc_iface_clk / set_sdc_core_clk)
+  0x0f96b9d4 = "platform/msm_shared/mmc_sdhci.c" (not reached from these two)
+  0x0f970bb8 = "ASSERT FAILED at (%s:%d): %s"
+
+================================================================================
+--------------------------------------------------------------------------------
+FUNCTION: set_sdc_iface_clk  (contains the string "failed to set sdc%u_iface_clk")
+runtime range : 0x0f90c2d4 .. 0x0f90c378   (41 instructions)
+epilogues     : 0x0f90c370
+calls         : 0x0f93d414, 0x0f918278, 0x0f93c008, 0x0f93c154, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f90c2d4  70 40 2d e9  push        {r4, r5, r6, lr}                  
+0f90c2d8  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f90c2dc  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f90c2d8)  <- global word @0x0f9fd598 (role not asserted)
+0f90c2e0  50 d0 4d e2  sub         sp, sp, #0x50                     
+0f90c2e4  00 30 a0 e1  mov         r3, r0                            
+0f90c2e8  40 10 a0 e3  mov         r1, #0x40                          ; r1 = 0x40
+0f90c2ec  00 c0 94 e5  ldr         ip, [r4]                           ; r12 = [0x0f9fd598]
+0f90c2f0  00 50 a0 e1  mov         r5, r0                            
+0f90c2f4  f8 24 09 e3  movw        r2, #0x94f8                        ; r2 = 0x0f9694f8  <- string "sdc%u_iface_clk"
+0f90c2f8  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c2fc  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f9694f8 (high half; completes the pair at 0x0f90c2f4)  <- string "sdc%u_iface_clk"
+0f90c300  0e 60 a0 e1  mov         r6, lr                            
+0f90c304  4c c0 8d e5  str         ip, [sp, #0x4c]                    ; [sp,#0x4c]
+0f90c308  41 c4 00 eb  bl          #0xf93d414                         ; call 0x0f93d414
+0f90c30c  01 20 a0 e3  mov         r2, #1                             ; r2 = 0x1
+0f90c310  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c314  00 10 a0 e3  mov         r1, #0                             ; r1 = 0x0
+0f90c318  d6 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c31c  00 20 50 e2  subs        r2, r0, #0                        
+0f90c320  0d 00 00 0a  beq         #0xf90c35c                        
+0f90c324  05 10 a0 e1  mov         r1, r5                            
+0f90c328  08 05 09 e3  movw        r0, #0x9508                        ; r0 = 0x0f969508  <- string "failed to set sdc%u_iface_clk ret = %d"
+0f90c32c  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f969508 (high half; completes the pair at 0x0f90c328)  <- string "failed to set sdc%u_iface_clk ret = %d"
+0f90c330  34 bf 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f90c334  b8 3b 00 e3  movw        r3, #0xbb8                         ; r3 = 0x0f970bb8
+0f90c338  ec 18 04 e3  movw        r1, #0x48ec                        ; r1 = 0x0f9648ec  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c33c  97 3f 40 e3  movt        r3, #0xf97                         ; r3 = 0x0f970bb8 (high half; completes the pair at 0x0f90c334)
+0f90c340  24 24 09 e3  movw        r2, #0x9424                        ; r2 = 0x0f969424  <- string "platform/msm8994/acpuclock.c"
+0f90c344  00 30 8d e5  str         r3, [sp]                           ; [sp]
+0f90c348  06 00 a0 e1  mov         r0, r6                            
+0f90c34c  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f9648ec (high half; completes the pair at 0x0f90c338)  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c350  8b 30 a0 e3  mov         r3, #0x8b                          ; r3 = 0x8b
+0f90c354  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f969424 (high half; completes the pair at 0x0f90c340)  <- string "platform/msm8994/acpuclock.c"
+0f90c358  7d bf 00 eb  bl          #0xf93c154                         ; call 0x0f93c154
+0f90c35c  4c 20 9d e5  ldr         r2, [sp, #0x4c]                    ; r2 = [sp,#0x4c]  (value not statically resolvable)
+0f90c360  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f90c364  03 00 52 e1  cmp         r2, r3                            
+0f90c368  01 00 00 1a  bne         #0xf90c374                        
+0f90c36c  50 d0 8d e2  add         sp, sp, #0x50                     
+0f90c370  70 80 bd e8  pop         {r4, r5, r6, pc}                  
+0f90c374  98 bf 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: set_sdc_core_clk   (contains the string "failed to set sdc%u_core_clk")
+runtime range : 0x0f90c378 .. 0x0f90c540   (114 instructions)
+epilogues     : 0x0f90c460
+calls         : 0x0f93d414, 0x0f93c008, 0x0f93c154, 0x0f918278, 0x0f93c008, 0x0f93c154, 0x0f90c008, 0x0f918278, 0x0f918278, 0x0f918278, 0x0f90c008, 0x0f918278, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f90c378  f0 40 2d e9  push        {r4, r5, r6, r7, lr}              
+0f90c37c  98 55 0d e3  movw        r5, #0xd598                        ; r5 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f90c380  9f 5f 40 e3  movt        r5, #0xf9f                         ; r5 = 0x0f9fd598 (high half; completes the pair at 0x0f90c37c)  <- global word @0x0f9fd598 (role not asserted)
+0f90c384  54 d0 4d e2  sub         sp, sp, #0x54                     
+0f90c388  01 40 a0 e1  mov         r4, r1                            
+0f90c38c  00 30 a0 e1  mov         r3, r0                            
+0f90c390  00 c0 95 e5  ldr         ip, [r5]                           ; r12 = [0x0f9fd598]
+0f90c394  00 60 a0 e1  mov         r6, r0                            
+0f90c398  30 25 09 e3  movw        r2, #0x9530                        ; r2 = 0x0f969530  <- string "sdc%u_core_clk"
+0f90c39c  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c3a0  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f969530 (high half; completes the pair at 0x0f90c398)  <- string "sdc%u_core_clk"
+0f90c3a4  40 10 a0 e3  mov         r1, #0x40                          ; r1 = 0x40
+0f90c3a8  0e 70 a0 e1  mov         r7, lr                            
+0f90c3ac  4c c0 8d e5  str         ip, [sp, #0x4c]                    ; [sp,#0x4c]
+0f90c3b0  17 c4 00 eb  bl          #0xf93d414                         ; call 0x0f93d414
+0f90c3b4  6a 2d a0 e3  mov         r2, #0x1a80                        ; r2 = 0x00061a80
+0f90c3b8  06 20 40 e3  movt        r2, #6                             ; r2 = 0x00061a80 (high half; completes the pair at 0x0f90c3b4)
+0f90c3bc  02 00 54 e1  cmp         r4, r2                            
+0f90c3c0  27 00 00 0a  beq         #0xf90c464                        
+0f90c3c4  00 20 a0 e3  mov         r2, #0                             ; r2 = 0x02ee0000
+0f90c3c8  ee 22 40 e3  movt        r2, #0x2ee                         ; r2 = 0x02ee0000 (high half; completes the pair at 0x0f90c3c4)
+0f90c3cc  02 00 54 e1  cmp         r4, r2                            
+0f90c3d0  44 00 00 0a  beq         #0xf90c4e8                        
+0f90c3d4  36 3b a0 e3  mov         r3, #0xd800                        ; r3 = 0x05b8d800
+0f90c3d8  b8 35 40 e3  movt        r3, #0x5b8                         ; r3 = 0x05b8d800 (high half; completes the pair at 0x0f90c3d4)
+0f90c3dc  03 00 54 e1  cmp         r4, r3                            
+0f90c3e0  46 00 00 0a  beq         #0xf90c500                        
+0f90c3e4  0b 3a a0 e3  mov         r3, #0xb000                        ; r3 = 0x0b71b000
+0f90c3e8  71 3b 40 e3  movt        r3, #0xb71                         ; r3 = 0x0b71b000 (high half; completes the pair at 0x0f90c3e4)
+0f90c3ec  03 00 54 e1  cmp         r4, r3                            
+0f90c3f0  48 00 00 0a  beq         #0xf90c518                        
+0f90c3f4  c2 3c a0 e3  mov         r3, #0xc200                        ; r3 = 0x0bebc200
+0f90c3f8  eb 3b 40 e3  movt        r3, #0xbeb                         ; r3 = 0x0bebc200 (high half; completes the pair at 0x0f90c3f4)
+0f90c3fc  03 00 54 e1  cmp         r4, r3                            
+0f90c400  17 00 00 0a  beq         #0xf90c464                        
+0f90c404  21 3b a0 e3  mov         r3, #0x8400                        ; r3 = 0x17d78400
+0f90c408  d7 37 41 e3  movt        r3, #0x17d7                        ; r3 = 0x17d78400 (high half; completes the pair at 0x0f90c404)
+0f90c40c  03 00 54 e1  cmp         r4, r3                            
+0f90c410  29 00 00 0a  beq         #0xf90c4bc                        
+0f90c414  04 10 a0 e1  mov         r1, r4                            
+0f90c418  40 05 09 e3  movw        r0, #0x9540                        ; r0 = 0x0f969540  <- string "sdc frequency (%u) is not supported"
+0f90c41c  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f969540 (high half; completes the pair at 0x0f90c418)  <- string "sdc frequency (%u) is not supported"
+0f90c420  f8 be 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f90c424  b8 3b 00 e3  movw        r3, #0xbb8                         ; r3 = 0x0f970bb8
+0f90c428  ec 18 04 e3  movw        r1, #0x48ec                        ; r1 = 0x0f9648ec  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c42c  97 3f 40 e3  movt        r3, #0xf97                         ; r3 = 0x0f970bb8 (high half; completes the pair at 0x0f90c424)
+0f90c430  24 24 09 e3  movw        r2, #0x9424                        ; r2 = 0x0f969424  <- string "platform/msm8994/acpuclock.c"
+0f90c434  00 30 8d e5  str         r3, [sp]                           ; [sp]
+0f90c438  07 00 a0 e1  mov         r0, r7                            
+0f90c43c  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f9648ec (high half; completes the pair at 0x0f90c428)  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c440  b8 30 a0 e3  mov         r3, #0xb8                          ; r3 = 0xb8
+0f90c444  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f969424 (high half; completes the pair at 0x0f90c430)  <- string "platform/msm8994/acpuclock.c"
+0f90c448  41 bf 00 eb  bl          #0xf93c154                         ; call 0x0f93c154
+0f90c44c  4c 20 9d e5  ldr         r2, [sp, #0x4c]                    ; r2 = [sp,#0x4c]  (value not statically resolvable)
+0f90c450  00 30 95 e5  ldr         r3, [r5]                           ; r3 = [0x0f9fd598]
+0f90c454  03 00 52 e1  cmp         r2, r3                            
+0f90c458  37 00 00 1a  bne         #0xf90c53c                        
+0f90c45c  54 d0 8d e2  add         sp, sp, #0x54                     
+0f90c460  f0 80 bd e8  pop         {r4, r5, r6, r7, pc}              
+0f90c464  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c468  04 10 a0 e1  mov         r1, r4                            
+0f90c46c  01 20 a0 e3  mov         r2, #1                             ; r2 = 0x1
+0f90c470  80 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c474  00 00 50 e3  cmp         r0, #0                            
+0f90c478  f3 ff ff 0a  beq         #0xf90c44c                        
+0f90c47c  06 10 a0 e1  mov         r1, r6                            
+0f90c480  00 20 a0 e1  mov         r2, r0                            
+0f90c484  68 05 09 e3  movw        r0, #0x9568                        ; r0 = 0x0f969568  <- string "failed to set sdc%u_core_clk ret = %d"
+0f90c488  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f969568 (high half; completes the pair at 0x0f90c484)  <- string "failed to set sdc%u_core_clk ret = %d"
+0f90c48c  dd be 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f90c490  07 00 a0 e1  mov         r0, r7                            
+0f90c494  b8 3b 00 e3  movw        r3, #0xbb8                         ; r3 = 0x0f970bb8
+0f90c498  ec 18 04 e3  movw        r1, #0x48ec                        ; r1 = 0x0f9648ec  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c49c  97 3f 40 e3  movt        r3, #0xf97                         ; r3 = 0x0f970bb8 (high half; completes the pair at 0x0f90c494)
+0f90c4a0  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f9648ec (high half; completes the pair at 0x0f90c498)  <- string "ASSERT FAILED at (%s:%d): %s"
+0f90c4a4  00 30 8d e5  str         r3, [sp]                           ; [sp]
+0f90c4a8  24 24 09 e3  movw        r2, #0x9424                        ; r2 = 0x0f969424  <- string "platform/msm8994/acpuclock.c"
+0f90c4ac  bf 30 a0 e3  mov         r3, #0xbf                          ; r3 = 0xbf
+0f90c4b0  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f969424 (high half; completes the pair at 0x0f90c4a8)  <- string "platform/msm8994/acpuclock.c"
+0f90c4b4  26 bf 00 eb  bl          #0xf93c154                         ; call 0x0f93c154
+0f90c4b8  e3 ff ff ea  b           #0xf90c44c                        
+0f90c4bc  d1 fe ff eb  bl          #0xf90c008                         ; call 0x0f90c008
+0f90c4c0  00 00 50 e3  cmp         r0, #0                            
+0f90c4c4  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c4c8  06 1c a0 13  movne       r1, #0x600                         ; r1 = 0x600
+0f90c4cc  06 1a a0 03  moveq       r1, #0x6000                        ; r1 = 0x6000
+0f90c4d0  01 20 a0 13  movne       r2, #1                             ; r2 = 0x1
+0f90c4d4  81 14 41 13  movtne      r1, #0x1481                        ; r1 = 0x14810000 (high half; no matching low half)
+0f90c4d8  01 20 a0 03  moveq       r2, #1                             ; r2 = 0x1
+0f90c4dc  e3 16 41 03  movteq      r1, #0x16e3                        ; r1 = 0x16e30000 (high half; no matching low half)
+0f90c4e0  64 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c4e4  e2 ff ff ea  b           #0xf90c474                        
+0f90c4e8  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c4ec  80 10 0f e3  movw        r1, #0xf080                        ; r1 = 0x02faf080
+0f90c4f0  01 20 a0 e3  mov         r2, #1                             ; r2 = 0x1
+0f90c4f4  fa 12 40 e3  movt        r1, #0x2fa                         ; r1 = 0x02faf080 (high half; completes the pair at 0x0f90c4ec)
+0f90c4f8  5e 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c4fc  dc ff ff ea  b           #0xf90c474                        
+0f90c500  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c504  e1 1c a0 e3  mov         r1, #0xe100                        ; r1 = 0x05f5e100
+0f90c508  01 20 a0 e3  mov         r2, #1                             ; r2 = 0x1
+0f90c50c  f5 15 40 e3  movt        r1, #0x5f5                         ; r1 = 0x05f5e100 (high half; completes the pair at 0x0f90c504)
+0f90c510  58 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c514  d6 ff ff ea  b           #0xf90c474                        
+0f90c518  ba fe ff eb  bl          #0xf90c008                         ; call 0x0f90c008
+0f90c51c  00 00 50 e3  cmp         r0, #0                            
+0f90c520  0c 00 8d e2  add         r0, sp, #0xc                      
+0f90c524  cf ff ff 0a  beq         #0xf90c468                        
+0f90c528  83 1c a0 e3  mov         r1, #0x8300                        ; r1 = 0x0a408300
+0f90c52c  01 20 a0 e3  mov         r2, #1                             ; r2 = 0x1
+0f90c530  40 1a 40 e3  movt        r1, #0xa40                         ; r1 = 0x0a408300 (high half; completes the pair at 0x0f90c528)
+0f90c534  4f 2f 00 eb  bl          #0xf918278                         ; call 0x0f918278
+0f90c538  cd ff ff ea  b           #0xf90c474                        
+0f90c53c  26 bf 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: sdhci_msm_init_dll (contains the string "sdhci_msm_init_dll")
+runtime range : 0x0f913d24 .. 0x0f913f10   (123 instructions)
+epilogues     : 0x0f913e3c
+calls         : 0x0f913b1c, 0x0f917acc, 0x0f93c008, 0x0f913b1c, 0x0f917acc, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f913d24  f0 40 2d e9  push        {r4, r5, r6, r7, lr}              
+0f913d28  98 65 0d e3  movw        r6, #0xd598                        ; r6 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f913d2c  9f 6f 40 e3  movt        r6, #0xf9f                         ; r6 = 0x0f9fd598 (high half; completes the pair at 0x0f913d28)  <- global word @0x0f9fd598 (role not asserted)
+0f913d30  00 30 90 e5  ldr         r3, [r0]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913d34  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f913d38  10 20 d0 e5  ldrb        r2, [r0, #0x10]                   
+0f913d3c  00 10 96 e5  ldr         r1, [r6]                           ; r1 = [0x0f9fd598]
+0f913d40  00 50 a0 e1  mov         r5, r0                            
+0f913d44  01 00 52 e3  cmp         r2, #1                            
+0f913d48  04 10 8d e5  str         r1, [sp, #4]                       ; [sp,#0x4]
+0f913d4c  0c 71 93 e5  ldr         r7, [r3, #0x10c]                   ; r7 = [0xf9824a0c]  (HC+0x10c)
+0f913d50  02 70 07 e2  and         r7, r7, #2                        
+0f913d54  60 00 00 0a  beq         #0xf913edc                        
+0f913d58  00 00 57 e3  cmp         r7, #0                            
+0f913d5c  0c 21 93 15  ldrne       r2, [r3, #0x10c]                   ; r2 = [0xf9824a0c]  (HC+0x10c)
+0f913d60  02 20 c2 13  bicne       r2, r2, #2                        
+0f913d64  0c 21 83 15  strne       r2, [r3, #0x10c]                   ; WRITE 0xf9824a0c  (HC+0x10c)  <- <r2, opaque>
+0f913d68  00 30 95 15  ldrne       r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913d6c  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913d70  01 21 82 e3  orr         r2, r2, #0x40000000               
+0f913d74  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913d78  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913d7c  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913d80  02 22 82 e3  orr         r2, r2, #0x20000000               
+0f913d84  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913d88  03 00 95 e8  ldm         r5, {r0, r1}                      
+0f913d8c  62 ff ff eb  bl          #0xf913b1c                         ; call 0x0f913b1c
+0f913d90  10 30 d5 e5  ldrb        r3, [r5, #0x10]                   
+0f913d94  01 00 53 e3  cmp         r3, #1                            
+0f913d98  3b 00 00 0a  beq         #0xf913e8c                        
+0f913d9c  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913da0  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913da4  01 21 c2 e3  bic         r2, r2, #0x40000000               
+0f913da8  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913dac  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913db0  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913db4  02 22 c2 e3  bic         r2, r2, #0x20000000               
+0f913db8  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913dbc  10 30 d5 e5  ldrb        r3, [r5, #0x10]                   
+0f913dc0  01 00 53 e3  cmp         r3, #1                            
+0f913dc4  26 00 00 0a  beq         #0xf913e64                        
+0f913dc8  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913dcc  32 40 a0 e3  mov         r4, #0x32                          ; r4 = 0x32
+0f913dd0  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913dd4  01 28 82 e3  orr         r2, r2, #0x10000                  
+0f913dd8  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913ddc  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913de0  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913de4  01 27 82 e3  orr         r2, r2, #0x40000                  
+0f913de8  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913dec  03 00 00 ea  b           #0xf913e00                        
+0f913df0  01 00 a0 e3  mov         r0, #1                             ; r0 = 0x1
+0f913df4  34 0f 00 eb  bl          #0xf917acc                         ; call 0x0f917acc
+0f913df8  01 40 54 e2  subs        r4, r4, #1                        
+0f913dfc  0f 00 00 0a  beq         #0xf913e40                        
+0f913e00  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913e04  08 21 93 e5  ldr         r2, [r3, #0x108]                   ; r2 = [0xf9824a08]  (HC+0x108)
+0f913e08  80 00 12 e3  tst         r2, #0x80                         
+0f913e0c  f7 ff ff 0a  beq         #0xf913df0                        
+0f913e10  00 00 57 e3  cmp         r7, #0                            
+0f913e14  0c 21 93 15  ldrne       r2, [r3, #0x10c]                   ; r2 = [0xf9824a0c]  (HC+0x10c)
+0f913e18  00 00 a0 13  movne       r0, #0                             ; r0 = 0x0
+0f913e1c  07 00 a0 01  moveq       r0, r7                            
+0f913e20  02 20 82 13  orrne       r2, r2, #2                        
+0f913e24  0c 21 83 15  strne       r2, [r3, #0x10c]                   ; WRITE 0xf9824a0c  (HC+0x10c)  <- <r2, opaque>
+0f913e28  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f913e2c  00 30 96 e5  ldr         r3, [r6]                           ; r3 = [0x0f9fd598]
+0f913e30  03 00 52 e1  cmp         r2, r3                            
+0f913e34  34 00 00 1a  bne         #0xf913f0c                        
+0f913e38  0c d0 8d e2  add         sp, sp, #0xc                      
+0f913e3c  f0 80 bd e8  pop         {r4, r5, r6, r7, pc}              
+0f913e40  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913e44  60 05 0b e3  movw        r0, #0xb560                        ; r0 = 0x0f96b560  <- string "%s: Failed to get DLL lock: 0x%08x"
+0f913e48  14 15 0b e3  movw        r1, #0xb514                        ; r1 = 0x0f96b514  <- string "sdhci_msm_init_dll"
+0f913e4c  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96b560 (high half; completes the pair at 0x0f913e44)  <- string "%s: Failed to get DLL lock: 0x%08x"
+0f913e50  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f96b514 (high half; completes the pair at 0x0f913e48)  <- string "sdhci_msm_init_dll"
+0f913e54  08 21 93 e5  ldr         r2, [r3, #0x108]                   ; r2 = [0xf9824a08]  (HC+0x108)
+0f913e58  6a a0 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f913e5c  01 00 a0 e3  mov         r0, #1                             ; r0 = 0x1
+0f913e60  f0 ff ff ea  b           #0xf913e28                        
+0f913e64  b2 31 d5 e1  ldrh        r3, [r5, #0x12]                   
+0f913e68  41 00 53 e3  cmp         r3, #0x41                         
+0f913e6c  d5 ff ff 9a  bls         #0xf913dc8                        
+0f913e70  03 00 95 e8  ldm         r5, {r0, r1}                      
+0f913e74  28 ff ff eb  bl          #0xf913b1c                         ; call 0x0f913b1c
+0f913e78  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913e7c  b4 21 93 e5  ldr         r2, [r3, #0x1b4]                   ; r2 = [0xf9824ab4]  (HC+0x1b4)
+0f913e80  02 26 c2 e3  bic         r2, r2, #0x200000                 
+0f913e84  b4 21 83 e5  str         r2, [r3, #0x1b4]                   ; WRITE 0xf9824ab4  (HC+0x1b4)  <- <r2, opaque>
+0f913e88  ce ff ff ea  b           #0xf913dc8                        
+0f913e8c  b2 31 d5 e1  ldrh        r3, [r5, #0x12]                   
+0f913e90  41 00 53 e3  cmp         r3, #0x41                         
+0f913e94  c0 ff ff 9a  bls         #0xf913d9c                        
+0f913e98  00 30 95 e5  ldr         r3, [r5]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913e9c  04 10 95 e5  ldr         r1, [r5, #4]                       ; r1 = [r5,#0x4]  (value not statically resolvable)
+0f913ea0  b4 21 93 e5  ldr         r2, [r3, #0x1b4]                   ; r2 = [0xf9824ab4]  (HC+0x1b4)
+0f913ea4  01 07 12 e3  tst         r2, #0x40000                      
+0f913ea8  85 2d 01 e3  movw        r2, #0x1d85                        ; r2 = 0x6fd91d85
+0f913eac  d9 2f 46 e3  movt        r2, #0x6fd9                        ; r2 = 0x6fd91d85 (high half; completes the pair at 0x0f913ea8)
+0f913eb0  92 01 82 e0  umull       r0, r2, r2, r1                    
+0f913eb4  05 00 a0 e3  mov         r0, #5                             ; r0 = 0x5
+0f913eb8  a2 1b a0 e1  lsr         r1, r2, #0x17                     
+0f913ebc  b4 21 93 e5  ldr         r2, [r3, #0x1b4]                   ; r2 = [0xf9824ab4]  (HC+0x1b4)
+0f913ec0  81 11 a0 11  lslne       r1, r1, #3                        
+0f913ec4  01 11 a0 01  lsleq       r1, r1, #2                        
+0f913ec8  ff 2b c2 e3  bic         r2, r2, #0x3fc00                  
+0f913ecc  01 25 82 e1  orr         r2, r2, r1, lsl #10               
+0f913ed0  b4 21 83 e5  str         r2, [r3, #0x1b4]                   ; WRITE 0xf9824ab4  (HC+0x1b4)  <- <r2, opaque>
+0f913ed4  fc 0e 00 eb  bl          #0xf917acc                         ; call 0x0f917acc
+0f913ed8  af ff ff ea  b           #0xf913d9c                        
+0f913edc  b2 21 d0 e1  ldrh        r2, [r0, #0x12]                   
+0f913ee0  41 00 52 e3  cmp         r2, #0x41                         
+0f913ee4  9b ff ff 9a  bls         #0xf913d58                        
+0f913ee8  00 21 93 e5  ldr         r2, [r3, #0x100]                   ; r2 = [0xf9824a00]  (HC+0x100)
+0f913eec  01 27 c2 e3  bic         r2, r2, #0x40000                  
+0f913ef0  00 21 83 e5  str         r2, [r3, #0x100]                   ; WRITE 0xf9824a00  (HC+0x100)  <- <r2, opaque>
+0f913ef4  00 30 90 e5  ldr         r3, [r0]                           ; r3 = [0x00000005]
+0f913ef8  b4 21 93 e5  ldr         r2, [r3, #0x1b4]                   ; r2 = [r3,#0x1b4]  (value not statically resolvable)
+0f913efc  02 26 82 e3  orr         r2, r2, #0x200000                 
+0f913f00  b4 21 83 e5  str         r2, [r3, #0x1b4]                   ; [r3,#0x1b4]
+0f913f04  00 30 90 e5  ldr         r3, [r0]                           ; r3 = [0x00000005]
+0f913f08  92 ff ff ea  b           #0xf913d58                        
+0f913f0c  b2 a0 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_set_rate_by_name(name, rate, enable)  - generic clock setter
+runtime range : 0x0f918278 .. 0x0f91835c   (57 instructions)
+epilogues     : 0x0f9182d4
+calls         : 0x0f9181c4, 0x0f918070, 0x0f93c008, 0x0f93c008, 0x0f93c008, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f918278  f0 41 2d e9  push        {r4, r5, r6, r7, r8, lr}          
+0f91827c  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918280  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f91827c)  <- global word @0x0f9fd598 (role not asserted)
+0f918284  08 d0 4d e2  sub         sp, sp, #8                        
+0f918288  01 50 a0 e1  mov         r5, r1                            
+0f91828c  02 60 a0 e1  mov         r6, r2                            
+0f918290  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f918294  00 80 a0 e1  mov         r8, r0                            
+0f918298  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f91829c  c8 ff ff eb  bl          #0xf9181c4                         ; call 0x0f9181c4
+0f9182a0  00 70 50 e2  subs        r7, r0, #0                        
+0f9182a4  23 00 00 0a  beq         #0xf918338                        
+0f9182a8  00 00 55 e3  cmp         r5, #0                            
+0f9182ac  09 00 00 1a  bne         #0xf9182d8                        
+0f9182b0  00 00 56 e3  cmp         r6, #0                            
+0f9182b4  06 50 a0 01  moveq       r5, r6                            
+0f9182b8  11 00 00 1a  bne         #0xf918304                        
+0f9182bc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9182c0  05 00 a0 e1  mov         r0, r5                            
+0f9182c4  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f9182c8  03 00 52 e1  cmp         r2, r3                            
+0f9182cc  1f 00 00 1a  bne         #0xf918350                        
+0f9182d0  08 d0 8d e2  add         sp, sp, #8                        
+0f9182d4  f0 81 bd e8  pop         {r4, r5, r6, r7, r8, pc}          
+0f9182d8  08 30 97 e5  ldr         r3, [r7, #8]                       ; r3 = [r7,#0x8]  (value not statically resolvable)
+0f9182dc  10 30 93 e5  ldr         r3, [r3, #0x10]                    ; r3 = [r3,#0x10]  (value not statically resolvable)
+0f9182e0  00 00 53 e3  cmp         r3, #0                            
+0f9182e4  0e 00 00 0a  beq         #0xf918324                        
+0f9182e8  05 10 a0 e1  mov         r1, r5                            
+0f9182ec  33 ff 2f e1  blx         r3                                
+0f9182f0  00 50 50 e2  subs        r5, r0, #0                        
+0f9182f4  0b 00 00 1a  bne         #0xf918328                        
+0f9182f8  00 00 56 e3  cmp         r6, #0                            
+0f9182fc  06 50 a0 01  moveq       r5, r6                            
+0f918300  ed ff ff 0a  beq         #0xf9182bc                        
+0f918304  07 00 a0 e1  mov         r0, r7                            
+0f918308  58 ff ff eb  bl          #0xf918070                         ; call 0x0f918070
+0f91830c  00 50 50 e2  subs        r5, r0, #0                        
+0f918310  e9 ff ff 0a  beq         #0xf9182bc                        
+0f918314  44 08 0c e3  movw        r0, #0xc844                        ; r0 = 0x0f96c844  <- string "Clock enable failed."
+0f918318  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96c844 (high half; completes the pair at 0x0f918314)  <- string "Clock enable failed."
+0f91831c  39 8f 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f918320  e5 ff ff ea  b           #0xf9182bc                        
+0f918324  06 50 e0 e3  mvn         r5, #6                            
+0f918328  2c 08 0c e3  movw        r0, #0xc82c                        ; r0 = 0x0f96c82c  <- string "Clock set rate failed."
+0f91832c  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96c82c (high half; completes the pair at 0x0f918328)  <- string "Clock set rate failed."
+0f918330  34 8f 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f918334  e0 ff ff ea  b           #0xf9182bc                        
+0f918338  08 10 a0 e1  mov         r1, r8                            
+0f91833c  0c 08 0c e3  movw        r0, #0xc80c                        ; r0 = 0x0f96c80c  <- string "Can't find clock with id: %s"
+0f918340  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96c80c (high half; completes the pair at 0x0f91833c)  <- string "Can't find clock with id: %s"
+0f918344  06 50 e0 e3  mvn         r5, #6                            
+0f918348  2e 8f 00 eb  bl          #0xf93c008                         ; call 0x0f93c008
+0f91834c  da ff ff ea  b           #0xf9182bc                        
+0f918350  a1 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f918354  98 c5 0d e3  movw        ip, #0xd598                        ; r12 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918358  9f cf 40 e3  movt        ip, #0xf9f                         ; r12 = 0x0f9fd598 (high half; completes the pair at 0x0f918354)  <- global word @0x0f9fd598 (role not asserted)
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_find_by_name  - lookup of a clock id in the clock table
+runtime range : 0x0f9181c4 .. 0x0f9181cc   (2 instructions)
+epilogues     : 
+calls         : none
+--------------------------------------------------------------------------------
+0f9181c4  d8 31 00 e3  movw        r3, #0x1d8                         ; r3 = 0x0f9f01d8
+0f9181c8  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9f01d8 (high half; completes the pair at 0x0f9181c4)
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_enable        - enables a clock through its ops
+runtime range : 0x0f918070 .. 0x0f918130   (48 instructions)
+epilogues     : 0x0f91810c
+calls         : 0x0f918070, 0x0f917fdc, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f918070  f0 40 2d e9  push        {r4, r5, r6, r7, lr}              
+0f918074  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918078  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f918074)  <- global word @0x0f9fd598 (role not asserted)
+0f91807c  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918080  00 50 50 e2  subs        r5, r0, #0                        
+0f918084  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f918088  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f91808c  1f 00 00 0a  beq         #0xf918110                        
+0f918090  10 30 95 e5  ldr         r3, [r5, #0x10]                    ; r3 = [r5,#0x10]  (value not statically resolvable)
+0f918094  00 00 53 e3  cmp         r3, #0                            
+0f918098  13 00 00 1a  bne         #0xf9180ec                        
+0f91809c  08 30 95 e5  ldr         r3, [r5, #8]                       ; r3 = [r5,#0x8]  (value not statically resolvable)
+0f9180a0  34 30 93 e5  ldr         r3, [r3, #0x34]                    ; r3 = [r3,#0x34]  (value not statically resolvable)
+0f9180a4  00 00 53 e3  cmp         r3, #0                            
+0f9180a8  03 60 a0 01  moveq       r6, r3                            
+0f9180ac  01 00 00 0a  beq         #0xf9180b8                        
+0f9180b0  33 ff 2f e1  blx         r3                                
+0f9180b4  00 60 a0 e1  mov         r6, r0                            
+0f9180b8  06 00 a0 e1  mov         r0, r6                            
+0f9180bc  eb ff ff eb  bl          #0xf918070                         ; call 0x0f918070
+0f9180c0  00 00 50 e3  cmp         r0, #0                            
+0f9180c4  0b 00 00 1a  bne         #0xf9180f8                        
+0f9180c8  08 30 95 e5  ldr         r3, [r5, #8]                       ; r3 = [r5,#0x8]  (value not statically resolvable)
+0f9180cc  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [r3]  (value not statically resolvable)
+0f9180d0  00 00 53 e3  cmp         r3, #0                            
+0f9180d4  03 00 00 0a  beq         #0xf9180e8                        
+0f9180d8  05 00 a0 e1  mov         r0, r5                            
+0f9180dc  33 ff 2f e1  blx         r3                                
+0f9180e0  00 70 50 e2  subs        r7, r0, #0                        
+0f9180e4  0b 00 00 1a  bne         #0xf918118                        
+0f9180e8  10 30 95 e5  ldr         r3, [r5, #0x10]                    ; r3 = [r5,#0x10]  (value not statically resolvable)
+0f9180ec  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f9180f0  01 30 83 e2  add         r3, r3, #1                        
+0f9180f4  10 30 85 e5  str         r3, [r5, #0x10]                    ; [r5,#0x10]
+0f9180f8  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9180fc  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f918100  03 00 52 e1  cmp         r2, r3                            
+0f918104  07 00 00 1a  bne         #0xf918128                        
+0f918108  0c d0 8d e2  add         sp, sp, #0xc                      
+0f91810c  f0 80 bd e8  pop         {r4, r5, r6, r7, pc}              
+0f918110  05 00 a0 e1  mov         r0, r5                            
+0f918114  f7 ff ff ea  b           #0xf9180f8                        
+0f918118  06 00 a0 e1  mov         r0, r6                            
+0f91811c  ae ff ff eb  bl          #0xf917fdc                         ; call 0x0f917fdc
+0f918120  07 00 a0 e1  mov         r0, r7                            
+0f918124  f3 ff ff ea  b           #0xf9180f8                        
+0f918128  2b 90 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f91812c  08 30 90 e5  ldr         r3, [r0, #8]                       ; r3 = [r0,#0x8]  (value not statically resolvable)
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_ops->enable   - generic CBCR enable  (reg |= 1)
+runtime range : 0x0f9184b8 .. 0x0f9185f8   (80 instructions)
+epilogues     : 0x0f918504, 0x0f918554, 0x0f9185b8, 0x0f9185f0
+calls         : 0x0f93c1dc, 0x0f93c1dc, 0x0f93c1dc, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f9184b8  98 15 0d e3  movw        r1, #0xd598                        ; r1 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9184bc  9f 1f 40 e3  movt        r1, #0xf9f                         ; r1 = 0x0f9fd598 (high half; completes the pair at 0x0f9184b8)  <- global word @0x0f9fd598 (role not asserted)
+0f9184c0  0c 20 10 e5  ldr         r2, [r0, #-0xc]                    ; r2 = [r0,#0x-c]  (value not statically resolvable)
+0f9184c4  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f9184c8  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f9184cc  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f9184d0  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f9184d4  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f9184d8  01 30 83 e3  orr         r3, r3, #1                        
+0f9184dc  00 30 82 e5  str         r3, [r2]                           ; [r2]
+0f9184e0  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f9184e4  00 00 53 e3  cmp         r3, #0                            
+0f9184e8  fc ff ff ba  blt         #0xf9184e0                        
+0f9184ec  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9184f0  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f9184f4  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f9184f8  03 00 52 e1  cmp         r2, r3                            
+0f9184fc  01 00 00 1a  bne         #0xf918508                        
+0f918500  0c d0 8d e2  add         sp, sp, #0xc                      
+0f918504  04 f0 9d e4  pop         {pc}                              
+0f918508  33 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f91850c  98 15 0d e3  movw        r1, #0xd598                        ; r1 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918510  9f 1f 40 e3  movt        r1, #0xf9f                         ; r1 = 0x0f9fd598 (high half; completes the pair at 0x0f91850c)  <- global word @0x0f9fd598 (role not asserted)
+0f918514  0c 20 10 e5  ldr         r2, [r0, #-0xc]                    ; r2 = [0x-000000c]
+0f918518  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f91851c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918520  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918524  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f918528  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f91852c  01 30 c3 e3  bic         r3, r3, #1                        
+0f918530  00 30 82 e5  str         r3, [r2]                           ; [r2]
+0f918534  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f918538  00 00 53 e3  cmp         r3, #0                            
+0f91853c  fc ff ff aa  bge         #0xf918534                        
+0f918540  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918544  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f918548  03 00 52 e1  cmp         r2, r3                            
+0f91854c  01 00 00 1a  bne         #0xf918558                        
+0f918550  0c d0 8d e2  add         sp, sp, #0xc                      
+0f918554  04 f0 9d e4  pop         {pc}                              
+0f918558  1f 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f91855c  10 00 40 e2  sub         r0, r0, #0x10                     
+0f918560  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918564  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f918560)  <- global word @0x0f9fd598 (role not asserted)
+0f918568  24 c0 90 e5  ldr         ip, [r0, #0x24]                    ; r12 = [r0,#0x24]  (value not statically resolvable)
+0f91856c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918570  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918574  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f918578  00 00 5c e3  cmp         ip, #0                            
+0f91857c  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f918580  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918584  06 00 00 1a  bne         #0xf9185a4                        
+0f918588  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f91858c  03 00 52 e1  cmp         r2, r3                            
+0f918590  09 00 00 1a  bne         #0xf9185bc                        
+0f918594  0c 00 90 e5  ldr         r0, [r0, #0xc]                     ; r0 = [r0,#0xc]  (value not statically resolvable)
+0f918598  0c d0 8d e2  add         sp, sp, #0xc                      
+0f91859c  04 e0 9d e4  pop         {lr}                              
+0f9185a0  e1 fe ff ea  b           #0xf91812c                        
+0f9185a4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [r3]  (value not statically resolvable)
+0f9185a8  00 00 e0 e3  mvn         r0, #0                            
+0f9185ac  03 00 52 e1  cmp         r2, r3                            
+0f9185b0  01 00 00 1a  bne         #0xf9185bc                        
+0f9185b4  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185b8  04 f0 9d e4  pop         {pc}                              
+0f9185bc  06 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f9185c0  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9185c4  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f9185c0)  <- global word @0x0f9fd598 (role not asserted)
+0f9185c8  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f9185cc  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f9185d0  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f9185d4  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f9185d8  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f9185dc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9185e0  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f9185e4  03 00 52 e1  cmp         r2, r3                            
+0f9185e8  01 00 00 1a  bne         #0xf9185f4                        
+0f9185ec  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185f0  04 f0 9d e4  pop         {pc}                              
+0f9185f4  f8 8e 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_ops->disable  - generic CBCR disable (reg &= ~1)
+runtime range : 0x0f91850c .. 0x0f9185f8   (59 instructions)
+epilogues     : 0x0f918554, 0x0f9185b8, 0x0f9185f0
+calls         : 0x0f93c1dc, 0x0f93c1dc, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f91850c  98 15 0d e3  movw        r1, #0xd598                        ; r1 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918510  9f 1f 40 e3  movt        r1, #0xf9f                         ; r1 = 0x0f9fd598 (high half; completes the pair at 0x0f91850c)  <- global word @0x0f9fd598 (role not asserted)
+0f918514  0c 20 10 e5  ldr         r2, [r0, #-0xc]                    ; r2 = [r0,#0x-c]  (value not statically resolvable)
+0f918518  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f91851c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918520  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918524  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f918528  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f91852c  01 30 c3 e3  bic         r3, r3, #1                        
+0f918530  00 30 82 e5  str         r3, [r2]                           ; [r2]
+0f918534  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f918538  00 00 53 e3  cmp         r3, #0                            
+0f91853c  fc ff ff aa  bge         #0xf918534                        
+0f918540  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918544  00 30 91 e5  ldr         r3, [r1]                           ; r3 = [0x0f9fd598]
+0f918548  03 00 52 e1  cmp         r2, r3                            
+0f91854c  01 00 00 1a  bne         #0xf918558                        
+0f918550  0c d0 8d e2  add         sp, sp, #0xc                      
+0f918554  04 f0 9d e4  pop         {pc}                              
+0f918558  1f 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f91855c  10 00 40 e2  sub         r0, r0, #0x10                     
+0f918560  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918564  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f918560)  <- global word @0x0f9fd598 (role not asserted)
+0f918568  24 c0 90 e5  ldr         ip, [r0, #0x24]                    ; r12 = [r0,#0x24]  (value not statically resolvable)
+0f91856c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918570  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918574  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f918578  00 00 5c e3  cmp         ip, #0                            
+0f91857c  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f918580  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918584  06 00 00 1a  bne         #0xf9185a4                        
+0f918588  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f91858c  03 00 52 e1  cmp         r2, r3                            
+0f918590  09 00 00 1a  bne         #0xf9185bc                        
+0f918594  0c 00 90 e5  ldr         r0, [r0, #0xc]                     ; r0 = [r0,#0xc]  (value not statically resolvable)
+0f918598  0c d0 8d e2  add         sp, sp, #0xc                      
+0f91859c  04 e0 9d e4  pop         {lr}                              
+0f9185a0  e1 fe ff ea  b           #0xf91812c                        
+0f9185a4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [r3]  (value not statically resolvable)
+0f9185a8  00 00 e0 e3  mvn         r0, #0                            
+0f9185ac  03 00 52 e1  cmp         r2, r3                            
+0f9185b0  01 00 00 1a  bne         #0xf9185bc                        
+0f9185b4  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185b8  04 f0 9d e4  pop         {pc}                              
+0f9185bc  06 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f9185c0  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9185c4  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f9185c0)  <- global word @0x0f9fd598 (role not asserted)
+0f9185c8  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f9185cc  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f9185d0  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f9185d4  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f9185d8  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f9185dc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9185e0  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f9185e4  03 00 52 e1  cmp         r2, r3                            
+0f9185e8  01 00 00 1a  bne         #0xf9185f4                        
+0f9185ec  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185f0  04 f0 9d e4  pop         {pc}                              
+0f9185f4  f8 8e 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_ops entry      - generic disable variant
+runtime range : 0x0f91855c .. 0x0f9185f8   (39 instructions)
+epilogues     : 0x0f9185b8, 0x0f9185f0
+calls         : 0x0f93c1dc, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f91855c  10 00 40 e2  sub         r0, r0, #0x10                     
+0f918560  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918564  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f918560)  <- global word @0x0f9fd598 (role not asserted)
+0f918568  24 c0 90 e5  ldr         ip, [r0, #0x24]                    ; r12 = [r0,#0x24]  (value not statically resolvable)
+0f91856c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918570  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918574  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f918578  00 00 5c e3  cmp         ip, #0                            
+0f91857c  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f918580  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918584  06 00 00 1a  bne         #0xf9185a4                        
+0f918588  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f91858c  03 00 52 e1  cmp         r2, r3                            
+0f918590  09 00 00 1a  bne         #0xf9185bc                        
+0f918594  0c 00 90 e5  ldr         r0, [r0, #0xc]                     ; r0 = [r0,#0xc]  (value not statically resolvable)
+0f918598  0c d0 8d e2  add         sp, sp, #0xc                      
+0f91859c  04 e0 9d e4  pop         {lr}                              
+0f9185a0  e1 fe ff ea  b           #0xf91812c                        
+0f9185a4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [r3]  (value not statically resolvable)
+0f9185a8  00 00 e0 e3  mvn         r0, #0                            
+0f9185ac  03 00 52 e1  cmp         r2, r3                            
+0f9185b0  01 00 00 1a  bne         #0xf9185bc                        
+0f9185b4  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185b8  04 f0 9d e4  pop         {pc}                              
+0f9185bc  06 8f 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f9185c0  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9185c4  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f9185c0)  <- global word @0x0f9fd598 (role not asserted)
+0f9185c8  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f9185cc  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f9185d0  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f9185d4  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f9185d8  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f9185dc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9185e0  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f9185e4  03 00 52 e1  cmp         r2, r3                            
+0f9185e8  01 00 00 1a  bne         #0xf9185f4                        
+0f9185ec  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9185f0  04 f0 9d e4  pop         {pc}                              
+0f9185f4  f8 8e 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: clk_ops->set_flag (reg |= 1 with dmb)
+runtime range : 0x0f9188fc .. 0x0f91897c   (32 instructions)
+epilogues     : 0x0f918958
+calls         : 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f9188fc  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918900  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f9188fc)  <- global word @0x0f9fd598 (role not asserted)
+0f918904  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918908  10 c0 50 e2  subs        ip, r0, #0x10                     
+0f91890c  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [0x0f9fd598]
+0f918910  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918914  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f918918  14 00 00 0a  beq         #0xf918970                        
+0f91891c  10 c0 10 e5  ldr         ip, [r0, #-0x10]                   ; r12 = [r0,#0x-10]  (value not statically resolvable)
+0f918920  00 00 51 e3  cmp         r1, #0                            
+0f918924  00 20 9c e5  ldr         r2, [ip]                           ; r2 = [r12]  (value not statically resolvable)
+0f918928  0d 00 00 0a  beq         #0xf918964                        
+0f91892c  01 00 51 e3  cmp         r1, #1                            
+0f918930  01 20 82 03  orreq       r2, r2, #1                        
+0f918934  00 00 a0 03  moveq       r0, #0                             ; r0 = 0x0
+0f918938  07 00 00 1a  bne         #0xf91895c                        
+0f91893c  00 20 8c e5  str         r2, [ip]                           ; [r12]
+0f918940  5f f0 7f f5  dmb         sy                                
+0f918944  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918948  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f91894c  03 00 52 e1  cmp         r2, r3                            
+0f918950  08 00 00 1a  bne         #0xf918978                        
+0f918954  0c d0 8d e2  add         sp, sp, #0xc                      
+0f918958  04 f0 9d e4  pop         {pc}                              
+0f91895c  01 00 a0 e3  mov         r0, #1                             ; r0 = 0x1
+0f918960  f5 ff ff ea  b           #0xf91893c                        
+0f918964  01 20 c2 e3  bic         r2, r2, #1                        
+0f918968  01 00 a0 e1  mov         r0, r1                            
+0f91896c  f2 ff ff ea  b           #0xf91893c                        
+0f918970  0c 00 a0 e1  mov         r0, ip                            
+0f918974  f2 ff ff ea  b           #0xf918944                        
+0f918978  17 8e 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: sdc1_clk rate setter  (referenced by the "sdc1_clk" table entry)
+runtime range : 0x0f9186d0 .. 0x0f9186d8   (2 instructions)
+epilogues     : 
+calls         : none
+--------------------------------------------------------------------------------
+0f9186d0  98 c5 0d e3  movw        ip, #0xd598                        ; r12 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9186d4  9f cf 40 e3  movt        ip, #0xf9f                         ; r12 = 0x0f9fd598 (high half; completes the pair at 0x0f9186d0)  <- global word @0x0f9fd598 (role not asserted)
+
+--------------------------------------------------------------------------------
+FUNCTION: sdc1_clk RCGR disable (referenced by the sdc1_clk ops table)
+runtime range : 0x0f91876c .. 0x0f9187e0   (29 instructions)
+epilogues     : 0x0f9187d0
+calls         : 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f91876c  98 c5 0d e3  movw        ip, #0xd598                        ; r12 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918770  9f cf 40 e3  movt        ip, #0xf9f                         ; r12 = 0x0f9fd598 (high half; completes the pair at 0x0f91876c)  <- global word @0x0f9fd598 (role not asserted)
+0f918774  04 30 90 e5  ldr         r3, [r0, #4]                       ; r3 = [r0,#0x4]  (value not statically resolvable)
+0f918778  00 20 9c e5  ldr         r2, [ip]                           ; r2 = [0x0f9fd598]
+0f91877c  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918780  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918784  08 10 91 e5  ldr         r1, [r1, #8]                       ; r1 = [r1,#0x8]  (value not statically resolvable)
+0f918788  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f91878c  00 20 93 e5  ldr         r2, [r3]                           ; r2 = [r3]  (value not statically resolvable)
+0f918790  c7 2f c2 e3  bic         r2, r2, #0x31c                    
+0f918794  03 20 c2 e3  bic         r2, r2, #3                        
+0f918798  01 20 82 e1  orr         r2, r2, r1                        
+0f91879c  00 20 83 e5  str         r2, [r3]                           ; [r3]
+0f9187a0  00 20 90 e5  ldr         r2, [r0]                           ; r2 = [r0]  (value not statically resolvable)
+0f9187a4  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f9187a8  01 30 83 e3  orr         r3, r3, #1                        
+0f9187ac  00 30 82 e5  str         r3, [r2]                           ; [r2]
+0f9187b0  00 30 92 e5  ldr         r3, [r2]                           ; r3 = [r2]  (value not statically resolvable)
+0f9187b4  01 00 13 e3  tst         r3, #1                            
+0f9187b8  fc ff ff 1a  bne         #0xf9187b0                        
+0f9187bc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f9187c0  00 30 9c e5  ldr         r3, [ip]                           ; r3 = [0x0f9fd598]
+0f9187c4  03 00 52 e1  cmp         r2, r3                            
+0f9187c8  01 00 00 1a  bne         #0xf9187d4                        
+0f9187cc  0c d0 8d e2  add         sp, sp, #0xc                      
+0f9187d0  04 f0 9d e4  pop         {pc}                              
+0f9187d4  80 8e 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f9187d8  98 25 0d e3  movw        r2, #0xd598                        ; r2 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f9187dc  9f 2f 40 e3  movt        r2, #0xf9f                         ; r2 = 0x0f9fd598 (high half; completes the pair at 0x0f9187d8)  <- global word @0x0f9fd598 (role not asserted)
+
+--------------------------------------------------------------------------------
+FUNCTION: clk source / DLL-source helper used by set_sdc_core_clk
+runtime range : 0x0f90c008 .. 0x0f90c050   (18 instructions)
+epilogues     : 0x0f90c048
+calls         : 0x0f918d7c, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f90c008  10 40 2d e9  push        {r4, lr}                          
+0f90c00c  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f90c010  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f90c00c)  <- global word @0x0f9fd598 (role not asserted)
+0f90c014  08 d0 4d e2  sub         sp, sp, #8                        
+0f90c018  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f90c01c  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f90c020  55 33 00 eb  bl          #0xf918d7c                         ; call 0x0f918d7c
+0f90c024  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f90c028  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f90c02c  fb 00 40 e2  sub         r0, r0, #0xfb                     
+0f90c030  01 00 50 e3  cmp         r0, #1                            
+0f90c034  00 00 a0 83  movhi       r0, #0                             ; r0 = 0x0
+0f90c038  01 00 a0 93  movls       r0, #1                             ; r0 = 0x1
+0f90c03c  03 00 52 e1  cmp         r2, r3                            
+0f90c040  01 00 00 1a  bne         #0xf90c04c                        
+0f90c044  08 d0 8d e2  add         sp, sp, #8                        
+0f90c048  10 80 bd e8  pop         {r4, pc}                          
+0f90c04c  62 c0 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: helper called by 0x0f90c008
+runtime range : 0x0f918d7c .. 0x0f918dbc   (16 instructions)
+epilogues     : 0x0f918db4
+calls         : 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f918d7c  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f918d80  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f918d7c)  <- global word @0x0f9fd598 (role not asserted)
+0f918d84  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f918d88  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f918d8c  00 10 93 e5  ldr         r1, [r3]                           ; r1 = [0x0f9fd598]
+0f918d90  04 2b 04 e3  movw        r2, #0x4b04                        ; r2 = 0x0f9e4b04
+0f918d94  9e 2f 40 e3  movt        r2, #0xf9e                         ; r2 = 0x0f9e4b04 (high half; completes the pair at 0x0f918d90)
+0f918d98  04 10 8d e5  str         r1, [sp, #4]                       ; [sp,#0x4]
+0f918d9c  00 00 92 e5  ldr         r0, [r2]                           ; r0 = [0x0f9e4b04]
+0f918da0  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f918da4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f918da8  03 00 52 e1  cmp         r2, r3                            
+0f918dac  01 00 00 1a  bne         #0xf918db8                        
+0f918db0  0c d0 8d e2  add         sp, sp, #0xc                      
+0f918db4  04 f0 9d e4  pop         {pc}                              
+0f918db8  07 8d 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: DLL lock helper used by sdhci_msm_init_dll
+runtime range : 0x0f913b1c .. 0x0f913c04   (58 instructions)
+epilogues     : 0x0f913bf4
+calls         : 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f913b1c  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f913b20  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f913b1c)  <- global word @0x0f9fd598 (role not asserted)
+0f913b24  3f 2b a0 e3  mov         r2, #0xfc00                        ; r2 = 0x06acfc00
+0f913b28  ac 26 40 e3  movt        r2, #0x6ac                         ; r2 = 0x06acfc00 (high half; completes the pair at 0x0f913b24)
+0f913b2c  00 c0 93 e5  ldr         ip, [r3]                           ; r12 = [0x0f9fd598]
+0f913b30  02 00 51 e1  cmp         r1, r2                            
+0f913b34  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f913b38  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f913b3c  04 c0 8d e5  str         ip, [sp, #4]                       ; [sp,#0x4]
+0f913b40  2c 00 00 9a  bls         #0xf913bf8                        
+0f913b44  40 29 05 e3  movw        r2, #0x5940                        ; r2 = 0x07735940
+0f913b48  73 27 40 e3  movt        r2, #0x773                         ; r2 = 0x07735940 (high half; completes the pair at 0x0f913b44)
+0f913b4c  02 00 51 e1  cmp         r1, r2                            
+0f913b50  01 14 a0 93  movls       r1, #0x1000000                     ; r1 = 0x1000000
+0f913b54  1d 00 00 9a  bls         #0xf913bd0                        
+0f913b58  40 24 07 e3  movw        r2, #0x7440                        ; r2 = 0x082a7440
+0f913b5c  2a 28 40 e3  movt        r2, #0x82a                         ; r2 = 0x082a7440 (high half; completes the pair at 0x0f913b58)
+0f913b60  02 00 51 e1  cmp         r1, r2                            
+0f913b64  02 14 a0 93  movls       r1, #0x2000000                     ; r1 = 0x2000000
+0f913b68  18 00 00 9a  bls         #0xf913bd0                        
+0f913b6c  80 21 0d e3  movw        r2, #0xd180                        ; r2 = 0x08f0d180
+0f913b70  f0 28 40 e3  movt        r2, #0x8f0                         ; r2 = 0x08f0d180 (high half; completes the pair at 0x0f913b6c)
+0f913b74  02 00 51 e1  cmp         r1, r2                            
+0f913b78  03 14 a0 93  movls       r1, #0x3000000                     ; r1 = 0x3000000
+0f913b7c  13 00 00 9a  bls         #0xf913bd0                        
+0f913b80  80 2c 0e e3  movw        r2, #0xec80                        ; r2 = 0x09a7ec80
+0f913b84  a7 29 40 e3  movt        r2, #0x9a7                         ; r2 = 0x09a7ec80 (high half; completes the pair at 0x0f913b80)
+0f913b88  02 00 51 e1  cmp         r1, r2                            
+0f913b8c  01 13 a0 93  movls       r1, #0x4000000                     ; r1 = 0x4000000
+0f913b90  0e 00 00 9a  bls         #0xf913bd0                        
+0f913b94  c0 29 04 e3  movw        r2, #0x49c0                        ; r2 = 0x0a6e49c0
+0f913b98  6e 2a 40 e3  movt        r2, #0xa6e                         ; r2 = 0x0a6e49c0 (high half; completes the pair at 0x0f913b94)
+0f913b9c  02 00 51 e1  cmp         r1, r2                            
+0f913ba0  05 14 a0 93  movls       r1, #0x5000000                     ; r1 = 0x5000000
+0f913ba4  09 00 00 9a  bls         #0xf913bd0                        
+0f913ba8  c0 24 06 e3  movw        r2, #0x64c0                        ; r2 = 0x0b2564c0
+0f913bac  25 2b 40 e3  movt        r2, #0xb25                         ; r2 = 0x0b2564c0 (high half; completes the pair at 0x0f913ba8)
+0f913bb0  02 00 51 e1  cmp         r1, r2                            
+0f913bb4  06 14 a0 93  movls       r1, #0x6000000                     ; r1 = 0x6000000
+0f913bb8  04 00 00 9a  bls         #0xf913bd0                        
+0f913bbc  c2 2c a0 e3  mov         r2, #0xc200                        ; r2 = 0x0bebc200
+0f913bc0  eb 2b 40 e3  movt        r2, #0xbeb                         ; r2 = 0x0bebc200 (high half; completes the pair at 0x0f913bbc)
+0f913bc4  02 00 51 e1  cmp         r1, r2                            
+0f913bc8  07 14 a0 93  movls       r1, #0x7000000                     ; r1 = 0x7000000
+0f913bcc  09 00 00 8a  bhi         #0xf913bf8                        
+0f913bd0  00 21 90 e5  ldr         r2, [r0, #0x100]                   ; r2 = [r0,#0x100]  (value not statically resolvable)
+0f913bd4  07 24 c2 e3  bic         r2, r2, #0x7000000                
+0f913bd8  02 20 81 e1  orr         r2, r1, r2                        
+0f913bdc  00 21 80 e5  str         r2, [r0, #0x100]                   ; [r0,#0x100]
+0f913be0  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f913be4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f913be8  03 00 52 e1  cmp         r2, r3                            
+0f913bec  03 00 00 1a  bne         #0xf913c00                        
+0f913bf0  0c d0 8d e2  add         sp, sp, #0xc                      
+0f913bf4  04 f0 9d e4  pop         {pc}                              
+0f913bf8  00 10 a0 e3  mov         r1, #0                             ; r1 = 0x0
+0f913bfc  f3 ff ff ea  b           #0xf913bd0                        
+0f913c00  75 a1 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: delay helper (msleep)
+runtime range : 0x0f917acc .. 0x0f917b24   (22 instructions)
+epilogues     : 
+calls         : 0x0f962770, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f917acc  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f917ad0  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f917acc)  <- global word @0x0f9fd598 (role not asserted)
+0f917ad4  04 e0 2d e5  str         lr, [sp, #-4]!                     ; [sp,#0x-4]
+0f917ad8  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f917adc  00 10 93 e5  ldr         r1, [r3]                           ; r1 = [0x0f9fd598]
+0f917ae0  c0 21 00 e3  movw        r2, #0x1c0                         ; r2 = 0x0f9f01c0
+0f917ae4  9f 2f 40 e3  movt        r2, #0xf9f                         ; r2 = 0x0f9f01c0 (high half; completes the pair at 0x0f917ae0)
+0f917ae8  04 10 8d e5  str         r1, [sp, #4]                       ; [sp,#0x4]
+0f917aec  00 c0 92 e5  ldr         ip, [r2]                           ; r12 = [0x0f9f01c0]
+0f917af0  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f917af4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [0x0f9fd598]
+0f917af8  03 00 52 e1  cmp         r2, r3                            
+0f917afc  07 00 00 1a  bne         #0xf917b20                        
+0f917b00  90 0c 81 e0  umull       r0, r1, r0, ip                    
+0f917b04  00 30 a0 e3  mov         r3, #0                             ; r3 = 0x0
+0f917b08  40 22 04 e3  movw        r2, #0x4240                        ; r2 = 0x000f4240
+0f917b0c  0f 20 40 e3  movt        r2, #0xf                           ; r2 = 0x000f4240 (high half; completes the pair at 0x0f917b08)
+0f917b10  16 2b 01 eb  bl          #0xf962770                         ; call 0x0f962770
+0f917b14  0c d0 8d e2  add         sp, sp, #0xc                      
+0f917b18  04 e0 9d e4  pop         {lr}                              
+0f917b1c  65 ff ff ea  b           #0xf9178b8                        
+0f917b20  ad 91 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: wrapper that tail-branches to the UHS/mode setup at 0x0f911e90
+runtime range : 0x0f911e90 .. 0x0f911f64   (53 instructions)
+epilogues     : 0x0f911f14
+calls         : 0x0f92d21c, 0x0f93c1dc, 0x0f93c154
+--------------------------------------------------------------------------------
+0f911e90  f0 41 2d e9  push        {r4, r5, r6, r7, r8, lr}          
+0f911e94  98 55 0d e3  movw        r5, #0xd598                        ; r5 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f911e98  9f 5f 40 e3  movt        r5, #0xf9f                         ; r5 = 0x0f9fd598 (high half; completes the pair at 0x0f911e94)  <- global word @0x0f9fd598 (role not asserted)
+0f911e9c  10 d0 4d e2  sub         sp, sp, #0x10                     
+0f911ea0  6b 0f 50 e3  cmp         r0, #0x1ac                        
+0f911ea4  00 60 a0 e1  mov         r6, r0                            
+0f911ea8  00 30 95 e5  ldr         r3, [r5]                           ; r3 = [0x0f9fd598]
+0f911eac  01 80 a0 e1  mov         r8, r1                            
+0f911eb0  02 70 a0 e1  mov         r7, r2                            
+0f911eb4  0e 00 a0 e1  mov         r0, lr                            
+0f911eb8  0c 30 8d e5  str         r3, [sp, #0xc]                     ; [sp,#0xc]
+0f911ebc  1e 00 00 8a  bhi         #0xf911f3c                        
+0f911ec0  a4 4f 04 e3  movw        r4, #0x4fa4                        ; r4 = 0x0f9e4fa4
+0f911ec4  9e 4f 40 e3  movt        r4, #0xf9e                         ; r4 = 0x0f9e4fa4 (high half; completes the pair at 0x0f911ec0)
+0f911ec8  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9e4fa4]
+0f911ecc  01 30 83 e2  add         r3, r3, #1                        
+0f911ed0  00 30 84 e5  str         r3, [r4]                           ; WRITE 0x0f9e4fa4  <- <r3, opaque>
+0f911ed4  01 00 53 e3  cmp         r3, #1                            
+0f911ed8  13 00 00 0a  beq         #0xf911f2c                        
+0f911edc  01 00 43 e2  sub         r0, r3, #1                        
+0f911ee0  54 33 0f e3  movw        r3, #0xf354                        ; r3 = 0x0f9ef354
+0f911ee4  9e 3f 40 e3  movt        r3, #0xf9e                         ; r3 = 0x0f9ef354 (high half; completes the pair at 0x0f911ee0)
+0f911ee8  00 00 50 e3  cmp         r0, #0                            
+0f911eec  86 21 83 e0  add         r2, r3, r6, lsl #3                
+0f911ef0  00 00 84 e5  str         r0, [r4]                           ; WRITE 0x0f9e4fa4  <- <r0, opaque>
+0f911ef4  86 81 83 e7  str         r8, [r3, r6, lsl #3]               ; WRITE 0x0f9ef354  <- <r8, opaque>
+0f911ef8  04 70 82 e5  str         r7, [r2, #4]                       ; [r2,#0x4]
+0f911efc  0c 20 9d e5  ldr         r2, [sp, #0xc]                     ; r2 = [sp,#0xc]  (value not statically resolvable)
+0f911f00  00 30 95 e5  ldr         r3, [r5]                           ; r3 = [0x0f9fd598]
+0f911f04  03 00 00 0a  beq         #0xf911f18                        
+0f911f08  03 00 52 e1  cmp         r2, r3                            
+0f911f0c  09 00 00 1a  bne         #0xf911f38                        
+0f911f10  10 d0 8d e2  add         sp, sp, #0x10                     
+0f911f14  f0 81 bd e8  pop         {r4, r5, r6, r7, r8, pc}          
+0f911f18  03 00 52 e1  cmp         r2, r3                            
+0f911f1c  05 00 00 1a  bne         #0xf911f38                        
+0f911f20  10 d0 8d e2  add         sp, sp, #0x10                     
+0f911f24  f0 41 bd e8  pop         {r4, r5, r6, r7, r8, lr}          
+0f911f28  b7 6c 00 ea  b           #0xf92d20c                        
+0f911f2c  ba 6c 00 eb  bl          #0xf92d21c                         ; call 0x0f92d21c
+0f911f30  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9e4fa4]
+0f911f34  e8 ff ff ea  b           #0xf911edc                        
+0f911f38  a7 a8 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+0f911f3c  9c 3b 0a e3  movw        r3, #0xab9c                        ; r3 = 0x0f96ab9c  <- string "vector < NR_IRQS"
+0f911f40  ec 18 04 e3  movw        r1, #0x48ec                        ; r1 = 0x0f9648ec  <- string "ASSERT FAILED at (%s:%d): %s"
+0f911f44  96 3f 40 e3  movt        r3, #0xf96                         ; r3 = 0x0f96ab9c (high half; completes the pair at 0x0f911f3c)  <- string "vector < NR_IRQS"
+0f911f48  96 1f 40 e3  movt        r1, #0xf96                         ; r1 = 0x0f9648ec (high half; completes the pair at 0x0f911f40)  <- string "ASSERT FAILED at (%s:%d): %s"
+0f911f4c  00 30 8d e5  str         r3, [sp]                           ; [sp]
+0f911f50  78 2b 0a e3  movw        r2, #0xab78                        ; r2 = 0x0f96ab78  <- string "platform/msm_shared/qgic_common.c"
+0f911f54  80 30 a0 e3  mov         r3, #0x80                          ; r3 = 0x80
+0f911f58  96 2f 40 e3  movt        r2, #0xf96                         ; r2 = 0x0f96ab78 (high half; completes the pair at 0x0f911f50)  <- string "platform/msm_shared/qgic_common.c"
+0f911f5c  7c a8 00 eb  bl          #0xf93c154                         ; call 0x0f93c154
+0f911f60  d6 ff ff ea  b           #0xf911ec0                        
+
+--------------------------------------------------------------------------------
+FUNCTION: wrapper that tail-branches to 0x0f911e38
+runtime range : 0x0f911e38 .. 0x0f911e58   (8 instructions)
+epilogues     : 
+calls         : none
+--------------------------------------------------------------------------------
+0f911e38  a0 22 a0 e1  lsr         r2, r0, #5                        
+0f911e3c  98 35 0d e3  movw        r3, #0xd598                        ; r3 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f911e40  f9 25 82 e2  add         r2, r2, #0x3e400000               
+0f911e44  9f 3f 40 e3  movt        r3, #0xf9f                         ; r3 = 0x0f9fd598 (high half; completes the pair at 0x0f911e3c)  <- global word @0x0f9fd598 (role not asserted)
+0f911e48  40 20 82 e2  add         r2, r2, #0x40                     
+0f911e4c  1f 10 00 e2  and         r1, r0, #0x1f                     
+0f911e50  00 c0 93 e5  ldr         ip, [r3]                           ; r12 = [0x0f9fd598]
+0f911e54  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+
+--------------------------------------------------------------------------------
+FUNCTION: timing-mode detect: writes CORE/HC +0xe0 and +0xe8 (1 or 5)
+runtime range : 0x0f913ac0 .. 0x0f913b1c   (23 instructions)
+epilogues     : 0x0f913b14
+calls         : 0x0f92e39c, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f913ac0  10 40 2d e9  push        {r4, lr}                          
+0f913ac4  98 45 0d e3  movw        r4, #0xd598                        ; r4 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f913ac8  9f 4f 40 e3  movt        r4, #0xf9f                         ; r4 = 0x0f9fd598 (high half; completes the pair at 0x0f913ac4)  <- global word @0x0f9fd598 (role not asserted)
+0f913acc  00 30 90 e5  ldr         r3, [r0]                           ; r3 = 0xf9824900  <- SDHCI HC base ("hc_mem")
+0f913ad0  08 d0 4d e2  sub         sp, sp, #8                        
+0f913ad4  10 00 90 e5  ldr         r0, [r0, #0x10]                    ; r0 = [r0,#0x10]  (value not statically resolvable)
+0f913ad8  00 20 94 e5  ldr         r2, [r4]                           ; r2 = [0x0f9fd598]
+0f913adc  00 10 a0 e3  mov         r1, #0                             ; r1 = 0x0
+0f913ae0  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f913ae4  e0 20 93 e5  ldr         r2, [r3, #0xe0]                    ; r2 = [0xf98249e0]  (HC+0xe0)
+0f913ae8  0c 00 12 e3  tst         r2, #0xc                          
+0f913aec  05 20 a0 13  movne       r2, #5                             ; r2 = 0x5
+0f913af0  01 20 a0 03  moveq       r2, #1                             ; r2 = 0x1
+0f913af4  e8 20 83 e5  str         r2, [r3, #0xe8]                    ; WRITE 0xf98249e8  (HC+0xe8)  <- 0x1
+0f913af8  27 6a 00 eb  bl          #0xf92e39c                         ; call 0x0f92e39c
+0f913afc  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f913b00  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [0x0f9fd598]
+0f913b04  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f913b08  03 00 52 e1  cmp         r2, r3                            
+0f913b0c  01 00 00 1a  bne         #0xf913b18                        
+0f913b10  08 d0 8d e2  add         sp, sp, #8                        
+0f913b14  10 80 bd e8  pop         {r4, pc}                          
+0f913b18  af a1 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: sdhci_set_clock_rate  (host clock divider, HC+0x64)
+runtime range : 0x0f912ec4 .. 0x0f912f88   (49 instructions)
+epilogues     : 0x0f912f78
+calls         : 0x0f961bf8, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f912ec4  f0 43 2d e9  push        {r4, r5, r6, r7, r8, sb, lr}      
+0f912ec8  98 85 0d e3  movw        r8, #0xd598                        ; r8 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f912ecc  9f 8f 40 e3  movt        r8, #0xf9f                         ; r8 = 0x0f9fd598 (high half; completes the pair at 0x0f912ec8)  <- global word @0x0f9fd598 (role not asserted)
+0f912ed0  1c 60 90 e5  ldr         r6, [r0, #0x1c]                    ; r6 = [r0,#0x1c]  (value not statically resolvable)
+0f912ed4  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f912ed8  00 90 a0 e1  mov         sb, r0                            
+0f912edc  00 30 98 e5  ldr         r3, [r8]                           ; r3 = [0x0f9fd598]
+0f912ee0  01 00 56 e1  cmp         r6, r1                            
+0f912ee4  01 50 a0 e1  mov         r5, r1                            
+0f912ee8  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f912eec  01 30 a0 93  movls       r3, #1                             ; r3 = 0x1
+0f912ef0  10 00 00 9a  bls         #0xf912f38                        
+0f912ef4  02 40 a0 e3  mov         r4, #2                             ; r4 = 0x2
+0f912ef8  fe 77 00 e3  movw        r7, #0x7fe                         ; r7 = 0x07fe (low half, no matching movt)
+0f912efc  02 00 00 ea  b           #0xf912f0c                        
+0f912f00  02 40 84 e2  add         r4, r4, #2                        
+0f912f04  07 00 54 e1  cmp         r4, r7                            
+0f912f08  1b 00 00 0a  beq         #0xf912f7c                        
+0f912f0c  06 00 a0 e1  mov         r0, r6                            
+0f912f10  04 10 a0 e1  mov         r1, r4                            
+0f912f14  37 3b 01 eb  bl          #0xf961bf8                         ; call 0x0f961bf8
+0f912f18  00 00 55 e1  cmp         r5, r0                            
+0f912f1c  f7 ff ff 3a  blo         #0xf912f00                        
+0f912f20  a4 40 a0 e1  lsr         r4, r4, #1                        
+0f912f24  54 34 e1 e7  ubfx        r3, r4, #8, #2                    
+0f912f28  04 44 a0 e1  lsl         r4, r4, #8                        
+0f912f2c  01 40 84 e3  orr         r4, r4, #1                        
+0f912f30  03 33 84 e1  orr         r3, r4, r3, lsl #6                
+0f912f34  73 30 ff e6  uxth        r3, r3                            
+0f912f38  00 10 99 e5  ldr         r1, [sb]                           ; r1 = [r9]  (value not statically resolvable)
+0f912f3c  2c 20 81 e2  add         r2, r1, #0x2c                     
+0f912f40  bc 32 c1 e1  strh        r3, [r1, #0x2c]                    ; [r1,#0x2c]
+0f912f44  b0 30 d2 e1  ldrh        r3, [r2]                          
+0f912f48  02 00 13 e3  tst         r3, #2                            
+0f912f4c  fc ff ff 0a  beq         #0xf912f44                        
+0f912f50  bc 32 d1 e1  ldrh        r3, [r1, #0x2c]                   
+0f912f54  00 00 a0 e3  mov         r0, #0                             ; r0 = 0x0
+0f912f58  04 30 83 e3  orr         r3, r3, #4                        
+0f912f5c  bc 32 c1 e1  strh        r3, [r1, #0x2c]                    ; [r1,#0x2c]
+0f912f60  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f912f64  00 30 98 e5  ldr         r3, [r8]                           ; r3 = [0x0f9fd598]
+0f912f68  04 50 89 e5  str         r5, [sb, #4]                       ; [r9,#0x4]
+0f912f6c  03 00 52 e1  cmp         r2, r3                            
+0f912f70  03 00 00 1a  bne         #0xf912f84                        
+0f912f74  0c d0 8d e2  add         sp, sp, #0xc                      
+0f912f78  f0 83 bd e8  pop         {r4, r5, r6, r7, r8, sb, pc}      
+0f912f7c  c1 3f 0f e3  movw        r3, #0xffc1                        ; r3 = 0xffc1 (low half, no matching movt)
+0f912f80  ec ff ff ea  b           #0xf912f38                        
+0f912f84  94 a4 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: host power/clock enable helper called by sdhci_msm_init
+runtime range : 0x0f912e20 .. 0x0f912ec4   (41 instructions)
+epilogues     : 0x0f912e94
+calls         : 0x0f917a78, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f912e20  f0 40 2d e9  push        {r4, r5, r6, r7, lr}              
+0f912e24  98 75 0d e3  movw        r7, #0xd598                        ; r7 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f912e28  9f 7f 40 e3  movt        r7, #0xf9f                         ; r7 = 0x0f9fd598 (high half; completes the pair at 0x0f912e24)  <- global word @0x0f9fd598 (role not asserted)
+0f912e2c  00 30 90 e5  ldr         r3, [r0]                           ; r3 = [r0]  (value not statically resolvable)
+0f912e30  0c d0 4d e2  sub         sp, sp, #0xc                      
+0f912e34  00 60 a0 e1  mov         r6, r0                            
+0f912e38  00 20 97 e5  ldr         r2, [r7]                           ; r2 = [0x0f9fd598]
+0f912e3c  01 50 a0 e1  mov         r5, r1                            
+0f912e40  04 20 8d e5  str         r2, [sp, #4]                       ; [sp,#0x4]
+0f912e44  2f 10 c3 e5  strb        r1, [r3, #0x2f]                    ; [r3,#0x2f]
+0f912e48  00 30 90 e5  ldr         r3, [r0]                           ; r3 = [r0]  (value not statically resolvable)
+0f912e4c  2f 30 d3 e5  ldrb        r3, [r3, #0x2f]                   
+0f912e50  01 00 13 e1  tst         r3, r1                            
+0f912e54  64 40 a0 13  movne       r4, #0x64                          ; r4 = 0x64
+0f912e58  02 00 00 1a  bne         #0xf912e68                        
+0f912e5c  07 00 00 ea  b           #0xf912e80                        
+0f912e60  01 40 54 e2  subs        r4, r4, #1                        
+0f912e64  0b 00 00 0a  beq         #0xf912e98                        
+0f912e68  01 00 a0 e3  mov         r0, #1                             ; r0 = 0x1
+0f912e6c  01 13 00 eb  bl          #0xf917a78                         ; call 0x0f917a78
+0f912e70  00 30 96 e5  ldr         r3, [r6]                           ; r3 = [r6]  (value not statically resolvable)
+0f912e74  2f 30 d3 e5  ldrb        r3, [r3, #0x2f]                   
+0f912e78  05 00 13 e1  tst         r3, r5                            
+0f912e7c  f7 ff ff 1a  bne         #0xf912e60                        
+0f912e80  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f912e84  00 30 97 e5  ldr         r3, [r7]                           ; r3 = [0x0f9fd598]
+0f912e88  03 00 52 e1  cmp         r2, r3                            
+0f912e8c  0b 00 00 1a  bne         #0xf912ec0                        
+0f912e90  0c d0 8d e2  add         sp, sp, #0xc                      
+0f912e94  f0 80 bd e8  pop         {r4, r5, r6, r7, pc}              
+0f912e98  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f912e9c  00 30 97 e5  ldr         r3, [r7]                           ; r3 = [0x0f9fd598]
+0f912ea0  03 00 52 e1  cmp         r2, r3                            
+0f912ea4  05 00 00 1a  bne         #0xf912ec0                        
+0f912ea8  05 10 a0 e1  mov         r1, r5                            
+0f912eac  d4 01 0b e3  movw        r0, #0xb1d4                        ; r0 = 0x0f96b1d4  <- string "Error: sdhci reset failed for: %x"
+0f912eb0  96 0f 40 e3  movt        r0, #0xf96                         ; r0 = 0x0f96b1d4 (high half; completes the pair at 0x0f912eac)  <- string "Error: sdhci reset failed for: %x"
+0f912eb4  0c d0 8d e2  add         sp, sp, #0xc                      
+0f912eb8  f0 40 bd e8  pop         {r4, r5, r6, r7, lr}              
+0f912ebc  51 a4 00 ea  b           #0xf93c008                        
+0f912ec0  c5 a4 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+--------------------------------------------------------------------------------
+FUNCTION: sdhci_msm_hw_init / host bring-up helper
+runtime range : 0x0f913954 .. 0x0f913ac0   (91 instructions)
+epilogues     : 0x0f913a68
+calls         : 0x0f92e360, 0x0f9130a0, 0x0f93c1dc
+--------------------------------------------------------------------------------
+0f913954  70 40 2d e9  push        {r4, r5, r6, lr}                  
+0f913958  98 55 0d e3  movw        r5, #0xd598                        ; r5 = 0x0f9fd598  <- global word @0x0f9fd598 (role not asserted)
+0f91395c  9f 5f 40 e3  movt        r5, #0xf9f                         ; r5 = 0x0f9fd598 (high half; completes the pair at 0x0f913958)  <- global word @0x0f9fd598 (role not asserted)
+0f913960  00 40 a0 e1  mov         r4, r0                            
+0f913964  00 20 94 e5  ldr         r2, [r4]                           ; r2 = [r4]  (value not statically resolvable)
+0f913968  08 d0 4d e2  sub         sp, sp, #8                        
+0f91396c  00 30 95 e5  ldr         r3, [r5]                           ; r3 = [0x0f9fd598]
+0f913970  40 02 04 e3  movw        r0, #0x4240                        ; r0 = 0x000f4240
+0f913974  0f 00 40 e3  movt        r0, #0xf                           ; r0 = 0x000f4240 (high half; completes the pair at 0x0f913970)
+0f913978  04 30 8d e5  str         r3, [sp, #4]                       ; [sp,#0x4]
+0f91397c  40 30 92 e5  ldr         r3, [r2, #0x40]                    ; r3 = [r2,#0x40]  (value not statically resolvable)
+0f913980  44 10 92 e5  ldr         r1, [r2, #0x44]                    ; r1 = [r2,#0x44]  (value not statically resolvable)
+0f913984  53 c4 e7 e7  ubfx        ip, r3, #8, #8                    
+0f913988  01 07 13 e3  tst         r3, #0x40000                      
+0f91398c  53 e8 e1 e7  ubfx        lr, r3, #0x10, #2                 
+0f913990  20 e0 84 e5  str         lr, [r4, #0x20]                    ; [r4,#0x20]
+0f913994  90 0c 00 e0  mul         r0, r0, ip                        
+0f913998  1c 00 84 e5  str         r0, [r4, #0x1c]                    ; [r4,#0x1c]
+0f91399c  01 00 a0 13  movne       r0, #1                             ; r0 = 0x1
+0f9139a0  24 00 c4 15  strbne      r0, [r4, #0x24]                    ; [r4,#0x24]
+0f9139a4  02 07 13 e3  tst         r3, #0x80000                      
+0f9139a8  01 00 a0 13  movne       r0, #1                             ; r0 = 0x1
+0f9139ac  25 00 c4 15  strbne      r0, [r4, #0x25]                    ; [r4,#0x25]
+0f9139b0  01 04 13 e3  tst         r3, #0x1000000                    
+0f9139b4  2c 00 00 0a  beq         #0xf913a6c                        
+0f9139b8  0f c0 a0 e3  mov         ip, #0xf                           ; r12 = 0xf
+0f9139bc  0e 00 a0 e3  mov         r0, #0xe                           ; r0 = 0xe
+0f9139c0  07 30 a0 e3  mov         r3, #7                             ; r3 = 0x7
+0f9139c4  26 30 c4 e5  strb        r3, [r4, #0x26]                    ; [r4,#0x26]
+0f9139c8  30 30 94 e5  ldr         r3, [r4, #0x30]                    ; r3 = [r4,#0x30]  (value not statically resolvable)
+0f9139cc  51 61 e0 e7  ubfx        r6, r1, #2, #1                    
+0f9139d0  01 e0 01 e2  and         lr, r1, #1                        
+0f9139d4  28 60 c4 e5  strb        r6, [r4, #0x28]                    ; [r4,#0x28]
+0f9139d8  29 e0 c4 e5  strb        lr, [r4, #0x29]                    ; [r4,#0x29]
+0f9139dc  d1 10 e0 e7  ubfx        r1, r1, #1, #1                    
+0f9139e0  2a 10 c4 e5  strb        r1, [r4, #0x2a]                    ; [r4,#0x2a]
+0f9139e4  00 30 93 e5  ldr         r3, [r3]                           ; r3 = [r3]  (value not statically resolvable)
+0f9139e8  50 10 93 e5  ldr         r1, [r3, #0x50]                    ; r1 = [r3,#0x50]  (value not statically resolvable)
+0f9139ec  21 3e a0 e1  lsr         r3, r1, #0x1c                     
+0f9139f0  71 10 ef e6  uxtb        r1, r1                            
+0f9139f4  01 00 53 e3  cmp         r3, #1                            
+0f9139f8  10 30 c4 e5  strb        r3, [r4, #0x10]                    ; [r4,#0x10]
+0f9139fc  b2 11 c4 e1  strh        r1, [r4, #0x12]                    ; [r4,#0x12]
+0f913a00  2a 00 00 0a  beq         #0xf913ab0                        
+0f913a04  00 30 a0 e3  mov         r3, #0                             ; r3 = 0x0
+0f913a08  14 30 84 e5  str         r3, [r4, #0x14]                    ; [r4,#0x14]
+0f913a0c  29 00 c2 e5  strb        r0, [r2, #0x29]                    ; [r2,#0x29]
+0f913a10  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [r4]  (value not statically resolvable)
+0f913a14  29 c0 c3 e5  strb        ip, [r3, #0x29]                    ; [r3,#0x29]
+0f913a18  18 00 94 e5  ldr         r0, [r4, #0x18]                    ; r0 = [r4,#0x18]  (value not statically resolvable)
+0f913a1c  4f 6a 00 eb  bl          #0xf92e360                         ; call 0x0f92e360
+0f913a20  00 10 a0 e3  mov         r1, #0                             ; r1 = 0x0
+0f913a24  04 00 a0 e1  mov         r0, r4                            
+0f913a28  9c fd ff eb  bl          #0xf9130a0                         ; call 0x0f9130a0
+0f913a2c  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [r4]  (value not statically resolvable)
+0f913a30  10 00 a0 e3  mov         r0, #0x10                          ; r0 = 0x10
+0f913a34  00 20 e0 e3  mvn         r2, #0                            
+0f913a38  0b 10 a0 e3  mov         r1, #0xb                           ; r1 = 0xb
+0f913a3c  28 00 c3 e5  strb        r0, [r3, #0x28]                    ; [r3,#0x28]
+0f913a40  00 30 94 e5  ldr         r3, [r4]                           ; r3 = [r4]  (value not statically resolvable)
+0f913a44  b4 13 c3 e1  strh        r1, [r3, #0x34]                    ; [r3,#0x34]
+0f913a48  b6 23 c3 e1  strh        r2, [r3, #0x36]                    ; [r3,#0x36]
+0f913a4c  b8 13 c3 e1  strh        r1, [r3, #0x38]                    ; [r3,#0x38]
+0f913a50  ba 23 c3 e1  strh        r2, [r3, #0x3a]                    ; [r3,#0x3a]
+0f913a54  04 20 9d e5  ldr         r2, [sp, #4]                       ; r2 = [sp,#0x4]  (value not statically resolvable)
+0f913a58  00 30 95 e5  ldr         r3, [r5]                           ; r3 = [0x0f9fd598]
+0f913a5c  03 00 52 e1  cmp         r2, r3                            
+0f913a60  15 00 00 1a  bne         #0xf913abc                        
+0f913a64  08 d0 8d e2  add         sp, sp, #8                        
+0f913a68  70 80 bd e8  pop         {r4, r5, r6, pc}                  
+0f913a6c  02 04 13 e3  tst         r3, #0x2000000                    
+0f913a70  04 00 00 0a  beq         #0xf913a88                        
+0f913a74  06 30 a0 e3  mov         r3, #6                             ; r3 = 0x6
+0f913a78  0d c0 a0 e3  mov         ip, #0xd                           ; r12 = 0xd
+0f913a7c  26 30 c4 e5  strb        r3, [r4, #0x26]                    ; [r4,#0x26]
+0f913a80  0c 00 a0 e3  mov         r0, #0xc                           ; r0 = 0xc
+0f913a84  cf ff ff ea  b           #0xf9139c8                        
+0f913a88  01 03 13 e3  tst         r3, #0x4000000                    
+0f913a8c  26 00 d4 05  ldrbeq      r0, [r4, #0x26]                   
+0f913a90  05 30 a0 13  movne       r3, #5                             ; r3 = 0x5
+0f913a94  0b c0 a0 13  movne       ip, #0xb                           ; r12 = 0xb
+0f913a98  0a 00 a0 13  movne       r0, #0xa                           ; r0 = 0xa
+0f913a9c  26 30 c4 15  strbne      r3, [r4, #0x26]                    ; [r4,#0x26]
+0f913aa0  80 00 a0 01  lsleq       r0, r0, #1                        
+0f913aa4  70 00 ef 06  uxtbeq      r0, r0                            
+0f913aa8  01 c0 80 03  orreq       ip, r0, #1                        
+0f913aac  c5 ff ff ea  b           #0xf9139c8                        
+0f913ab0  33 00 51 e3  cmp         r1, #0x33                         
+0f913ab4  d2 ff ff 8a  bhi         #0xf913a04                        
+0f913ab8  d2 ff ff ea  b           #0xf913a08                        
+0f913abc  c6 a1 00 eb  bl          #0xf93c1dc                         ; call 0x0f93c1dc
+
+================================================================================
+REGISTER / MMIO WRITE SUMMARY FOR THE FUNCTIONS ABOVE
+================================================================================
+  set_sdc_iface_clk  (contains the string "failed to set sdc%u_iface_clk")  [0x0f90c2d4 .. 0x0f90c378]
+    (no store to a resolved absolute address in this function)
+
+  set_sdc_core_clk   (contains the string "failed to set sdc%u_core_clk")  [0x0f90c378 .. 0x0f90c540]
+    (no store to a resolved absolute address in this function)
+
+  sdhci_msm_init_dll (contains the string "sdhci_msm_init_dll")  [0x0f913d24 .. 0x0f913f10]
+    0x0f913d64  strne  r2, [r3, #0x10c]             -> 0xf9824a0c  (HC+0x10c)
+    0x0f913d74  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913d84  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913da8  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913db8  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913dd8  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913de8  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+    0x0f913e24  strne  r2, [r3, #0x10c]             -> 0xf9824a0c  (HC+0x10c)
+    0x0f913e84  str    r2, [r3, #0x1b4]             -> 0xf9824ab4  (HC+0x1b4)
+    0x0f913ed0  str    r2, [r3, #0x1b4]             -> 0xf9824ab4  (HC+0x1b4)
+    0x0f913ef0  str    r2, [r3, #0x100]             -> 0xf9824a00  (HC+0x100)
+
+  clk_set_rate_by_name(name, rate, enable)  - generic clock setter  [0x0f918278 .. 0x0f91835c]
+    (no store to a resolved absolute address in this function)
+
+  clk_find_by_name  - lookup of a clock id in the clock table  [0x0f9181c4 .. 0x0f9181cc]
+    (no store to a resolved absolute address in this function)
+
+  clk_enable        - enables a clock through its ops  [0x0f918070 .. 0x0f918130]
+    (no store to a resolved absolute address in this function)
+
+  clk_ops->enable   - generic CBCR enable  (reg |= 1)  [0x0f9184b8 .. 0x0f9185f8]
+    (no store to a resolved absolute address in this function)
+
+  clk_ops->disable  - generic CBCR disable (reg &= ~1)  [0x0f91850c .. 0x0f9185f8]
+    (no store to a resolved absolute address in this function)
+
+  clk_ops entry      - generic disable variant  [0x0f91855c .. 0x0f9185f8]
+    (no store to a resolved absolute address in this function)
+
+  clk_ops->set_flag (reg |= 1 with dmb)  [0x0f9188fc .. 0x0f91897c]
+    (no store to a resolved absolute address in this function)
+
+  sdc1_clk rate setter  (referenced by the "sdc1_clk" table entry)  [0x0f9186d0 .. 0x0f9186d8]
+    (no store to a resolved absolute address in this function)
+
+  sdc1_clk RCGR disable (referenced by the sdc1_clk ops table)  [0x0f91876c .. 0x0f9187e0]
+    (no store to a resolved absolute address in this function)
+
+  clk source / DLL-source helper used by set_sdc_core_clk  [0x0f90c008 .. 0x0f90c050]
+    (no store to a resolved absolute address in this function)
+
+  helper called by 0x0f90c008  [0x0f918d7c .. 0x0f918dbc]
+    (no store to a resolved absolute address in this function)
+
+  DLL lock helper used by sdhci_msm_init_dll  [0x0f913b1c .. 0x0f913c04]
+    (no store to a resolved absolute address in this function)
+
+  delay helper (msleep)  [0x0f917acc .. 0x0f917b24]
+    (no store to a resolved absolute address in this function)
+
+  wrapper that tail-branches to the UHS/mode setup at 0x0f911e90  [0x0f911e90 .. 0x0f911f64]
+    0x0f911ed0  str    r3, [r4]                     -> 0x0f9e4fa4
+    0x0f911ef0  str    r0, [r4]                     -> 0x0f9e4fa4
+    0x0f911ef4  str    r8, [r3, r6, lsl #3]         -> 0x0f9ef354
+
+  wrapper that tail-branches to 0x0f911e38  [0x0f911e38 .. 0x0f911e58]
+    (no store to a resolved absolute address in this function)
+
+  timing-mode detect: writes CORE/HC +0xe0 and +0xe8 (1 or 5)  [0x0f913ac0 .. 0x0f913b1c]
+    0x0f913af4  str    r2, [r3, #0xe8]              -> 0xf98249e8  (HC+0xe8)
+
+  sdhci_set_clock_rate  (host clock divider, HC+0x64)  [0x0f912ec4 .. 0x0f912f88]
+    (no store to a resolved absolute address in this function)
+
+  host power/clock enable helper called by sdhci_msm_init  [0x0f912e20 .. 0x0f912ec4]
+    (no store to a resolved absolute address in this function)
+
+  sdhci_msm_hw_init / host bring-up helper  [0x0f913954 .. 0x0f913ac0]
+    (no store to a resolved absolute address in this function)
+

@@ -1,0 +1,88 @@
+================================================================================
+LG G4 (H815) FACTORY LK -- disassembly
+file      : research/lk-g4/aboot-lk-g4-h815.elf   (ELF32 ARM, single PT_LOAD)
+mapping   : vaddr 0x0f900000 -> file offset 0x8000, filesz 0xe93d8
+tooling   : capstone 5.0.7 (CS_ARCH_ARM/CS_MODE_ARM), analisi con propagazione
+            dei valori in /tmp/lkg/an.py (ricostruzione movw/movt, literal pool,
+            mappa delle struct dev->plat->CORE e dev->HC)
+
+HOW EVERY REFERENCE WAS RESOLVED
+  (a) coppie movw/movt: dalla mezza-bassa si risale al movt che scrive lo
+      stesso registro; il risultato e' riportato su entrambe le istruzioni.
+  (b) literal pool: `ldr rX,[pc,#imm]` -> word letta a (addr+8)&~3 + imm.
+  (c) struct: i puntatori HC/CORE non sono immediati ma arrivano da una
+      struttura.  Mappa usata (ricavata dal codice, non dal nome delle funzioni):
+          dev/host +0x00  -> HC   = 0xf9824900   (finestra "hc_mem")
+          dev/host +0x30  -> plat
+          plat     +0x00  -> CORE = 0xf9824000   (finestra "core_mem")
+      Proof: sdhci_mode_disable (0x0f914940) fa  ldr r2,[r0,#0x30] ; ldr r2,[r2]
+      e scrive CORE+0x78, che e' HC_MODE sia nel driver CAF sia nel registro che
+      la funzione dice di modificare.
+  (d) tabella clock: gli indirizzi GCC NON stanno nel codice ma nella tabella
+      dei clock in .data; sono stati decodificati leggendo le coppie
+      {nome_clock, puntatore_struct} e i campi dei struct.
+
+CONVENZIONE SUI NOMI DEI REGISTRI
+  I nomi dei registri SDHCI/CORE ripresi dal driver Linux CAF
+  (G4-Titan-Kernel/drivers/mmc/host/sdhci-msm.c) sono **IPOTESI**: il binario
+  LK e' strippato e non contiene nomi di registro.  Tutto quello che segue e'
+  marcato "ipotesi(nome Linux)".  Gli indirizzi, i valori e la sequenza delle
+  scritture sono fatti.
+================================================================================
+
+================================================================================
+FUNCTION: 0x0f912e20  -- scrive HC+0x2f (Software Reset) e fa polling
+runtime   : 0x0f912e20
+================================================================================
+Chiamata da sdhci_msm_init a 0x0f913f80, subito dopo la scrittura
+CORE+0x78 |= FF_CLK_SW_RST_DIS (0x0f913f7c).
+Argomenti: r0 = dev/host, r1 = maschera di reset.
+--------------------------------------------------------------------------------
+calls     : 0x0f912e6c
+--------------------------------------------------------------------------------
+0x0f912e20  f0402de9   push     {r4, r5, r6, r7, lr}
+0x0f912e24  98750de3   movw     r7, #0xd598    ; r73 = 0x0000d598  (movw lo half)
+0x0f912e28  9f7f40e3   movt     r7, #0xf9f    ; r73 = 0x0f9fd598  (movt completes the pair at 0x0f912e24)
+0x0f912e2c  003090e5   ldr      r3, [r0]    ; r69 = &HC
+0x0f912e30  0cd04de2   sub      sp, sp, #0xc
+0x0f912e34  0060a0e1   mov      r6, r0    ; r72 = r66
+0x0f912e38  002097e5   ldr      r2, [r7]    ; r68 = [0x0f9fd598]=0x00000000
+0x0f912e3c  0150a0e1   mov      r5, r1    ; r71 = r67
+0x0f912e40  04208de5   str      r2, [sp, #4]
+0x0f912e44  2f10c3e5   strb     r1, [r3, #0x2f]    ; WRITE 0xf982492f  (HC+0x2f)  <- r67   [ipotesi(nome Linux): SDHCI_SW_RESET]
+0x0f912e48  003090e5   ldr      r3, [r0]    ; r69 = &HC
+0x0f912e4c  2f30d3e5   ldrb     r3, [r3, #0x2f]
+0x0f912e50  010013e1   tst      r3, r1
+0x0f912e54  6440a013   movne    r4, #0x64
+0x0f912e58  0200001a   bne      #0xf912e68
+0x0f912e5c  070000ea   b        #0xf912e80
+0x0f912e60  014054e2   subs     r4, r4, #1
+0x0f912e64  0b00000a   beq      #0xf912e98
+0x0f912e68  0100a0e3   mov      r0, #1    ; r66 = 1
+0x0f912e6c  011300eb   bl       #0xf917a78
+0x0f912e70  003096e5   ldr      r3, [r6]    ; r69 = &HC
+0x0f912e74  2f30d3e5   ldrb     r3, [r3, #0x2f]
+0x0f912e78  050013e1   tst      r3, r5
+0x0f912e7c  f7ffff1a   bne      #0xf912e60
+0x0f912e80  04209de5   ldr      r2, [sp, #4]
+0x0f912e84  003097e5   ldr      r3, [r7]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f912e88  030052e1   cmp      r2, r3
+0x0f912e8c  0b00001a   bne      #0xf912ec0
+0x0f912e90  0cd08de2   add      sp, sp, #0xc
+0x0f912e94  f080bde8   pop      {r4, r5, r6, r7, pc}
+0x0f912e98  04209de5   ldr      r2, [sp, #4]
+0x0f912e9c  003097e5   ldr      r3, [r7]    ; r69 = [0x0f9fd598]=0x00000000
+0x0f912ea0  030052e1   cmp      r2, r3
+0x0f912ea4  0500001a   bne      #0xf912ec0
+0x0f912ea8  0510a0e1   mov      r1, r5    ; r67 = r71
+0x0f912eac  d4010be3   movw     r0, #0xb1d4    ; r66 = 0x0000b1d4  (movw lo half)
+0x0f912eb0  960f40e3   movt     r0, #0xf96    ; r66 = 0x0f96b1d4  (movt completes the pair at 0x0f912eac) | <- string 'Error: sdhci reset failed for: %x'
+0x0f912eb4  0cd08de2   add      sp, sp, #0xc
+0x0f912eb8  f040bde8   pop      {r4, r5, r6, r7, lr}
+0x0f912ebc  51a400ea   b        #0xf93c008
+
+MMIO SUMMARY (writes resolved to HC / CORE / GCC)
+--------------------------------------------------------------------------------
+  addr       window     address      reg        valore
+  0x0f912e44  HC         0xf982492f  HC+0x2f  <- r?          ipotesi(nome Linux): SDHCI_SW_RESET
+

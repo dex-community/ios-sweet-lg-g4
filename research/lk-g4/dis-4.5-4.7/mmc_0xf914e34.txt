@@ -1,0 +1,24 @@
+### mmc_0xf914e34  start=0x0f914e34  next_func_start=0x0f914e90  epilogue_end=0xf914e8c
+0x0f914e34  30402de9   push      {r4, r5, lr}
+0x0f914e38  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f914e3c  9f4f40e3   movt      r4, #0xf9f
+0x0f914e40  14d04de2   sub       sp, sp, #0x14
+0x0f914e44  b730a0e3   mov       r3, #0xb7    ; (b) low half 0x00b7
+0x0f914e48  00c094e5   ldr       ip, [r4]
+0x0f914e4c  00208de5   str       r2, [sp]
+0x0f914e50  0320a0e3   mov       r2, #3    ; (b) low half 0x0003
+0x0f914e54  0cc08de5   str       ip, [sp, #0xc]
+0x0f914e58  afffffeb   bl        #0xf914d1c
+0x0f914e5c  005050e2   subs      r5, r0, #0
+0x0f914e60  0200000a   beq       #0xf914e70
+0x0f914e64  840a0be3   movw      r0, #0xba84    ; (b) low half 0xba84
+0x0f914e68  960f40e3   movt      r0, #0xf96
+0x0f914e6c  659c00eb   bl        #0xf93c008
+0x0f914e70  0c209de5   ldr       r2, [sp, #0xc]
+0x0f914e74  0500a0e1   mov       r0, r5
+0x0f914e78  003094e5   ldr       r3, [r4]
+0x0f914e7c  030052e1   cmp       r2, r3
+0x0f914e80  0100001a   bne       #0xf914e8c
+0x0f914e84  14d08de2   add       sp, sp, #0x14
+0x0f914e88  3080bde8   pop       {r4, r5, pc}
+0x0f914e8c  d29c00eb   bl        #0xf93c1dc

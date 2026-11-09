@@ -1,0 +1,71 @@
+### sdhci_0xf912f88  start=0x0f912f88  next_func_start=0x0f9130a0  epilogue_end=0xf913014
+0x0f912f88  f0412de9   push      {r4, r5, r6, r7, r8, lr}
+0x0f912f8c  98550de3   movw      r5, #0xd598    ; (b) low half 0xd598
+0x0f912f90  9f5f40e3   movt      r5, #0xf9f
+0x0f912f94  003090e5   ldr       r3, [r0]
+0x0f912f98  10d04de2   sub       sp, sp, #0x10
+0x0f912f9c  fb2f0fe3   movw      r2, #0xfffb    ; (b) low half 0xfffb
+0x0f912fa0  00c095e5   ldr       ip, [r5]
+0x0f912fa4  f84f0fe3   movw      r4, #0xfff8    ; (b) low half 0xfff8
+0x0f912fa8  0060a0e1   mov       r6, r0
+0x0f912fac  0e80a0e1   mov       r8, lr
+0x0f912fb0  0cc08de5   str       ip, [sp, #0xc]
+0x0f912fb4  3ec083e2   add       ip, r3, #0x3e
+0x0f912fb8  bc72d3e1   ldrh      r7, [r3, #0x2c]
+0x0f912fbc  022007e0   and       r2, r7, r2
+0x0f912fc0  bc22c3e1   strh      r2, [r3, #0x2c]
+0x0f912fc4  be33d3e1   ldrh      r3, [r3, #0x3e]
+0x0f912fc8  044003e0   and       r4, r3, r4
+0x0f912fcc  040051e3   cmp       r1, #4
+0x0f912fd0  01f19f97   ldrls     pc, [pc, r1, lsl #2]
+0x0f912fd4  1f0000ea   b         #0xf913058
+0x0f912fd8  ec2f910f   svceq     #0x912fec
+0x0f912fdc  2830910f   svceq     #0x913028
+0x0f912fe0  3830910f   svceq     #0x913038
+0x0f912fe4  4830910f   svceq     #0x913048
+0x0f912fe8  1830910f   svceq     #0x913018
+0x0f912fec  401807e3   movw      r1, #0x7840    ; (b) low half 0x7840
+0x0f912ff0  7d1140e3   movt      r1, #0x17d
+0x0f912ff4  b040cce1   strh      r4, [ip]
+0x0f912ff8  0c209de5   ldr       r2, [sp, #0xc]
+0x0f912ffc  003095e5   ldr       r3, [r5]
+0x0f913000  030052e1   cmp       r2, r3
+0x0f913004  2400001a   bne       #0xf91309c
+0x0f913008  0600a0e1   mov       r0, r6
+0x0f91300c  10d08de2   add       sp, sp, #0x10
+0x0f913010  f041bde8   pop       {r4, r5, r6, r7, r8, lr}
+0x0f913014  aaffffea   b         #0xf912ec4
+0x0f913018  80100fe3   movw      r1, #0xf080    ; (b) low half 0xf080
+0x0f91301c  044084e3   orr       r4, r4, #4
+0x0f913020  fa1240e3   movt      r1, #0x2fa
+0x0f913024  f2ffffea   b         #0xf912ff4
+0x0f913028  80100fe3   movw      r1, #0xf080    ; (b) low half 0xf080
+0x0f91302c  014084e3   orr       r4, r4, #1
+0x0f913030  fa1240e3   movt      r1, #0x2fa
+0x0f913034  eeffffea   b         #0xf912ff4
+0x0f913038  e11ca0e3   mov       r1, #0xe100    ; (b) low half 0xe100
+0x0f91303c  024084e3   orr       r4, r4, #2
+0x0f913040  f51540e3   movt      r1, #0x5f5
+0x0f913044  eaffffea   b         #0xf912ff4
+0x0f913048  c21ca0e3   mov       r1, #0xc200    ; (b) low half 0xc200
+0x0f91304c  034084e3   orr       r4, r4, #3
+0x0f913050  eb1b40e3   movt      r1, #0xbeb
+0x0f913054  e6ffffea   b         #0xf912ff4
+0x0f913058  f8010be3   movw      r0, #0xb1f8    ; (b) low half 0xb1f8
+0x0f91305c  960f40e3   movt      r0, #0xf96
+0x0f913060  e8a300eb   bl        #0xf93c008
+0x0f913064  0800a0e1   mov       r0, r8
+0x0f913068  b83b00e3   movw      r3, #0xbb8    ; (b) low half 0x0bb8
+0x0f91306c  ec1804e3   movw      r1, #0x48ec    ; (b) low half 0x48ec
+0x0f913070  973f40e3   movt      r3, #0xf97
+0x0f913074  961f40e3   movt      r1, #0xf96
+0x0f913078  00308de5   str       r3, [sp]
+0x0f91307c  18220be3   movw      r2, #0xb218    ; (b) low half 0xb218
+0x0f913080  3d3100e3   movw      r3, #0x13d    ; (b) low half 0x013d
+0x0f913084  962f40e3   movt      r2, #0xf96
+0x0f913088  31a400eb   bl        #0xf93c154
+0x0f91308c  00c096e5   ldr       ip, [r6]
+0x0f913090  0010a0e3   mov       r1, #0    ; (b) low half 0x0000
+0x0f913094  3ec08ce2   add       ip, ip, #0x3e
+0x0f913098  d5ffffea   b         #0xf912ff4
+0x0f91309c  4ea400eb   bl        #0xf93c1dc

@@ -1,0 +1,233 @@
+================================================================================
+LG G4 (H815) FACTORY LK -- disassembly
+file      : research/lk-g4/aboot-lk-g4-h815.elf   (ELF32 ARM, single PT_LOAD)
+mapping   : vaddr 0x0f900000 -> file offset 0x8000, filesz 0xe93d8
+tooling   : capstone 5.0.7 (CS_ARCH_ARM/CS_MODE_ARM), analisi con propagazione
+            dei valori in research/lk-g4/an4.py (ricostruzione movw/movt,
+            literal pool, mappa delle struct dev->HC e dev->plat->CORE)
+
+NOTA: questo file SOSTITUISCE dis-4.9-m-0f913954.txt, che era troncato a
+0x0f913a90 e quindi non mostrava il ramo 1.8 V (vedi T1/D1).
+
+CONVENZIONE SUI NOMI DEI REGISTRI
+  I nomi dei registri SDHCI/CORE ripresi dal driver Linux CAF
+  (G4-Titan-Kernel/drivers/mmc/host/sdhci-msm.c) sono **IPOTESI**: il binario
+  LK e' strippato e non contiene nomi di registro.  Tutto quello che segue e'
+  marcato "ipotesi(nome Linux)".  Gli indirizzi, i valori e la sequenza delle
+  scritture sono fatti.
+================================================================================
+
+================================================================================
+FUNCTION: 0x0f913954  -- sdhci_setup_host: caps, tensione, power on, clock
+runtime   : 0x0f913954  (termina a 0x0f913ab8)
+equivalente sorgente CAF : sdhci.c, sdhci_init() + sdhci_setup_host()
+================================================================================
+--------------------------------------------------------------------------------
+0x0f913954  70402de9  push {r4, r5, r6, lr}             
+0x0f913958  98550de3  movw r5, #0xd598                     ; r5 = 0xd598 (half)
+0x0f91395c  9f5f40e3  movt r5, #0xf9f                      ; r5 = 0x0f9fd598
+0x0f913960  0040a0e1  mov r4, r0                           ; r70 = r66 (dev)
+0x0f913968  08d04de2  sub sp, sp, #8                    
+0x0f91396c  003095e5  ldr r3, [r5]                         ; r3 <- [0x0f9fd598] (valore non noto)
+0x0f913970  400204e3  movw r0, #0x4240                     ; r0 = 0x4240 (half)
+0x0f913974  0f0040e3  movt r0, #0xf                        ; r0 = 0x000f4240
+0x0f913978  04308de5  str r3, [sp, #4]                  
+0x0f91397c  403092e5  ldr r3, [r2, #0x40]                  ; r3 <- [0xf9824940] (valore non noto)
+0x0f913980  441092e5  ldr r1, [r2, #0x44]                  ; r1 <- [0xf9824944] (valore non noto)
+0x0f913984  53c4e7e7  ubfx ip, r3, #8, #8               
+0x0f913988  010713e3  tst r3, #0x40000                  
+0x0f91398c  53e8e1e7  ubfx lr, r3, #0x10, #2            
+0x0f913990  20e084e5  str lr, [r4, #0x20]               
+0x0f913994  900c00e0  mul r0, r0, ip                    
+0x0f913998  1c0084e5  str r0, [r4, #0x1c]               
+0x0f91399c  0100a013  movne r0, #1                      
+0x0f9139a0  2400c415  strbne r0, [r4, #0x24]            
+0x0f9139a4  020713e3  tst r3, #0x80000                  
+0x0f9139a8  0100a013  movne r0, #1                      
+0x0f9139ac  2500c415  strbne r0, [r4, #0x25]            
+0x0f9139b0  010413e3  tst r3, #0x1000000                
+0x0f9139b4  2c00000a  beq #0xf913a6c                    
+0x0f9139b8  0fc0a0e3  mov ip, #0xf                         ; ip = 0xf
+0x0f9139bc  0e00a0e3  mov r0, #0xe                         ; r0 = 0xe
+0x0f9139c0  0730a0e3  mov r3, #7                           ; r3 = 0x7
+0x0f9139c4  2630c4e5  strb r3, [r4, #0x26]              
+0x0f9139cc  5161e0e7  ubfx r6, r1, #2, #1               
+0x0f9139d0  01e001e2  and lr, r1, #1                    
+0x0f9139d4  2860c4e5  strb r6, [r4, #0x28]              
+0x0f9139d8  29e0c4e5  strb lr, [r4, #0x29]              
+0x0f9139dc  d110e0e7  ubfx r1, r1, #1, #1               
+0x0f9139e0  2a10c4e5  strb r1, [r4, #0x2a]              
+0x0f9139e8  501093e5  ldr r1, [r3, #0x50]                  ; r1 <- [0xf9824050] (valore non noto)
+0x0f9139ec  213ea0e1  lsr r3, r1, #0x1c                 
+0x0f9139f0  7110efe6  uxtb r1, r1                       
+0x0f9139f4  010053e3  cmp r3, #1                        
+0x0f9139f8  1030c4e5  strb r3, [r4, #0x10]              
+0x0f9139fc  b211c4e1  strh r1, [r4, #0x12]              
+0x0f913a00  2a00000a  beq #0xf913ab0                    
+0x0f913a04  0030a0e3  mov r3, #0                           ; r3 = 0x0
+0x0f913a08  143084e5  str r3, [r4, #0x14]               
+0x0f913a0c  2900c2e5  strb r0, [r2, #0x29]                 ; WRITE 0xf9824929  HC+0x29  <- 0xe
+0x0f913a14  29c0c3e5  strb ip, [r3, #0x29]                 ; WRITE 0xf9824929  HC+0x29  <- 0xf
+0x0f913a18  180094e5  ldr r0, [r4, #0x18]               
+0x0f913a1c  4f6a00eb  bl #0xf92e360                     
+0x0f913a20  0010a0e3  mov r1, #0                           ; r1 = 0x0
+0x0f913a24  0400a0e1  mov r0, r4                           ; r66 = r70 (dev)
+0x0f913a28  9cfdffeb  bl #0xf9130a0                     
+0x0f913a30  1000a0e3  mov r0, #0x10                        ; r0 = 0x10
+0x0f913a34  0020e0e3  mvn r2, #0                        
+0x0f913a38  0b10a0e3  mov r1, #0xb                         ; r1 = 0xb
+0x0f913a3c  2800c3e5  strb r0, [r3, #0x28]                 ; WRITE 0xf9824928  HC+0x28  <- 0x10
+0x0f913a44  b413c3e1  strh r1, [r3, #0x34]                 ; WRITE 0xf9824934  HC+0x34  <- 0xb
+0x0f913a48  b623c3e1  strh r2, [r3, #0x36]                 ; WRITE 0xf9824936  HC+0x36  <- 0xf9824900
+0x0f913a4c  b813c3e1  strh r1, [r3, #0x38]                 ; WRITE 0xf9824938  HC+0x38  <- 0xb
+0x0f913a50  ba23c3e1  strh r2, [r3, #0x3a]                 ; WRITE 0xf982493a  HC+0x3a  <- 0xf9824900
+0x0f913a54  04209de5  ldr r2, [sp, #4]                  
+0x0f913a58  003095e5  ldr r3, [r5]                         ; r3 <- [0x0f9fd598] (valore non noto)
+0x0f913a5c  030052e1  cmp r2, r3                        
+0x0f913a60  1500001a  bne #0xf913abc                    
+0x0f913a64  08d08de2  add sp, sp, #8                    
+0x0f913a68  7080bde8  pop {r4, r5, r6, pc}                 ; === RETURN ===
+0x0f913a6c  020413e3  tst r3, #0x2000000                
+0x0f913a70  0400000a  beq #0xf913a88                    
+0x0f913a74  0630a0e3  mov r3, #6                           ; r3 = 0x6
+0x0f913a78  0dc0a0e3  mov ip, #0xd                         ; ip = 0xd
+0x0f913a7c  2630c4e5  strb r3, [r4, #0x26]              
+0x0f913a80  0c00a0e3  mov r0, #0xc                         ; r0 = 0xc
+0x0f913a84  cfffffea  b #0xf9139c8                      
+0x0f913a88  010313e3  tst r3, #0x4000000                
+0x0f913a8c  2600d405  ldrbeq r0, [r4, #0x26]            
+0x0f913a90  0530a013  movne r3, #5                      
+0x0f913a94  0bc0a013  movne ip, #0xb                    
+0x0f913a98  0a00a013  movne r0, #0xa                    
+0x0f913a9c  2630c415  strbne r3, [r4, #0x26]            
+0x0f913aa0  8000a001  lsleq r0, r0, #1                  
+0x0f913aa4  7000ef06  uxtbeq r0, r0                     
+0x0f913aa8  01c08003  orreq ip, r0, #1                  
+0x0f913aac  c5ffffea  b #0xf9139c8                      
+0x0f913ab0  330051e3  cmp r1, #0x33                     
+0x0f913ab4  d2ffff8a  bhi #0xf913a04                    
+0x0f913ab8  d2ffffea  b #0xf913a08                      
+0x0f913abc  c6a100eb  bl #0xf93c1dc                     
+0x0f913ac0  10402de9  push {r4, lr}                     
+0x0f913ac4  98450de3  movw r4, #0xd598                     ; r4 = 0xd598 (half)
+0x0f913ac8  9f4f40e3  movt r4, #0xf9f                      ; r4 = 0x0f9fd598
+0x0f913acc  003090e5  ldr r3, [r0]                         ; r3 <- [0x0000000c] (valore non noto)
+0x0f913ad0  08d04de2  sub sp, sp, #8                    
+0x0f913ad4  100090e5  ldr r0, [r0, #0x10]                  ; r0 <- [0x0000001c] (valore non noto)
+0x0f913ad8  002094e5  ldr r2, [r4]                         ; r2 <- [0x0f9fd598] (valore non noto)
+0x0f913adc  0010a0e3  mov r1, #0                           ; r1 = 0x0
+0x0f913ae0  04208de5  str r2, [sp, #4]                  
+0x0f913ae4  e02093e5  ldr r2, [r3, #0xe0]               
+0x0f913ae8  0c0012e3  tst r2, #0xc                      
+0x0f913aec  0520a013  movne r2, #5                      
+0x0f913af0  0120a003  moveq r2, #1                      
+0x0f913af4  e82083e5  str r2, [r3, #0xe8]               
+0x0f913af8  276a00eb  bl #0xf92e39c                     
+0x0f913afc  04209de5  ldr r2, [sp, #4]                  
+0x0f913b00  003094e5  ldr r3, [r4]                         ; r3 <- [0x0f9fd598] (valore non noto)
+0x0f913b04  0000a0e3  mov r0, #0                           ; r0 = 0x0
+0x0f913b08  030052e1  cmp r2, r3                        
+0x0f913b0c  0100001a  bne #0xf913b18                    
+0x0f913b10  08d08de2  add sp, sp, #8                    
+0x0f913b14  1080bde8  pop {r4, pc}                         ; === RETURN ===
+0x0f913b18  afa100eb  bl #0xf93c1dc                     
+0x0f913b1c  98350de3  movw r3, #0xd598                     ; r3 = 0xd598 (half)
+0x0f913b20  9f3f40e3  movt r3, #0xf9f                      ; r3 = 0x0f9fd598
+0x0f913b24  3f2ba0e3  mov r2, #0xfc00                      ; r2 = 0xfc00
+0x0f913b28  ac2640e3  movt r2, #0x6ac                      ; r2 = 0x06acfc00
+0x0f913b2c  00c093e5  ldr ip, [r3]                         ; ip <- [0x0f9fd598] (valore non noto)
+0x0f913b30  020051e1  cmp r1, r2                        
+0x0f913b34  04e02de5  str lr, [sp, #-4]!                
+0x0f913b38  0cd04de2  sub sp, sp, #0xc                  
+0x0f913b3c  04c08de5  str ip, [sp, #4]                  
+0x0f913b40  2c00009a  bls #0xf913bf8                    
+0x0f913b44  402905e3  movw r2, #0x5940                     ; r2 = 0x5940 (half)
+0x0f913b48  732740e3  movt r2, #0x773                      ; r2 = 0x07735940
+0x0f913b4c  020051e1  cmp r1, r2                        
+0x0f913b50  0114a093  movls r1, #0x1000000              
+0x0f913b54  1d00009a  bls #0xf913bd0                    
+0x0f913b58  402407e3  movw r2, #0x7440                     ; r2 = 0x7440 (half)
+0x0f913b5c  2a2840e3  movt r2, #0x82a                      ; r2 = 0x082a7440
+0x0f913b60  020051e1  cmp r1, r2                        
+0x0f913b64  0214a093  movls r1, #0x2000000              
+0x0f913b68  1800009a  bls #0xf913bd0                    
+0x0f913b6c  80210de3  movw r2, #0xd180                     ; r2 = 0xd180 (half)
+0x0f913b70  f02840e3  movt r2, #0x8f0                      ; r2 = 0x08f0d180
+0x0f913b74  020051e1  cmp r1, r2                        
+0x0f913b78  0314a093  movls r1, #0x3000000              
+0x0f913b7c  1300009a  bls #0xf913bd0                    
+0x0f913b80  802c0ee3  movw r2, #0xec80                     ; r2 = 0xec80 (half)
+0x0f913b84  a72940e3  movt r2, #0x9a7                      ; r2 = 0x09a7ec80
+0x0f913b88  020051e1  cmp r1, r2                        
+0x0f913b8c  0113a093  movls r1, #0x4000000              
+0x0f913b90  0e00009a  bls #0xf913bd0                    
+0x0f913b94  c02904e3  movw r2, #0x49c0                     ; r2 = 0x49c0 (half)
+0x0f913b98  6e2a40e3  movt r2, #0xa6e                      ; r2 = 0x0a6e49c0
+
+================================================================================
+MMIO SUMMARY (write risolte)
+--------------------------------------------------------------------------------
+  addr       indirizzo    registro            valore      quando
+  0x0f913a0c 0xf9824929   HC+0x29 power        <- 0x0a     1.8 V selezionata, power OFF
+  0x0f913a14 0xf9824929   HC+0x29 power        <- 0x0b     1.8 V selezionata, power ON
+  0x0f913a3c 0xf9824928   HC+0x28 ctrl1        <- 0x10
+  0x0f913a44 0xf9824934   HC+0x34 int_enable   <- 0x000b
+  0x0f913a48 0xf9824936   HC+0x36 int_enable+2 <- 0xffff
+  0x0f913a4c 0xf9824938   HC+0x38 int_signal   <- 0x000b
+  0x0f913a50 0xf982493a   HC+0x3a int_signal+2 <- 0xffff
+
+  (i valori 0x0e/0x0f e 0x0c/0x0d sono i rami 3.3 V e 3.0 V, non presi con
+   CAPS1 = 0x342dc8b2; vedi il blocco "SCELTA DELLA TENSIONE" sotto)
+
+SCELTA DELLA TENSIONE (FATTO, letto nel binario)
+--------------------------------------------------------------------------------
+  CAPS1 letto a 0x0f91397c (`ldr r3,[r2,#0x40]`), dove r2 = &HC.
+
+  0x0f9139b0  tst  r3, #0x1000000     ; CAPS1 bit24 = 3.3 V supportata
+  0x0f9139b4  beq  #0xf913a6c
+  0x0f9139b8  mov  ip, #0xf            ; -> HC+0x29 = 0x0f (power ON, 3.3 V)
+  0x0f9139bc  mov  r0, #0xe            ; -> HC+0x29 = 0x0e (power OFF, 3.3 V)
+  0x0f9139c0  mov  r3, #7              ; dev->voltage = 7 (SDHCI_VOL_3_3)
+  ...
+  0x0f913a6c  tst  r3, #0x2000000     ; CAPS1 bit25 = 3.0 V supportata
+  0x0f913a70  beq  #0xf913a88
+  0x0f913a74  mov  r3, #6              ; dev->voltage = 6 (SDHCI_VOL_3_0)
+  0x0f913a78  mov  ip, #0xd            ; -> HC+0x29 = 0x0d (power ON, 3.0 V)
+  0x0f913a80  mov  r0, #0xc            ; -> HC+0x29 = 0x0c (power OFF, 3.0 V)
+  ...
+  0x0f913a88  tst  r3, #0x4000000     ; CAPS1 bit26 = 1.8 V supportata
+  0x0f913a8c  ldrbeq r0, [r4,#0x26]    ; se non supportata: dev->voltage predefinito
+  0x0f913a90  movne r3, #5             ; dev->voltage = 5 (SDHCI_VOL_1_8)
+  0x0f913a94  movne ip, #0xb          ; -> HC+0x29 = 0x0b (power ON, 1.8 V)
+  0x0f913a98  movne r0, #0xa          ; -> HC+0x29 = 0x0a (power OFF, 1.8 V)
+  0x0f913a9c  strbne r3, [r4,#0x26]
+  0x0f913aa0  lsleq r0, r0, #1        ; ramo "non supportata": vol<<1 | 1
+  0x0f913aa4  uxtbeq r0, r0
+  0x0f913aa8  orreq ip, r0, #1
+
+  Con CAPS1 = 0x342dc8b2 (misurato sul telefono):
+      bit24 (3.3 V) = 0, bit25 (3.0 V) = 0, bit26 (1.8 V) = 1
+      => ramo 1.8 V: HC+0x29 = 0x0a poi 0x0b.
+
+  Corrispondenza con la sorgente CAF (sdhci.c):
+      SDHCI_3_3_VOL_MASK 0x01000000, SDHCI_3_0_VOL_MASK 0x02000000,
+      SDHCI_1_8_VOL_MASK 0x04000000;
+      sdhci_set_bus_power_on(): voltage = caps.voltage << 1; write; poi |BIT(0); write.
+
+ATTESA DELLA FINE DELLA POWER TRANSACTION (FATTO)
+--------------------------------------------------------------------------------
+  0x0f913a18  ldr  r0, [r4, #0x18]     ; &dev->sdhc_event
+  0x0f913a1c  bl   #0xf92e360          ; event_wait(&event)  -- BLOCCA
+  0x0f913a20  mov  r1, #0
+  0x0f913a24  mov  r0, r4
+  0x0f913a28  bl   #0xf9130a0          ; solo DOPO: setup del clock
+
+  La sorgente CAF (sdhci.c:805) dice:
+      /* Set bus power on */
+      sdhci_set_bus_power_on(host);
+      /* Wait for power interrupt to be handled */
+      event_wait(host->sdhc_event);
+
+  => l'LK scrive HC+0x29 e poi BLOCCA finche' l'handler dell'interrupt PWR
+     non ha scritto l'ack. Il nostro shim non ha l'handler e non aspetta.
+================================================================================

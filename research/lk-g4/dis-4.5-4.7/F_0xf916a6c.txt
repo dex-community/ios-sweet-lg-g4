@@ -1,0 +1,52 @@
+### F_0xf916a6c  start=0x0f916a6c  next_func_start=0x0f916b38  epilogue_end=0xf916b04
+0x0f916a6c  30402de9   push      {r4, r5, lr}
+0x0f916a70  98450de3   movw      r4, #0xd598    ; (b) low half 0xd598
+0x0f916a74  9f4f40e3   movt      r4, #0xf9f
+0x0f916a78  4cd04de2   sub       sp, sp, #0x4c
+0x0f916a7c  0050a0e1   mov       r5, r0
+0x0f916a80  0010a0e3   mov       r1, #0    ; (b) low half 0x0000
+0x0f916a84  003094e5   ldr       r3, [r4]
+0x0f916a88  4020a0e3   mov       r2, #0x40    ; (b) low half 0x0040
+0x0f916a8c  0d00a0e1   mov       r0, sp
+0x0f916a90  44308de5   str       r3, [sp, #0x44]
+0x0f916a94  599b00eb   bl        #0xf93d800
+0x0f916a98  0500a0e1   mov       r0, r5
+0x0f916a9c  0d10a0e1   mov       r1, sp
+0x0f916aa0  0730a0e3   mov       r3, #7    ; (b) low half 0x0007
+0x0f916aa4  b030cde1   strh      r3, [sp]
+0x0f916aa8  9ef1ffeb   bl        #0xf913128
+0x0f916aac  003050e2   subs      r3, r0, #0
+0x0f916ab0  1300001a   bne       #0xf916b04
+0x0f916ab4  38e095e5   ldr       lr, [r5, #0x38]
+0x0f916ab8  0d10a0e1   mov       r1, sp
+0x0f916abc  0930cde5   strb      r3, [sp, #9]
+0x0f916ac0  0500a0e1   mov       r0, r5
+0x0f916ac4  05c0a0e3   mov       ip, #5    ; (b) low half 0x0005
+0x0f916ac8  0220a0e3   mov       r2, #2    ; (b) low half 0x0002
+0x0f916acc  0e38a0e1   lsl       r3, lr, #0x10
+0x0f916ad0  b0c0cde1   strh      ip, [sp]
+0x0f916ad4  023983e3   orr       r3, r3, #0x8000
+0x0f916ad8  ba20cde1   strh      r2, [sp, #0xa]
+0x0f916adc  04308de5   str       r3, [sp, #4]
+0x0f916ae0  90f1ffeb   bl        #0xf913128
+0x0f916ae4  000050e3   cmp       r0, #0
+0x0f916ae8  0b00001a   bne       #0xf916b1c
+0x0f916aec  44209de5   ldr       r2, [sp, #0x44]
+0x0f916af0  003094e5   ldr       r3, [r4]
+0x0f916af4  030052e1   cmp       r2, r3
+0x0f916af8  0d00001a   bne       #0xf916b34
+0x0f916afc  4cd08de2   add       sp, sp, #0x4c
+0x0f916b00  3080bde8   pop       {r4, r5, pc}
+0x0f916b04  80040ce3   movw      r0, #0xc480    ; (b) low half 0xc480
+0x0f916b08  38150ce3   movw      r1, #0xc538    ; (b) low half 0xc538
+0x0f916b0c  960f40e3   movt      r0, #0xf96
+0x0f916b10  961f40e3   movt      r1, #0xf96
+0x0f916b14  3b9500eb   bl        #0xf93c008
+0x0f916b18  f3ffffea   b         #0xf916aec
+0x0f916b1c  9c040ce3   movw      r0, #0xc49c    ; (b) low half 0xc49c
+0x0f916b20  38150ce3   movw      r1, #0xc538    ; (b) low half 0xc538
+0x0f916b24  960f40e3   movt      r0, #0xf96
+0x0f916b28  961f40e3   movt      r1, #0xf96
+0x0f916b2c  359500eb   bl        #0xf93c008
+0x0f916b30  edffffea   b         #0xf916aec
+0x0f916b34  a89500eb   bl        #0xf93c1dc
