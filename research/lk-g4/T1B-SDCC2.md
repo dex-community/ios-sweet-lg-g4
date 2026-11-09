@@ -309,3 +309,49 @@ Elenco, in ordine, con la fonte di ogni pezzo:
 - **FATTO**: `CORE_HC_MCLK_SEL` (bit 8-9) e `CORE_HC_SELECT_IN` (bit 18, 19-21)
   descrivono il percorso del clock; il driver li mette a default per una
   carta non-HS400. Il shim lo fa solo con `LK_F_VENDOR_RESET`.
+
+---
+
+## 9. La ricetta SD, presa dal core MMC del tree CAF
+
+Non serve inventare nulla: il tree CAF da cui e' costruito il kernel del
+telefono contiene la sequenza esatta che il driver Linux usa per una carta
+SD. E' in `drivers/mmc/core/`.
+
+| passo | dove | cosa |
+|---|---|---|
+| CMD0 (go idle) | `sd.c:821` (`mmc_go_idle`) | `mmc_go_idle(host)` prima di tutto |
+| **CMD8** (IF_COND) | `sd_ops.c:193` (`mmc_send_if_cond`) | `cmd.arg = ((ocr & 0xFF8000) != 0) << 8 \| 0xAA` → **0x1AA**; la risposta e' R7 e il **byte basso deve essere 0xAA**, altrimenti `-EIO` |
+| HCS | `sd.c:829-831` | se CMD8 ha risposto: `ocr \|= SD_OCR_CCS` (bit 30) |
+| 1.8 V | `sd.c:838-839` | se l'host supporta UHS-I: `ocr \|= SD_OCR_S18R` (bit 24) |
+| **ACMD41** | `sd_ops.c:150` (`mmc_send_app_op_cond`) | `cmd.arg = ocr`; loop **100 volte**, con `mmc_delay(10)` (10 ms) fra un giro e l'altro, finche' la R3 non ha `MMC_CARD_BUSY` (bit 31 = power-up complete) |
+| CMD2/CMD3/CMD7/CMD9 | `sd_ops.c` (`mmc_send_relative_addr`, ...) | il CID, l'RCA, la selezione, la CSD |
+
+FATTO: `MMC_APP_CMD` (55) precede ACMD41: `mmc_wait_for_app_cmd()` manda
+prima CMD55 con arg = 41 e poi CMD41 con arg = l'OCR.
+
+FATTO: `SD_OCR_CCS` = bit 30, `SD_OCR_S18R` = bit 24
+(`include/linux/mmc/sd.h:37,40`).
+
+**L'OCR che l'host deve usare**: `host->ocr` viene da `mmc_select_voltage()`
+(`mmc.c:2209`) a partire dalle tensioni supportate dal DT
+(`qcom,vdd-io-voltage-level = <0x1b7740 0x2d0370>` = 1.8-2.95 V). Per una SD
+che non richiede lo switch a 1.8 V l'OCR tipico e' `0x40FF8000`: bit 30
+(CCS/HCS), tensione 2.7-3.6 V (0xFF0000), bit 15 (S4) e bit 7 (S18).
+`0x40FF8080` (quello che usa UniXNU) aggiunge anche il bit 7.
+
+**Il clock a 400 kHz**: dalla tabella CAF `ftbl_sdcc2_4_apps_clk_src`
+(clock-gcc-8992.c:1125) l'entrata e' `F(400000, gcc_xo, 12, 1, 4)`, cioe'
+sorgente XO, pre-divider 12, M = 1, N = 4. La formula che il driver usa per
+leggere indietro la frequenza (clock-local2.c:1142-1162) e'
+
+```
+pre_div = parent / ((div_val + 1) >> 1)      con div_val = CFG & 0x1f
+n       = (~n_val) + m                        n_val e' sign-extended
+rate    = pre_div * m / n
+```
+
+con la tabella `F` (clock-gcc-8992.c:43-52) che scrive
+`CFG[4:0] = FIXDIV(div) = 2*div-1` e `N = ~((N-M))`, `D = ~N`. Per 400 kHz
+da XO: **CFG[4:0] = 23 (0x17), CFG[10:8] = 0 (XO), M = 1, N = 0xFFFFFFFC,
+D = 0xFFFFFFFB**, e la frequenza risultante e' 19.2 MHz / 12 * 1/4 = 400 kHz.
