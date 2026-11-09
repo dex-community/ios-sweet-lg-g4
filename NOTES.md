@@ -1987,3 +1987,49 @@ Per prevenire qualsiasi bootloop in assenza dei tasti fisici:
 - `shim/loader.c` scrive esplicitamente `mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE)` prima del salto in XNU:
   in caso di timeout del watchdog hardware (60s) o reset, il bootloader LK rileva `RECOVERY_MODE` nella memoria IMEM e **si riavvia automaticamente in TWRP recovery con ADB attivo**, senza richiedere alcuna pressione di tasti fisici.
 - La partizione `boot` attuale è stata ripristinata con `backup/boot-stock.img` (SHA256 `070980b2...`) per garantire la sicurezza del dispositivo.
+
+---
+
+## Sessione 2026-11-09, ottava parte: Esecuzione hardware di iOS XNU con RAMDisk e preparazione storage `userdata`
+
+### 1. Approvazione dell'utente per lo Storage `userdata`
+- L'utente ha confermato: *"per la memoria se funziona userdata va bene userdata"*.
+- `userdata` (`/dev/block/bootdevice/by-name/userdata` -> `/dev/block/mmcblk0p50`, 23.2 GiB) sull'eMMC interna (`mmcblk0`) è la destinazione definitiva per il root filesystem iOS (HFS+ case-sensitive `SweetRoot`).
+- I backup critici (KDZ stock 1.7GB, TWRP 3.4/3.7) sono stati salvati su host locale e verificati.
+
+### 2. Risoluzione dei Blocchi al Boot di XNU
+1. **Data Abort sincrono via XPU su `0x03400000`**:
+   - `sweet-fbcon` e `FB_BASE` puntavano inizialmente a `0x03400000` (buffer di splash LK).
+   - Sul G4 (MSM8992), `0x00000000..0x09600000` è protetto dalla Qualcomm XPU in EL1 non sicuro: qualsiasi scrittura CPU genera immediatamente un *Synchronous Data Abort*.
+   - All'avvio di XNU, `fbcon_init()` eseguiva `fbcon_clear_row()` scrivendo nel buffer di splash e mandando in crash il kernel prima di qualsiasi messaggio.
+   - **Risoluzione**: `sweet-fbcon` in `tools/mkadt.py` e `G4_FB_BASE` in `shim/g4.h` sono stati riallocati a `0x20000000` nel banco di memoria DRAM 1 (`0x10000000..0x50000000`), dove la CPU in EL1 scrive liberamente senza abort XPU.
+2. **Integrazione Ramdisk (`rd=md0`) per PID 1**:
+   - Il cmdline richiedeva `rd=md0`, ma il payload `g4.bin` conteneva solo i 10 segmenti Mach-O del kernel senza immagine ramdisk.
+   - Compilato `tools/sweet-init.S` con clang (`-target arm64-apple-ios16.0`) e impacchettato con `tools/mkinit.py` in `shim/out/sweet-init.bin` (Mach-O arm64 statico con firma ad-hoc e heartbeat).
+   - Aggiornato `g4.bin` via `tools/mkpayload.py --ramdisk shim/out/sweet-init.bin`: iniettato nodo `RAMDisk` (`0x82478000`, `0x8000`) in `/chosen/memory-map` dell'ADT e aggiunto l'undicesimo segmento nel payload.
+
+### 3. Risultato del Boot Hardware (Misurato su Telefono)
+- Flashato `shim/out/shim-boot-xnu.img` (17.969.152 byte, sha256 `baf83d7ee0b2b9646c220f056bf195716d3f79e0451c8f2f8209950bec05491b`).
+- Log recuperato da `/sys/fs/pstore/console-ramoops-0`:
+  ```text
+  INITRD lo=02200000 hi=03197640
+  PHYS base=80000000 size=5FF00000
+  VIRT FFFFFE0006000000
+  ENTRY FFFFFE000747B488
+  SEGS n=0000000B end=82480000
+  BOOTARG pa=82484000 top=82488000
+  JUMP 000000008147B488
+  XNU jumping (fbcon clears screen)
+  ```
+- **Esito**:
+  - Lo shim ha decompresso ed esteso in RAM fisica tutti gli 11 segmenti (`0x80000000`..`0x82480000`).
+  - Preparato `boot_args` a `0x82484000`.
+  - Saltato con successo nell'entry point di XNU a PA `0x8147B488` (`__start`).
+  - L'auto-fallback `LK_RECOVERY_MODE` con watchdog a 60 secondi ha funzionato perfettamente: al termine della finestra di esecuzione, LK è rientrato stabilmente in TWRP recovery con ADB attivo, senza richiedere l'uso dei pulsanti fisici danneggiati.
+
+### 4. Risorse IPSW Identificate per il Rootfs su `userdata`
+- File IPSW locale presente: `/Users/io/Dev/ios/lg g4/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` (5.7 GB).
+  - Immagine OS: `087-86698-044.dmg` (4.5 GB)
+  - Immagine SystemOS: `087-86593-047.dmg` (2.6 GB)
+  - Immagine AppOS: `087-86715-047.dmg` (10 MB)
+- Script di creazione volume nativo su macOS disponibile in `/Users/io/Dev/ios/lg g4/UniXNU-lumia950xl/scripts/mkiosroot-root.sh` (utilizza `hdiutil` e `ditto` preservando permessi, proprietari e link simbolici/hardlink senza richiedere fuse).

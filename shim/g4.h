@@ -85,7 +85,7 @@
  * cont_splash_mem: 0x03400000, 0xc00000 (12 MiB) (DTS:13337).
  *   1440*2560*3 = 10.5 MiB fits; 1440*2560*4 = 14.1 MiB does not.
  */
-#define G4_FB_BASE		0x03400000UL
+#define G4_FB_BASE		0x20000000UL
 #define G4_FB_SIZE		0xc00000UL
 #define G4_FB_W			1440
 #define G4_FB_H			2560
