@@ -76,11 +76,28 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+/*
+ * When the payload comes from the microSD (shim/sd_payload.c), the loader
+ * uses that buffer instead of the initrd of the boot image.
+ */
+static uint64_t g_payload_addr;
+static uint64_t g_payload_len;
+
+void loader_set_payload(uint64_t addr, uint64_t len)
+{
+	g_payload_addr = addr;
+	g_payload_len = len;
+	con_hex2("LOADER", "payload at=", addr, "len=", len);
+}
+
 const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
 
-	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
+	if (g_payload_addr) {
+		rd_start = g_payload_addr;
+		rd_end = g_payload_addr + g_payload_len;
+	} else if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
 	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
 		return "no initrd in /chosen";
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);

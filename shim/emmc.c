@@ -837,6 +837,7 @@ struct lk_var {
  * It is included here so that it can see the accessors above.
  */
 #include "fdt.h"
+#include "crc32.h"
 #include "emmc_model.inc"
 #endif
 

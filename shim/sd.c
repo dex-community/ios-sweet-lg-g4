@@ -355,7 +355,7 @@ static int sd_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
  * Waiting for XFER_DONE before reading the buffer would deadlock: the
  * transfer completes only as the data goes out.
  */
-static int sd_read_block(uint32_t lba, uint8_t *out)
+int sd_read_block(uint32_t lba, uint8_t *out)
 {
 	uint32_t r1 = 0;
 	uint32_t status;

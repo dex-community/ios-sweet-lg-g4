@@ -67,6 +67,7 @@ TEST_DTS = """\
 		linux,initrd-end = <0x41000040>;
 		emmc-model = <%d>;
 		emmc-delay-ms = <%d>;
+		sd-payload = <%d>;
 	};
 
 	memory@40000000 {
@@ -111,11 +112,11 @@ def build_shim(diag=False):
     print('   ' + [x for x in r.stdout.splitlines() if 'Image' in x][-1])
 
 
-def make_dtb(mode, delay_ms, tmp):
+def make_dtb(mode, delay_ms, tmp, sd_payload=0):
     dts = os.path.join(tmp, 'test.dts')
     dtb = os.path.join(tmp, 'test.dtb')
     with open(dts, 'w') as f:
-        f.write(TEST_DTS % (MODES[mode], delay_ms))
+        f.write(TEST_DTS % (MODES[mode], delay_ms, sd_payload))
     r = subprocess.run(['dtc', '-I', 'dts', '-O', 'dtb', '-o', dtb, dts],
                        capture_output=True, text=True)
     if r.returncode:

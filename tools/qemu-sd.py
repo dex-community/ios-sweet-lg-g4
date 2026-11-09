@@ -44,11 +44,12 @@ SD2_CORE = 0xf98a4000
 SD2_HC = 0xf98a4900
 
 
-def build(sd_init=1):
+def build(sd_init=1, sd_payload=1):
     env = dict(os.environ)
     env['SHIM_HW_DIAG'] = '1'
     env['SHIM_EMMC_MODEL'] = '1'
     env['SHIM_SD_INIT'] = str(sd_init)
+    env['SHIM_SD_PAYLOAD'] = str(sd_payload)
     env['SHIM_MMIO_SELFTEST'] = '0'
     env['SHIM_SD_PROBE'] = '0'
     env['RAW_TIMING'] = '1'
@@ -68,7 +69,7 @@ def main():
     outdir = os.path.join(ROOT, 'shim', 'out', 'qemu-sd')
     os.makedirs(outdir, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        dtb = qemu_emmc.make_dtb('always', 100, tmp)
+        dtb = qemu_emmc.make_dtb('always', 100, tmp, sd_payload=1)
         mem_file, qemu_log = qemu_emmc.run_qemu(
             os.path.join(ROOT, 'shim', 'out', 'Image'), dtb, outdir, 45)
 
@@ -156,6 +157,24 @@ def main():
     else:
         for line in log.splitlines():
             if line.startswith('SD '):
+                print('ok  : %s' % line)
+
+    # 5. the payload: it is read from the card, its CRC is checked and the
+    #    loader is told to use it.
+    if 'SDPAY len=' not in log:
+        failures.append('the payload was not read from the card (no "SDPAY" '
+                        'line in the console log)')
+    elif 'SDPAY rc=00000000' not in log:
+        failures.append('the payload was read but its CRC did not match')
+    else:
+        for line in log.splitlines():
+            if line.startswith('SDPAY'):
+                print('ok  : %s' % line)
+    if 'LOADER payload at=' not in log:
+        failures.append('the loader was not told to use the payload of the card')
+    else:
+        for line in log.splitlines():
+            if line.startswith('LOADER'):
                 print('ok  : %s' % line)
 
     if failures:

@@ -59,6 +59,10 @@
 /* The magic that lets the host tool find the log in the RAM dump. */
 #define MODEL_LOG_MAGIC		"G4MMLOG1"
 
+/* The header of the payload on the card (shim/sd_payload.h). */
+#define SD_PAYLOAD_MAGIC	"G4PAYLD1"
+
+
 /* Card modes. */
 #define MODEL_MUTE		0	/* never answers anything            */
 #define MODEL_ACK		1	/* answers only after the PWRCTL ack */
@@ -209,9 +213,22 @@ static uint32_t model_sd2_data_len;
 static uint32_t model_sd2_data_pos;
 static uint8_t model_sd2_disk[512];
 static uint32_t model_sd2_disk_valid;
+/*
+ * The blocks of the card, as the layout of shim/sd_payload.h describes:
+ * the payload header is at block 2048 and the payload itself follows. The
+ * model serves them so that the test can check the whole path (header,
+ * CRC, copy into RAM).
+ */
+#define MODEL_SD2_DISK_BLOCKS	8
+static uint8_t model_sd2_blocks[MODEL_SD2_DISK_BLOCKS][512];
+static uint32_t model_sd2_disk_blocks;
+#define MODEL_SD2_PAYLOAD_LBA	2048
 
 /* Card state. */
 static uint32_t model_mode = MODEL_MUTE;
+/* The device tree can ask for a test payload on the card (the QEMU test
+ * of shim/sd_payload.c). */
+static uint32_t model_sd_payload;
 static uint32_t model_delay_ms;
 static uint32_t model_pwr_on;		/* the bus power has been turned on  */
 static uint32_t model_pwr_tsc;		/* when that happened               */
@@ -381,13 +398,24 @@ static void model_sd2_build_response(void)
 	case MCMD_SD_SET_BLOCKLEN:	/* CMD16: R1 */
 		model_sd2_rsp[0] = 0x00000900;
 		break;
-	case MCMD_SD_READ_BLOCK:		/* CMD17: R1 + one sector */
+	case MCMD_SD_READ_BLOCK: {	/* CMD17: R1 + one sector */
+		uint32_t lba = model_sd2_cmd_arg;
+		uint32_t idx = (lba >= MODEL_SD2_PAYLOAD_LBA) ?
+				lba - MODEL_SD2_PAYLOAD_LBA : lba;
+
 		model_sd2_rsp[0] = 0x00000900;
 		for (unsigned i = 0; i < 512; i++)
-			model_sd2_data[i] = model_sd2_disk_valid ?
-						model_sd2_disk[i] : 0;
+			model_sd2_data[i] = 0;
+		if (idx < model_sd2_disk_blocks) {
+			for (unsigned i = 0; i < 512; i++)
+				model_sd2_data[i] = model_sd2_blocks[idx][i];
+		} else if (idx == 0 && model_sd2_disk_valid) {
+			for (unsigned i = 0; i < 512; i++)
+				model_sd2_data[i] = model_sd2_disk[i];
+		}
 		model_sd2_data_len = 512;
 		break;
+	}
 	default:
 		model_sd2_rsp[0] = 0x00000900;
 		break;
@@ -818,6 +846,53 @@ void emmc_model_config(uintptr_t dtb)
 {
 	uint64_t v;
 
+	/* The defaults first, then the device tree over them: the tree is
+	 * read BEFORE anything else, because what it asks for (the card
+	 * mode, the delay, the test payload of the card) is used by the
+	 * code below. */
+	model_mode = MODEL_MUTE;
+	model_delay_ms = 100;
+	model_sd_payload = 0;
+	if (dtb) {
+		if (fdt_prop_u64(dtb, "/chosen", "emmc-model", &v))
+			model_mode = (uint32_t)v;
+		if (fdt_prop_u64(dtb, "/chosen", "emmc-delay-ms", &v))
+			model_delay_ms = (uint32_t)v;
+		if (fdt_prop_u64(dtb, "/chosen", "sd-payload", &v))
+			model_sd_payload = (uint32_t)v;
+	}
+
+	/*
+	 * A test payload on the card, so that the whole path of
+	 * shim/sd_payload.c can be exercised: the header at block 2048, the
+	 * payload at 2049, with the CRC that the shim computes.
+	 */
+	if (model_sd_payload) {
+		uint32_t len = 512;
+		uint32_t crc;
+
+		for (unsigned i = 0; i < 512; i++)
+			model_sd2_blocks[1][i] = (uint8_t)(0x5a ^ i);
+		for (unsigned i = 0; i < 8; i++)
+			model_sd2_blocks[0][i] = SD_PAYLOAD_MAGIC[i];
+		{
+			uint32_t *h = (uint32_t *)(model_sd2_blocks[0] + 8);
+
+			h[0] = 1;			/* version */
+			h[1] = len;			/* len    */
+			h[2] = 0;			/* crc, below */
+			h[3] = 0;			/* flags */
+		}
+		crc = crc32_le(0xffffffffu, model_sd2_blocks[1], len) ^ 0xffffffffu;
+		{
+			uint32_t *h = (uint32_t *)(model_sd2_blocks[0] + 8);
+
+			h[2] = crc;
+		}
+		model_sd2_disk_blocks = 2;
+		trail(0x2800, crc);
+	}
+
 	model_put(0, M_CORE_POWER, 4, 0x41);
 	model_put(0, M_CORE_MCIVER, 4, 0x1000003e);
 	model_put(0, M_CORE_HCMODE, 4, 0x01);
@@ -846,8 +921,6 @@ void emmc_model_config(uintptr_t dtb)
 	model_put(1, 0x100, 4, 0x60006400);
 	model_put(1, M_HC_VENDOR, 4, 0x00000a1c);
 
-	model_mode = MODEL_MUTE;
-	model_delay_ms = 100;
 	model_sd2_clocked = 0;
 	model_sd2_cmd_pending = 0;
 	model_sd2_app_prefix = 0;
@@ -857,6 +930,8 @@ void emmc_model_config(uintptr_t dtb)
 	model_sd2_disk_valid = 0;
 	/* The CID and the CSD of the model card: the CID is the one of the
 	 * microSD of the phone (SS32G), the CSD is a plausible SDHC one. */
+	model_sd2_disk_blocks = 0;
+
 	model_sd2_cid[0] = 0x03534453;
 	model_sd2_cid[1] = 0x53333247;
 	model_sd2_cid[2] = 0x80a46843;
@@ -878,13 +953,6 @@ void emmc_model_config(uintptr_t dtb)
 	for (unsigned i = 0; i < 8; i++)
 		emmc_model_log.hdr.magic[i] = MODEL_LOG_MAGIC[i];
 
-	if (dtb) {
-		/* fdt_prop_u64 returns 1 when it found the property. */
-		if (fdt_prop_u64(dtb, "/chosen", "emmc-model", &v))
-			model_mode = (uint32_t)v;
-		if (fdt_prop_u64(dtb, "/chosen", "emmc-delay-ms", &v))
-			model_delay_ms = (uint32_t)v;
-	}
 
 	emmc_model_log.hdr.n = 0;
 	emmc_model_log.hdr.mode = model_mode;

@@ -11,6 +11,9 @@
  * sector has been read. */
 int sd_init(uint8_t *block0);
 
+/* Read one 512 byte block of the card. Returns 0 on success. */
+int sd_read_block(uint32_t lba, uint8_t *out);
+
 /* How far it got (the step names are in sd.c). */
 extern int sd_init_stage;
 extern int sd_init_error;

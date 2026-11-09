@@ -67,6 +67,9 @@ CFLAGS="$CFLAGS -DSHIM_MMIO_SELFTEST=${SHIM_MMIO_SELFTEST:-0}"
 # only turned on once the measurements from the recovery (GUIDE-06) say
 # that the SDCC2 pins are muxed on SDC2.
 CFLAGS="$CFLAGS -DSHIM_SD_INIT=${SHIM_SD_INIT:-0}"
+# The payload of the XNU kernel read from the microSD instead of the boot
+# image (shim/sd_payload.c). It needs the SD bring-up.
+CFLAGS="$CFLAGS -DSHIM_SD_PAYLOAD=${SHIM_SD_PAYLOAD:-0}"
 CFLAGS="$CFLAGS -DG4_WDT_GUARD_MS=${WDT_GUARD_MS:-60000}"
 # The phone has DRAM at 0xff00000, where its ramoops region is. QEMU's
 # virt machine has its RAM at 0x40000000, and only 128 MiB of it (the
@@ -81,7 +84,7 @@ fi
 # untouched (the instruction was: do not touch emmc*). It is always compiled
 # (it is small and it has no side effects when SHIM_SD_PROBE=0), so that the
 # link line does not change from one build to the next.
-SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c rs8.c pstore.c wdt.c sd_probe.c mmio_selftest.c sd.c"
+SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c rs8.c pstore.c wdt.c sd_probe.c mmio_selftest.c sd.c crc32.c sd_payload.c"
 
 # The static half of the MMIO allowlist: a raw store on a device window
 # would bypass the protection that keeps a write to a dead controller from
@@ -97,10 +100,10 @@ for f in $SRC; do
 done
 # The image runs wherever LK puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o 2>/dev/null | grep -c ABS64 || true)
+abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o 2>/dev/null | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o -o out/shim.elf
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # LK copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 # (BSD awk has no strtonum, so do the hex conversion in the shell.)

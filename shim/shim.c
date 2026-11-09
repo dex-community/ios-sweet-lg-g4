@@ -55,6 +55,9 @@ void mmio_selftest(void);
 /* The bring-up of the microSD slot (shim/sd.c). */
 #include "sd.h"
 #endif
+#if SHIM_SD_PAYLOAD
+#include "sd_payload.h"
+#endif
 
 /* The T2 read-only probe of the eMMC host (shim/sd_probe.inc). */
 #if SHIM_SD_PROBE
@@ -1322,6 +1325,23 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	PHASE(3); stage = "loader";
+#if SHIM_SD_PAYLOAD
+	/*
+	 * The payload can also live on the microSD: the eMMC is mute, so
+	 * the boot image carries only the shim. sd_payload_load() reads it
+	 * from the card, checks the CRC and tells the loader to use that
+	 * buffer (shim/loader.c). If the card has no payload, the loader
+	 * falls back to the initrd of the boot image.
+	 */
+	con_hex2("SDPAY", "pre", (uint32_t)sd_init_error, "stage=",
+		 (uint32_t)sd_init_stage);
+	if (sd_init_error == 0) {
+		int prc = sd_payload_load();
+
+		con_hex2("SDPAY", "rc=", (uint32_t)prc, "err=",
+			 (uint32_t)sd_payload_error);
+	}
+#endif
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
