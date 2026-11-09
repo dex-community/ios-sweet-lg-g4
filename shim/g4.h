@@ -102,6 +102,14 @@
 #define G4_EMMC_HC_IRQ		123
 #define G4_EMMC_PWR_IRQ		138
 
+/* SDCC2 = the microSD slot (DTS:6426-6459, sdhci@f98a4900).
+ * The LK never initializes it (no reference to sdc2 in the bootloader), so
+ * everything about it has to be done by the shim. */
+#define G4_SD_BASE		0xf98a4900UL
+#define G4_SD_SIZE		0x11cUL
+#define G4_SD_CORE_BASE		0xf98a4000UL
+#define G4_SD_CORE_SIZE		0x800UL
+
 /* ---- PMIC / buttons (Phase 4) ---- */
 
 /* SPMI arbiter qcom,spmi@fc4c0000 (DTS:3989-4006): core 0xfc4cf000,

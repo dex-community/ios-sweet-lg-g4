@@ -51,6 +51,11 @@ void emmc_model_config(uintptr_t dtb);
 /* The self-test of the MMIO allowlist (shim/mmio_selftest.c). */
 void mmio_selftest(void);
 
+#if SHIM_SD_INIT
+/* The bring-up of the microSD slot (shim/sd.c). */
+#include "sd.h"
+#endif
+
 /* The T2 read-only probe of the eMMC host (shim/sd_probe.inc). */
 #if SHIM_SD_PROBE
 void sd_probe_before(void);
@@ -1268,6 +1273,30 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	/* And again AFTER it: the bring-up resets the host, and the question
 	 * is what that reset erases. Reads only. */
 	sd_probe_after();
+#endif
+#if SHIM_SD_INIT
+	/*
+	 * The microSD slot. It comes after the eMMC (whose log is already
+	 * safe) and before the pstore write (so its outcome is in the record
+	 * that survives the reset).
+	 *
+	 * THE ORDER INSIDE sd_init() IS THE POINT: the clock of SDCC2 goes
+	 * on BEFORE the controller is touched. The QEMU model refuses to
+	 * serve the SDCC2 windows until the clock is on, so a wrong order
+	 * fails the test instead of hanging the phone (GUIDE-05).
+	 */
+	PHASE(2); stage = "sd";
+	{
+		static uint8_t sd_block[512];
+		int sd_rc = sd_init(sd_block);
+
+		con_hex2("SD", "rc=", (uint32_t)sd_rc, "stage=",
+			 (uint32_t)sd_init_stage);
+		con_hex2("SD", "err=", (uint32_t)sd_init_error, "rca=",
+			 sd_rca);
+		trail(0x2600, (uint32_t)sd_rc);
+		trail(0x2601, (uint32_t)sd_init_stage);
+	}
 #endif
 #if SHIM_EMMC_MODEL
 	emmc_model_finish();

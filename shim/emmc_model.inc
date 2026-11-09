@@ -36,6 +36,10 @@
  */
 #define MODEL_HC_SIZE		0x1a0
 #define MODEL_CORE_SIZE		0x800
+/* The SDCC2 windows (the microSD slot): a SECOND host, served only when
+ * its GCC clock branch is on. See model_window(). */
+#define MODEL_SD2_HC_SIZE	0x100
+#define MODEL_SD2_CORE_SIZE	0x800
 /* The GCC (global clock controller) window: the first 8 KB is kept, which is
  * the whole window of the real device (qcom,gcc@fc400000, reg size 0x2000).
  * The shim touches SDCC1_APPS_CBCR (0x4c4), SDCC1_AHB_CBCR (0x4c8) and the
@@ -111,6 +115,17 @@
 #define MCMD_RESP_MASK		0x03u
 #define MCMD_DATA_PRESENT	0x20u
 
+/* SD commands the model answers (the microSD of the model). */
+#define MCMD_SD_APP		55	/* CMD55: the prefix of ACMD41   */
+#define MCMD_SD_IF_COND		8	/* CMD8: 0x1AA                 */
+#define MCMD_SD_OP_COND		41	/* ACMD41                      */
+#define MCMD_SD_ALL_SEND_CID	2	/* CMD2                        */
+#define MCMD_SD_SET_REL_ADDR	3	/* CMD3                        */
+#define MCMD_SD_SEND_CSD	9	/* CMD9                        */
+#define MCMD_SD_SELECT		7	/* CMD7                        */
+#define MCMD_SD_SET_BLOCKLEN	16	/* CMD16                       */
+#define MCMD_SD_READ_BLOCK	17	/* CMD17                       */
+
 /* MMC commands the model answers. */
 #define MCMD_GO_IDLE		0
 #define MCMD_SET_REL_ADDR	3
@@ -162,6 +177,38 @@ static unsigned model_log_n;
 static uint8_t model_core[MODEL_CORE_SIZE];
 static uint8_t model_hc[MODEL_HC_SIZE];
 static uint8_t model_gcc[MODEL_GCC_SIZE];
+static uint8_t model_sd2_core[MODEL_SD2_CORE_SIZE];
+static uint8_t model_sd2_hc[MODEL_SD2_HC_SIZE];
+
+/*
+ * Is the SDCC2 controller clocked?
+ *
+ * This is the point of the model for SDCC2: a write to a controller whose
+ * clock is off NEVER COMPLETES (that is what hung the phone twice on
+ * 2026-11-09). The model reproduces it: while the clock is off, the
+ * SDCC2 windows are NOT served, so the access goes to the real address,
+ * which under QEMU does not exist -> the guest faults and the test
+ * fails. So a test that passes has PROVEN that the shim turns the clock on
+ * before touching the controller.
+ */
+static uint32_t model_sd2_clocked;
+/* The command the host has pending on the SDCC2 host. */
+static uint32_t model_sd2_cmd_pending;
+static uint32_t model_sd2_cmd_index;
+static uint32_t model_sd2_cmd_flags;
+static uint32_t model_sd2_cmd_arg;
+static uint32_t model_sd2_app_prefix;	/* CMD55 has been seen            */
+static uint32_t model_sd2_rsp[4];
+
+/* The SD card of the model: it answers the SD commands. */
+static uint32_t model_sd2_rca;
+static uint32_t model_sd2_cid[4];
+static uint8_t model_sd2_csd[16];
+static uint8_t model_sd2_data[512];
+static uint32_t model_sd2_data_len;
+static uint32_t model_sd2_data_pos;
+static uint8_t model_sd2_disk[512];
+static uint32_t model_sd2_disk_valid;
 
 /* Card state. */
 static uint32_t model_mode = MODEL_MUTE;
@@ -289,6 +336,100 @@ static void model_build_response(void)
 	model_set(model_hc + M_HC_RESPONSE, 4, model_rsp[0]);
 }
 
+/* ------------------------------------------------------------------ */
+/* The card of the SDCC2 slot                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The response of the model SD card. The sequence is the one of the CAF
+ * core (drivers/mmc/core/sd_ops.c): CMD8 answers R7 with 0x1AA, ACMD41
+ * answers R3 with the OCR, CMD2 the CID, CMD3 the RCA, CMD7/CMD9/CMD16 R1.
+ */
+static void model_sd2_build_response(void)
+{
+	model_sd2_data_len = 0;
+	model_sd2_data_pos = 0;
+
+	switch (model_sd2_cmd_index) {
+	case 0:		/* CMD0: no response */
+		model_sd2_rsp[0] = 0;
+		break;
+	case MCMD_SD_IF_COND:	/* CMD8: R7, the pattern in the low byte */
+		model_sd2_rsp[0] = 0x000001aa;
+		break;
+	case MCMD_SD_APP:	/* CMD55: R1, it only opens the APP prefix */
+		model_sd2_rsp[0] = 0x00000900;
+		break;
+	case MCMD_SD_OP_COND:	/* ACMD41: R3, bit 31 = power-up complete */
+		model_sd2_rsp[0] = 0xc0ff8080;
+		break;
+	case MCMD_SD_ALL_SEND_CID:	/* CMD2: R2 */
+		model_sd2_rsp[0] = model_sd2_cid[0];
+		break;
+	case MCMD_SD_SET_REL_ADDR:	/* CMD3: R1, the RCA */
+		model_sd2_rsp[0] = 0x00000900;
+		break;
+	case MCMD_SD_SELECT:		/* CMD7: R1b */
+		model_sd2_rsp[0] = 0x00000900;
+		break;
+	case MCMD_SD_SEND_CSD:		/* CMD9: R1 + the CSD */
+		model_sd2_rsp[0] = 0x00000900;
+		for (unsigned i = 0; i < 16; i++)
+			model_sd2_data[i] = model_sd2_csd[i];
+		model_sd2_data_len = 16;
+		break;
+	case MCMD_SD_SET_BLOCKLEN:	/* CMD16: R1 */
+		model_sd2_rsp[0] = 0x00000900;
+		break;
+	case MCMD_SD_READ_BLOCK:		/* CMD17: R1 + one sector */
+		model_sd2_rsp[0] = 0x00000900;
+		for (unsigned i = 0; i < 512; i++)
+			model_sd2_data[i] = model_sd2_disk_valid ?
+						model_sd2_disk[i] : 0;
+		model_sd2_data_len = 512;
+		break;
+	default:
+		model_sd2_rsp[0] = 0x00000900;
+		break;
+	}
+
+	/* The host reads the response from HC+0x10. */
+	model_set(model_sd2_hc + M_HC_RESPONSE, 4, model_sd2_rsp[0]);
+}
+
+/* Is the SD card ready to answer the command that is pending? */
+static int model_sd2_card_ready(void)
+{
+	if (model_mode == MODEL_MUTE)
+		return 0;
+	return 1;
+}
+
+/* Called at every access: answers the pending SD command, if the card is
+ * ready to. */
+static void model_sd2_poll(void)
+{
+	uint32_t intstat;
+
+	if (!model_sd2_cmd_pending)
+		return;
+	if (!model_sd2_card_ready())
+		return;
+
+	model_sd2_cmd_pending = 0;
+	model_sd2_build_response();
+
+	/* A read command with a data phase also makes the data available. */
+	if ((model_sd2_cmd_flags & MCMD_DATA_PRESENT) &&
+	    (model_get(model_sd2_hc + M_HC_TRANSFER, 2) & 0x10u))
+		model_set(model_sd2_hc + M_HC_PRESENT, 4,
+			  model_get(model_sd2_hc + M_HC_PRESENT, 4) |
+			  MPS_DATA_AVAILABLE);
+
+	intstat = model_get(model_sd2_hc + M_HC_INTSTATUS, 4) | MINT_CMD_DONE;
+	model_set(model_sd2_hc + M_HC_INTSTATUS, 4, intstat);
+}
+
 /* Is the card ready to answer the command that is pending? */
 static int model_card_ready(void)
 {
@@ -347,6 +488,10 @@ static uint32_t model_read_reg(unsigned win, unsigned off, unsigned size)
 		p = model_core + off;
 	else if (win == 1)
 		p = model_hc + off;
+	else if (win == 3)
+		p = model_sd2_core + off;
+	else if (win == 4)
+		p = model_sd2_hc + off;
 	else
 		p = model_gcc + off;
 
@@ -364,6 +509,12 @@ static uint32_t model_read_reg(unsigned win, unsigned off, unsigned size)
 	case M_HC_PRESENT: {
 		uint32_t v = 0x01f80000u | MPS_SPACE_AVAILABLE | MPS_DAT0_LEVEL;
 
+		if (win == 4) {
+			if (model_sd2_data_len &&
+			    model_sd2_data_pos < model_sd2_data_len)
+				v |= MPS_DATA_AVAILABLE;
+			return v;
+		}
 		if (model_data_len && model_data_pos < model_data_len)
 			v |= MPS_DATA_AVAILABLE;
 		return v;
@@ -371,9 +522,29 @@ static uint32_t model_read_reg(unsigned win, unsigned off, unsigned size)
 	case M_HC_SWRST:
 		return 0;		/* the reset is always complete */
 	case M_HC_BUFPORT: {
-		uint32_t pos = model_data_pos;
-		uint32_t v = 0;
+		uint32_t pos, v = 0;
 
+		if (win == 4) {
+			pos = model_sd2_data_pos;
+			if (!model_sd2_data_len)
+				return 0;
+			for (unsigned i = 0; i < 4 && pos + i < model_sd2_data_len; i++)
+				v |= (uint32_t)model_sd2_data[pos + i] << (8 * i);
+			pos += 4;
+			if (pos >= model_sd2_data_len) {
+				model_sd2_data_pos = model_sd2_data_len;
+				model_set(model_sd2_hc + M_HC_PRESENT, 4,
+					  model_get(model_sd2_hc + M_HC_PRESENT, 4) &
+					  ~MPS_DATA_AVAILABLE);
+				model_set(model_sd2_hc + M_HC_INTSTATUS, 4,
+					  model_get(model_sd2_hc + M_HC_INTSTATUS, 4) |
+					  MINT_XFER_DONE);
+			} else {
+				model_sd2_data_pos = pos;
+			}
+			return v;
+		}
+		pos = model_data_pos;
 		if (!model_data_len)
 			return 0;
 		for (unsigned i = 0; i < 4 && pos + i < model_data_len; i++)
@@ -407,12 +578,25 @@ static void model_write_reg(unsigned win, unsigned off, unsigned size,
 		p = model_core + off;
 	else if (win == 1)
 		p = model_hc + off;
+	else if (win == 3)
+		p = model_sd2_core + off;
+	else if (win == 4)
+		p = model_sd2_hc + off;
 	else {
 		/* The clock controller: writing the enable bit starts the
 		 * clock, and the CLK_OFF bit (31) clears when it runs. The
-		 * shim polls for it, so it has to clear right away. */
+		 * shim polls for it, so it has to clear right away.
+		 *
+		 * The SDCC2 branches are the ones that bring the SDCC2
+		 * controller to life: until they are on, the controller's
+		 * windows are NOT served, so a write to it does not
+		 * complete (the stall that hung the phone). */
 		p = model_gcc + off;
 		model_set(p, size, (val & ~0x80000000u) | 1u);
+		if (off == 0x504 || off == 0x508) {
+			if (val & 1u)
+				model_sd2_clocked = 1;
+		}
 		return;
 	}
 
@@ -428,23 +612,18 @@ static void model_write_reg(unsigned win, unsigned off, unsigned size,
 		return;
 	case M_CORE_CTL:
 		model_set(p, size, val);
-		/* The ack of the bus power transaction. The LK's interrupt
-		 * handler (0x0f913ac0) writes 5: BUS_ON_OFF_SUCC (bit 0) and
-		 * IO_SIG_SUCC (bit 2), because it looks at the MASK register
-		 * (0xf), not at the status. A writer that acks only with the
-		 * status bits (like the current shim does, writing 1) has
-		 * NOT acknowledged the IO signal change. */
-		if ((val & (PWRCTL_BUS_SUCCESS | PWRCTL_IO_SUCCESS)) ==
-		    (PWRCTL_BUS_SUCCESS | PWRCTL_IO_SUCCESS))
-			model_ack_seen = 1;
 		return;
 	case M_HC_POWER:
 		model_set(p, size, val);
 		if (val & 1u) {
-			/* The bus goes up: the controller asks for the bus on
-			 * transaction and latches it in the PWRCTL status. */
-			model_pwr_on = 1;
-			model_pwr_tsc = (uint32_t)model_ticks();
+			/* The bus goes up: the controller latches the bus-on
+			 * transaction in the PWRCTL status. */
+			if (win == 4) {
+				model_set(model_sd2_core + M_CORE_STATUS, 4,
+					  model_get(model_sd2_core + M_CORE_STATUS, 4) |
+					  PWRCTL_BUS_ON);
+				return;
+			}
 			model_set(model_core + M_CORE_STATUS, 4,
 				  model_get(model_core + M_CORE_STATUS, 4) |
 				  PWRCTL_BUS_ON);
@@ -464,6 +643,13 @@ static void model_write_reg(unsigned win, unsigned off, unsigned size,
 		return;
 	case M_HC_COMMAND:
 		model_set(p, size, val);
+		if (win == 4) {
+			model_sd2_cmd_index = (val >> 8) & 0xffu;
+			model_sd2_cmd_flags = val & 0xffu;
+			model_sd2_cmd_arg = model_get(model_sd2_hc + M_HC_ARGUMENT, 4);
+			model_sd2_cmd_pending = 1;
+			return;
+		}
 		model_cmd_index = (val >> 8) & 0xffu;
 		model_cmd_flags = val & 0xffu;
 		model_cmd_arg = model_get(model_hc + M_HC_ARGUMENT, 4);
@@ -544,6 +730,8 @@ static int model_window(uintptr_t a, unsigned *win, unsigned *off)
 	uintptr_t core = G4_EMMC_CORE_BASE;
 	uintptr_t hc = G4_EMMC_BASE;
 	uintptr_t gcc = G4_GCC_BASE;
+	uintptr_t sd2_core = G4_SD_CORE_BASE;
+	uintptr_t sd2_hc = G4_SD_BASE;
 
 	if (a >= core && a < core + MODEL_CORE_SIZE) {
 		*win = 0;
@@ -560,6 +748,22 @@ static int model_window(uintptr_t a, unsigned *win, unsigned *off)
 		*off = (unsigned)(a - gcc);
 		return 1;
 	}
+	/*
+	 * The SDCC2 windows are served ONLY when the clock branch is on:
+	 * without it an access would not complete, exactly like on the phone.
+	 */
+	if (model_sd2_clocked) {
+		if (a >= sd2_core && a < sd2_core + MODEL_SD2_CORE_SIZE) {
+			*win = 3;
+			*off = (unsigned)(a - sd2_core);
+			return 1;
+		}
+		if (a >= sd2_hc && a < sd2_hc + MODEL_SD2_HC_SIZE) {
+			*win = 4;
+			*off = (unsigned)(a - sd2_hc);
+			return 1;
+		}
+	}
 	return 0;
 }
 
@@ -572,6 +776,7 @@ uint32_t emmc_model_rd(uintptr_t a, unsigned size)
 		return *(volatile uint32_t *)a;
 
 	model_poll();
+	model_sd2_poll();
 	v = model_read_reg(win, off, size);
 	model_log_add(0, win, off, size, v);
 	return v;
@@ -587,6 +792,7 @@ void emmc_model_wr(uintptr_t a, unsigned size, uint32_t v)
 	}
 
 	model_poll();
+	model_sd2_poll();
 	model_write_reg(win, off, size, v);
 	model_log_add(1, win, off, size, v);
 }
@@ -642,6 +848,23 @@ void emmc_model_config(uintptr_t dtb)
 
 	model_mode = MODEL_MUTE;
 	model_delay_ms = 100;
+	model_sd2_clocked = 0;
+	model_sd2_cmd_pending = 0;
+	model_sd2_app_prefix = 0;
+	model_sd2_rca = 1;
+	model_sd2_data_len = 0;
+	model_sd2_data_pos = 0;
+	model_sd2_disk_valid = 0;
+	/* The CID and the CSD of the model card: the CID is the one of the
+	 * microSD of the phone (SS32G), the CSD is a plausible SDHC one. */
+	model_sd2_cid[0] = 0x03534453;
+	model_sd2_cid[1] = 0x53333247;
+	model_sd2_cid[2] = 0x80a46843;
+	model_sd2_cid[3] = 0x0e010a00;
+	for (unsigned i = 0; i < 16; i++)
+		model_sd2_csd[i] = 0;
+	model_sd2_csd[0] = 0x40;		/* the structure of the CSD */
+	model_sd2_csd[1] = 0x0e;		/* CSD version 2.0 (SDHC)  */
 	model_pwr_on = 0;
 	model_ack_seen = 0;
 	model_cmd_pending = 0;

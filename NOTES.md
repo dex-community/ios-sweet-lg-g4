@@ -1786,3 +1786,74 @@ e' stato allargato a 0x2000, la dimensione reale della finestra GCC
    recovery (`tools/read-mmc-registers.sh`), dove c'e' un kernel vero.
 
 Guida completa: `GUIDE-05-MMIO-SAFE.md`.
+
+---
+
+## Sessione 2026-11-09, terza parte: T3, la bring-up della microSD (shim/sd.c)
+
+FATTO: il codice che inizializza lo slot microSD (SDCC2) e' scritto, e
+**testato in QEMU**. Non e' ancora stato provato sul telefono: per quello
+servono le misure dalla recovery (i pin SDC2 sono muxati su SDC2?).
+
+### FATTO — l'ordine che conta, e come e' verificato
+
+Il codice fa, in quest'ordine:
+
+1. i branch GCC di SDCC2 (AHB prima, poi apps);
+2. il clock della carta a **400 kHz**, via il RCG del GCC
+   (CFG[4:0]=23, CFG[10:8]=0 XO, M=1, N=0xFFFFFFFC, D=0xFFFFFFFB:
+   l'entrata F(400000, gcc_xo, 12, 1, 4) di ftbl_sdcc2_4_apps_clk_src,
+   clock-gcc-8992.c:1125);
+3. **solo dopo** il controller: HC mode, core reset, software reset, bus power;
+4. i comandi, nell'ordine del core CAF: CMD0, CMD8 (0x1AA), CMD55+ACMD41
+   (OCR 0x40ff8080, 100 tentativi con 10 ms), CMD2, CMD3, CMD7, CMD16, CMD17.
+
+Il **modello QEMU di SDCC2 riproduce lo stall**: le finestre di SDCC2 non
+sono servite finche' il branch dei clock non e' acceso, quindi un ordine
+sbagliato fa fallire il test invece di bloccare il telefono. E' il test che
+mancava il 2026-11-09.
+
+FATTO (test `tools/qemu-sd.py`, tutti i check verdi):
+
+```
+ok  : the clock (seq 269) comes before the controller (seq 280)
+ok  : the command sequence is [0, 8, 55, 41, 2, 3, 7, 16, 17]
+ok  : the RCG of SDCC2 is programmed for 400 kHz
+ok  : 768 words came out of the buffer port
+ok  : SD rca=00000000 cid=03534453
+ok  : SD ocr=C0FF8080 stage=0000000F
+```
+
+FATTO: i due check sugli altri percorsi restano verdi: la protezione MMIO
+(`tools/qemu-mmio-guard.py`) e il percorso eMMC (`tools/qemu-emmc.py --mode
+always`: 13 comandi, 768 parole al buffer).
+
+### I quattro bug che i test hanno trovato (tutti miei)
+
+1. **`emmc_model.inc`, ramo `win == 1` dimenticato**: riscrivendo
+   `model_write_reg()` per aggiungere le finestre di SDCC2 ho perso il ramo
+   dell'host eMMC: tutte le sue scritture finivano nel ramo del GCC e la
+   carta non rispondeva piu'. Trovato dal test del percorso eMMC.
+2. **`sd.c`, accessori non sorvegliati dal modello**: usavano
+   `mmio_rd32()` (accesso diretto) invece degli accessori del modello, quindi
+   nel QEMU finivano all'indirizzo reale: `PANIC SYNC, FAR=0xfc400508`. La
+   lezione e' gia' stata scritta: nel build QEMU gli accessi devono passare
+   dal modello, come quelli di emmc.c.
+3. **`sd_read_block()` aspettava `XFER_DONE` prima di leggere il buffer**: il
+   trasferimento finisce *mentre* si legge. L'ordine giusto (risposta del
+   comando, poi R1, poi lettura con `DATA_AVAILABLE`) e' quello di
+   `emmc_xfer()`, il riferimento collaudato.
+4. **il self-test usava SDCC2 come finestra vietata**: ora SDCC2 e' in
+   allowlist (il kernel Android la guida a ogni boot), quindi il self-test
+   usa il TLMM (0xfd510000), che resta fuori allowlist ed e' la seconda
+   finestra che ha bloccato il telefono.
+
+### Lo stato della build
+
+- `SHIM_SD_INIT=0` (default): la bring-up della SD **non** parte. La build
+  per il telefono resta quella collaudata.
+- `SHIM_SD_INIT=1`: parte dopo l'eMMC e prima della scrittura del pstore,
+  cosi' il suo esito finisce nel record che sopravvive al reset.
+
+FATTO: il self-test della allowlist e' passato con **3 refuse** (la
+scrittura, la lettura e la seconda lettura sul TLMM).

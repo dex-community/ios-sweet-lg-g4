@@ -21,12 +21,22 @@
  * The shim may only touch:
  *
  *   - the DEVICE windows in the table below, for reads and writes. They are
- *     the windows this shim has already driven successfully on this phone:
+ *     the windows this shim has already seen ALIVE on this phone:
  *     the eMMC host (the LK reads the boot image from the card with it, and
  *     the bring-up drives it at every run), the global clock controller (the
  *     LK enables the SDCC1 clocks in it), the watchdog (the register layout
  *     is from the CAF driver), the IMEM (the restart reason and the trail),
- *     the GIC and PSHOLD;
+ *     the GIC, PSHOLD and the two SDCC2 windows;
+ *
+ *     On the SDCC2 windows the criterion is the same one, and it holds:
+ *     at every boot with the microSD inserted, the Android kernel drives
+ *     that controller (it identifies the card, reads its CSD and writes on
+ *     it), so the window is alive. Its clock is the GCC branch that the
+ *     shim turns on FIRST, before touching the controller: that order is
+ *     exactly what the two hangs were missing, because a write to a
+ *     controller whose clock is off never completes. The QEMU model of the
+ *     controller REPRODUCES the stall (an access without the clock does
+ *     not complete), so the order is verified offline by tools/qemu-sd.py;
  *   - the MEMORY windows, for reads and writes. They are plain RAM: the
  *     shim image, the device tree the bootloader hands over, the ramoops
  *     zone, the scratch copy of the log and the two RAM banks. Reading or
@@ -60,7 +70,7 @@
  * and the image runs wherever the bootloader puts it, with no relocation
  * pass at all.
  */
-#define MMIO_DEV_N	7
+#define MMIO_DEV_N	9
 
 static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xf9824000UL,	/* 0: the eMMC core window ("core_mem", 0x800)  */
@@ -70,11 +80,14 @@ static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xfe80f000UL,	/* 4: the IMEM (the restart reason, the trail)  */
 	0xf9000000UL,	/* 5: the GIC (distributor + redistributor)     */
 	0xfc4ab000UL,	/* 6: PSHOLD (the reset request)                */
+	0xf98a4000UL,	/* 7: the SDCC2 core window (the microSD slot)  */
+	0xf98a4900UL,	/* 8: the SDCC2 host window (the microSD slot)  */
 };
 
 static const uint32_t mmio_dev_size[MMIO_DEV_N] = {
 	0x00000800UL, 0x000001a0UL, 0x00002000UL, 0x00001000UL,
-	0x00001000UL, 0x00003000UL, 0x00001000UL,
+	0x00001000UL, 0x00003000UL, 0x00001000UL, 0x00000800UL,
+	0x00000100UL,
 };
 
 /* The MEMORY windows: plain RAM, harmless to read and to write. */

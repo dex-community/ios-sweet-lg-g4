@@ -66,10 +66,18 @@ unsigned mmio_denied_count;
 #if SHIM_MMIO_SELFTEST
 
 /*
- * The window that hung the phone: the SDCC2 host. It is NOT in the
- * allowlist: nobody ever drove it successfully.
+ * A window that is NOT in the allowlist: the TLMM (the pin mux). It is the
+ * second window that hung the phone (2026-11-09: reading it stalled the
+ * bus), and nothing in the shim has ever driven it: the pin mux is done by
+ * the kernel, and the measurements that need it are taken from the
+ * recovery.
+ *
+ * (The first version of this test used SDCC2, 0xf98a4900, which was the
+ * window that hung the phone the first time. SDCC2 has since been added to
+ * the allowlist, because the Android kernel drives it at every boot, so it
+ * is no longer a forbidden window.)
  */
-#define SELFTEST_FORBIDDEN	0xf98a4900UL
+#define SELFTEST_FORBIDDEN	0xfd510000UL
 /* A window the shim really uses: the SDCC1 apps clock branch. */
 #define SELFTEST_ALLOWED	0xfc4004c4UL
 

@@ -39,6 +39,8 @@ SHIM = os.path.join(ROOT, 'shim')
 DEV_WINDOWS = [
     (0xf9824000, 0x0800, 'the eMMC core'),
     (0xf9824900, 0x01a0, 'the eMMC host'),
+    (0xf98a4000, 0x0800, 'the SDCC2 core'),
+    (0xf98a4900, 0x0100, 'the SDCC2 host'),
     (0xfc400000, 0x2000, 'the GCC'),
     (0xf9017000, 0x1000, 'the watchdog'),
     (0xf9000000, 0x3000, 'the GIC'),
