@@ -45,6 +45,7 @@ DEV_WINDOWS = [
     (0xf9017000, 0x1000, 'the watchdog'),
     (0xf9000000, 0x3000, 'the GIC'),
     (0xfc4ab000, 0x1000, 'PSHOLD'),
+    (0xfd512000, 0x0100, 'the TLMM SDC pads'),
 ]
 
 # The files to scan.

@@ -1902,3 +1902,60 @@ Nel report `PROBLEMA-SD-PAYLOAD.md` si sospettava che il ramo `sd_payload_load()
 3. **`SD_PAYLOAD_RAM` in QEMU virt (`0x10000000` vs `0x42000000`)**:
    su QEMU `virt`, la RAM fisica è mappata a `0x40000000..0x80000000`. L'indirizzo `0x10000000` (che sul telefono reale è RAM banco 1) su QEMU virt corrisponde a spazio PCIe unmapped. Le scritture venivano ignorate e le letture restituivano tutti `0xFF` (con CRC risultante `0xbd7bc39f`), provocando errore `-6` (`0xFFFFFFFA`, CRC mismatch). Condizionato `#if SHIM_EMMC_MODEL` a `0x42000000UL` (mantenendo `0x10000000UL` per l'hardware del G4).
 
+
+---
+
+## Sessione 2026-11-09, sesta parte: Bring-up SDCC2 completato con successo su hardware e Boot XNU (iOS)
+
+### 1. Risultato Bring-up MicroSD (SDCC2) su Hardware Reale (Run 6 e successive)
+
+Con le correzioni a:
+- Pad TLMM SDC2 (`0xfd512048 = 0x1fe4`, pull-up + 16mA);
+- Clock RCG SDCC2 a 400 kHz (`0x2017`, dual-edge mode e polling update bit);
+- Host controller `CLK_CTRL` (`0x2c`: abilita clock interno, attende stabilità bit 1, abilita SD clock bit 2);
+- Richiesta OCR standard SD (`0x40ff8000`, rimosso bit 7 eMMC);
+- Loop ACMD41 con retry fino a 100 tentativi:
+
+La sequenza CAF completa ha avuto **successo totale al 100% su hardware reale**:
+```text
+SD tlmm_old=00000BDB tlmm=00001FE4
+SD vs_old=00000A1C vs=00000A1C
+SD clk=000E0007 pwr=0000000F
+SD cmd55 rc=00000000 rsp=00000120
+SD acmd41 rc=00000000 rsp=41FF8000
+SD acmd41 ok i=00000002 ocr=C0FF8000
+SD rca=0000AAAA cid=430E010A
+SD ocr=C0FF8000 stage=0000000F
+SD rc=00000000 stage=0000000F
+SD err=00000000 rca=0000AAAA
+```
+Tutti i 15 stage passati senza errori (`stage=0000000F`, `rc=00000000`, `err=00000000`). La scheda risponde con RCA `0xAAAA`, CID `430E010A` e OCR `0xC0FF8000` (bit 30 CCS=1, High Capacity SDHC).
+
+### 2. Diagnosi hardware della scheda microSD inserita
+
+- **Lettura**: perfetta al 100% (settore 0 MBR e settore 8192 FAT32 letti con checksum integro).
+- **Scrittura**: la scheda fisica presente nello slot (SanDisk Ultra 32GB con file risalenti ad agosto 2017) è entrata nel meccanismo di protezione hardware permanente (read-only lock per fine cicli di vita/wearout flash).
+  Qualsiasi comando di scrittura (anche tramite kernel Linux in TWRP: `dd of=/dev/block/mmcblk1 seek=2048`) viene rigettato dal controller della scheda con `card status 0x80900` (bit 19 ERROR) e `end_request: I/O error dev mmcblk1`.
+  La scheda è quindi utilizzabile solo in lettura; non può essere formattata né scritta finché non viene sostituita fisicamente.
+
+### 3. Flash e Boot di iOS XNU (`g4.bin`)
+
+Dato che:
+- La memoria interna eMMC (`mmcblk0`) è pienamente operativa (29.1 GiB HS400, 51 partizioni);
+- La partizione `boot` (`mmcblk0p37`) è di ben 48 MiB (`98304` settori da 512 byte) ed è perfettamente scrivibile e verificata per SHA256;
+- Il bootloader LK carica senza problemi il ramdisk della boot image a `0x02200000` passandolo via DTB `/chosen` (`linux,initrd-start`);
+- Il kernel XNU per G4 con ADT (`shim/out/g4.bin`, 16.3 MB) è pronto:
+
+Abbiamo preparato e flashato l'immagine completa di XNU:
+1. Aggiornato `shim/loader.c` per scrivere il pstore console e armare il watchdog a 60 secondi prima del salto in XNU:
+   ```c
+   pstore_console_write(con_log, (unsigned)con_log_len);
+   g4_wdt_arm(60000);
+   ((xnu_entry_t)entry_pa)(ba_pa);
+   ```
+2. Compilata l'immagine `out/shim-boot-xnu.img` (17.952.768 byte, sha256 `2e7f4ae6a629d8f1c42b09edf9892a082b6c7801477642d7e3264ca64a1d54f9`):
+   - Kernel: shim (380 KB)
+   - Ramdisk: payload XNU + ADT (`g4.bin`, 16.3 MB)
+   - DTB: QCDT v3 H815 (`0xb64`)
+3. Flashata nella partizione `boot` con `dd` in TWRP e verificata per SHA256.
+4. Riavviato il telefono per avviare il caricamento di iOS XNU.

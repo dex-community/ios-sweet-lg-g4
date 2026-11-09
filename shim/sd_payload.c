@@ -55,6 +55,11 @@ int sd_payload_load(void)
 		return sd_payload_error;
 	}
 
+	uint32_t m0 = *(uint32_t *)&hdr.magic[0];
+	uint32_t m4 = *(uint32_t *)&hdr.magic[4];
+	con_hex2("SDPAY", "m0=", m0, "m4=", m4);
+	con_hex2("SDPAY", "v=", hdr.version, "len=", hdr.len);
+
 	for (unsigned i = 0; i < 8; i++) {
 		if (hdr.magic[i] != SD_PAYLOAD_MAGIC[i]) {
 			sd_payload_error = -2;	/* no payload on the card */

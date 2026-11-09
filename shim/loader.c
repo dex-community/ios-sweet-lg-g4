@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include "console.h"
 #include "fdt.h"
+#include "pstore.h"
+#include "wdt.h"
 #include "loader.h"
 
 #define BOOT_LINE_LENGTH	608
@@ -156,6 +158,13 @@ const char *loader_boot(uintptr_t dtb)
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
+
+#if SHIM_HW_DIAG
+	pstore_console_write(con_log, (unsigned)con_log_len);
+#if SHIM_WDT_GUARD
+	g4_wdt_arm(60000);
+#endif
+#endif
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");

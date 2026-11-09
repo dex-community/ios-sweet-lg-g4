@@ -37,8 +37,8 @@ _spec = importlib.util.spec_from_file_location(
 qemu_emmc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(qemu_emmc)
 
-# The window numbers of the model: 0 CORE, 1 HC, 2 GCC, 3 SD2 CORE, 4 SD2 HC.
-WIN = {0: 'CORE', 1: 'HC', 2: 'GCC', 3: 'SD2CORE', 4: 'SD2HC'}
+# The window numbers of the model: 0 CORE, 1 HC, 2 GCC, 3 SD2 CORE, 4 SD2 HC, 5 TLMM.
+WIN = {0: 'CORE', 1: 'HC', 2: 'GCC', 3: 'SD2CORE', 4: 'SD2HC', 5: 'TLMM'}
 
 SD2_CORE = 0xf98a4000
 SD2_HC = 0xf98a4900
@@ -133,10 +133,10 @@ def main():
         cfg = rcg.get(0x514)
         m = rcg.get(0x518)
         n = rcg.get(0x51c)
-        ok = (cfg == 0x17 and m == 1 and (n & 0xffffffff) == 0xfffffffc)
+        ok = (cfg in (0x17, 0x2017) and m == 1 and (n & 0xffffffff) == 0xfffffffc)
         if not ok:
             failures.append('the RCG of SDCC2 is CFG=0x%x M=0x%x N=0x%x, '
-                            'expected 0x17 / 1 / 0xfffffffc'
+                            'expected 0x17/0x2017 / 1 / 0xfffffffc'
                             % (cfg or 0, m or 0, n or 0))
         else:
             print('ok  : the RCG of SDCC2 is programmed for 400 kHz')

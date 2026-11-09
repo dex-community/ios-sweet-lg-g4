@@ -65,6 +65,12 @@
 #define SD_HC_CAPS1	0x40
 #define SD_HC_CAPS2	0x44
 #define SD_HC_VENDOR	0x10c
+#define SD_VENDOR_CLK_PWRSAVE		(1u << 1)
+#define SD_VENDOR_HC_MCLK_SEL_MASK	(3u << 8)
+#define SD_VENDOR_HC_MCLK_SEL_DFLT	(2u << 8)
+#define SD_VENDOR_IO_PAD_PWR_SWITCH	(1u << 16)
+#define SD_VENDOR_HC_SELECT_IN_EN	(1u << 18)
+#define SD_VENDOR_HC_SELECT_IN_MASK	(7u << 19)
 
 #define SD_CORE_POWER	0x00
 #define SD_CORE_HC_MODE	0x78
@@ -85,6 +91,12 @@
 #define SD_GCC_APPS_CBCR 0x504
 #define SD_GCC_AHB_CBCR	0x508
 
+/* TLMM base and SDC2 pad configuration register */
+#ifndef G4_TLMM_BASE
+#define G4_TLMM_BASE	0xfd510000UL
+#endif
+#define TLMM_SDC2_CFG	0x2048
+
 /* The commands. */
 #define SD_CMD_GO_IDLE		0
 #define SD_CMD_ALL_SEND_CID	2
@@ -103,10 +115,24 @@
 #define SD_RESP_136	0x01
 #define SD_RESP_48	0x02
 #define SD_RESP_48BUSY	0x03
-#define SD_RESP_R7	0x05	/* R7: like R1 but 4 bytes */
 #define SD_CRC_CHECK	0x08
 #define SD_IDX_CHECK	0x10
 #define SD_DATA_PRESENT	0x20
+
+/* Response profiles:
+ * - R1:  48-bit with CRC and Index check (CMD55, CMD16, CMD17)
+ * - R1b: 48-bit with Busy, CRC and Index check (CMD7)
+ * - R2:  136-bit with CRC check, no Index check (CMD2, CMD9)
+ * - R3:  48-bit OCR, NO CRC and NO Index check (ACMD41)
+ * - R6:  48-bit RCA with CRC and Index check (CMD3)
+ * - R7:  48-bit interface condition with CRC and Index check (CMD8)
+ */
+#define SD_RESP_R1	(SD_RESP_48 | SD_CRC_CHECK | SD_IDX_CHECK)
+#define SD_RESP_R1B	(SD_RESP_48BUSY | SD_CRC_CHECK | SD_IDX_CHECK)
+#define SD_RESP_R2	(SD_RESP_136 | SD_CRC_CHECK)
+#define SD_RESP_R3	(SD_RESP_48)
+#define SD_RESP_R6	(SD_RESP_48 | SD_CRC_CHECK | SD_IDX_CHECK)
+#define SD_RESP_R7	(SD_RESP_48 | SD_CRC_CHECK | SD_IDX_CHECK)
 
 /* The interrupt status bits. */
 #define SD_INT_CMD_DONE	0x00000001u
@@ -117,11 +143,9 @@
 #define SD_CMD_TIMEOUT_US	1000000u
 #define SD_XFER_TIMEOUT_US	2000000u
 
-/* The OCR we ask for: HCS (bit 30), 2.7-3.6 V (0xFF0000), S4 (bit 15) and
- * S18 (bit 7). The CAF core builds it from the voltages of the device
- * tree (qcom,vdd-io-voltage-level = 1.8-2.95 V) and sets the CCS bit
- * only after CMD8 has answered (sd.c:829-831). */
-#define SD_OCR_REQ	0x40ff8080u
+/* The OCR we ask for: HCS (bit 30) and 2.7-3.6 V window (bits 23:15 = 0xFF8000).
+ * Bits 0-14 are reserved for SD cards (bit 7 is eMMC dual-voltage only). */
+#define SD_OCR_REQ	0x40ff8000u
 
 /* The card state (R1): the state is bits 12:9, READY_FOR_DATA is bit 8. */
 #define SD_R1_STATE(r)		(((r) >> 9) & 0xfu)
@@ -283,17 +307,13 @@ static void sd_reset_lines(void)
 }
 
 /*
- * One command. resp_type is one of the SD_RESP_* values; 'rsp' gets the
- * first word of the response. Returns 0 on success.
+ * One command. flags is a combination of SD_RESP_* / SD_CRC_CHECK / SD_IDX_CHECK;
+ * 'rsp' gets the first word of the response. Returns 0 on success.
  */
-static int sd_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
+static int sd_cmd(uint8_t index, uint32_t argument, uint32_t flags,
 		  uint32_t *rsp)
 {
-	uint32_t flags = resp_type & 0x03u;
 	uint32_t status;
-
-	if (resp_type == SD_RESP_48 || resp_type == SD_RESP_48BUSY)
-		flags |= SD_CRC_CHECK | SD_IDX_CHECK;
 
 	/* Wait for the command line to be free. */
 	{
@@ -303,6 +323,8 @@ static int sd_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 		while (sd_rd32(SD_HC + SD_HC_PRESENT) & 0x3u) {
 			if (sd_ticks() >= end) {
 				sd_reset_lines();
+				con_hex2("SDCMD", "idx=", index, "busy pres=",
+					 sd_rd32(SD_HC + SD_HC_PRESENT));
 				return -1;
 			}
 		}
@@ -320,19 +342,25 @@ static int sd_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 
 		for (;;) {
 			status = sd_rd32(SD_HC + SD_HC_INT_STATUS);
-			if (status & SD_INT_ERR_MASK)
+			if (status & SD_INT_ERR_MASK) {
+				con_hex2("SDCMD", "idx=", index, "err int=", status);
+				sd_reset_lines();
 				return -3;
+			}
 			if (status & SD_INT_CMD_DONE)
 				break;
-			if (sd_ticks() >= end)
+			if (sd_ticks() >= end) {
+				con_hex2("SDCMD", "idx=", index, "timeout int=", status);
+				sd_reset_lines();
 				return -2;
+			}
 		}
 	}
 
 	if (rsp)
 		*rsp = sd_rd32(SD_HC + SD_HC_RESPONSE);
 	sd_wr32(SD_HC + SD_HC_INT_STATUS, SD_INT_CMD_DONE);
-	if (resp_type == SD_RESP_48BUSY) {
+	if ((flags & 0x03u) == SD_RESP_48BUSY) {
 		/* The card holds DAT0 low while it is busy. */
 		uint64_t end = sd_ticks() + (uint64_t)sd_tick_hz() * 3000000u /
 			       1000000u;
@@ -361,6 +389,16 @@ int sd_read_block(uint32_t lba, uint8_t *out)
 	uint32_t status;
 	uint64_t end;
 	unsigned i;
+
+	/* Wait for CMD and DATA lines to be free. */
+	end = sd_ticks() + (uint64_t)sd_tick_hz() * SD_CMD_TIMEOUT_US / 1000000u;
+	while (sd_rd32(SD_HC + SD_HC_PRESENT) & 0x3u) {
+		if (sd_ticks() >= end) {
+			sd_reset_lines();
+			con_hex2("SDRD", "busy pres=", sd_rd32(SD_HC + SD_HC_PRESENT), "lba=", lba);
+			return -1;
+		}
+	}
 
 	sd_wr16(SD_HC + SD_HC_BLK_SIZE, 0x0200);
 	sd_wr16(SD_HC + SD_HC_BLK_COUNT, 1);
@@ -406,6 +444,25 @@ int sd_read_block(uint32_t lba, uint8_t *out)
 		out[i * 4 + 2] = (uint8_t)(w >> 16);
 		out[i * 4 + 3] = (uint8_t)(w >> 24);
 	}
+
+	/* Wait for the transfer to complete. */
+	end = sd_ticks() + (uint64_t)sd_tick_hz() * SD_XFER_TIMEOUT_US / 1000000u;
+	for (;;) {
+		status = sd_rd32(SD_HC + SD_HC_INT_STATUS);
+		if (status & SD_INT_ERR_MASK) {
+			con_hex2("SDRD", "xfer err int=", status, "lba=", lba);
+			sd_reset_lines();
+			return -3;
+		}
+		if (status & SD_INT_XFER_DONE)
+			break;
+		if (sd_ticks() >= end) {
+			con_hex2("SDRD", "xfer timeout int=", status, "lba=", lba);
+			sd_reset_lines();
+			return -2;
+		}
+	}
+	sd_wr32(SD_HC + SD_HC_INT_STATUS, SD_INT_XFER_DONE);
 	sd_ack();
 	return 0;
 }
@@ -445,8 +502,13 @@ static void sd_gcc_set_400k(void)
 	sd_wr32(r + 0x08, 0x00000001u);		/* M = 1                */
 	sd_wr32(r + 0x0c, 0xfffffffcu);		/* N = ~3               */
 	sd_wr32(r + 0x10, 0xfffffffbu);		/* D = ~4               */
-	sd_wr32(r + 0x04, 0x00000017u);		/* CFG: div 23, src XO   */
-	sd_wr32(r + 0x00, 0x00000001u);		/* CMD_RCGR: enable     */
+	sd_wr32(r + 0x04, 0x00002017u);		/* CFG: MND dual-edge mode (0x2000), div 23, src XO */
+	sd_wr32(r + 0x00, sd_rd32(r + 0x00) | 1u); /* CMD_RCGR: update bit 0 */
+	for (int i = 0; i < 500; i++) {
+		if (!(sd_rd32(r + 0x00) & 1u))
+			break;
+		sd_delay_us(1);
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -462,6 +524,18 @@ int sd_init(uint8_t *block0)
 	sd_init_stage = 0;
 	sd_init_error = 0;
 	sd_rca = 0;
+
+	/*
+	 * (0) Configure TLMM pads for SDC2 (microSD).
+	 * In sleep state, pads are 2mA with no pull on CLK.
+	 * Active state (0x1fe4):
+	 *   CLK:  16mA drive (7 << 6), no pull (0 << 14)
+	 *   CMD:  10mA drive (4 << 3), pull-up (3 << 11)
+	 *   DATA: 10mA drive (4 << 0), pull-up (3 << 9)
+	 */
+	uint32_t tlmm_old = sd_rd32(G4_TLMM_BASE + TLMM_SDC2_CFG);
+	sd_wr32(G4_TLMM_BASE + TLMM_SDC2_CFG, 0x00001fe4u);
+	con_hex2("SD", "tlmm_old=", tlmm_old, "tlmm=", sd_rd32(G4_TLMM_BASE + TLMM_SDC2_CFG));
 
 	/* (1) THE CLOCK FIRST. */
 	SD_STEP(SD_STEP_CLOCK_AHB);
@@ -488,6 +562,19 @@ int sd_init(uint8_t *block0)
 	sd_wr32(SD_CORE + SD_CORE_HC_MODE,
 		sd_rd32(SD_CORE + SD_CORE_HC_MODE) | SD_FF_CLK_SW_RST_DIS);
 
+	/* Configure Qualcomm vendor register: free running MCLK, clear PWRSAVE so clock reaches the card */
+	{
+		uint32_t vs = sd_rd32(SD_HC + SD_HC_VENDOR);
+		uint32_t old_vs = vs;
+		vs = (vs & ~SD_VENDOR_HC_MCLK_SEL_MASK) | SD_VENDOR_HC_MCLK_SEL_DFLT;
+		vs &= ~SD_VENDOR_CLK_PWRSAVE;
+		vs &= ~SD_VENDOR_HC_SELECT_IN_EN;
+		vs &= ~SD_VENDOR_HC_SELECT_IN_MASK;
+		vs &= ~SD_VENDOR_IO_PAD_PWR_SWITCH;
+		sd_wr32(SD_HC + SD_HC_VENDOR, vs);
+		con_hex2("SD", "vs_old=", old_vs, "vs=", sd_rd32(SD_HC + SD_HC_VENDOR));
+	}
+
 	SD_STEP(SD_STEP_SW_RESET);
 	sd_wr8(SD_HC + SD_HC_SWRST, 1);
 	{
@@ -499,6 +586,17 @@ int sd_init(uint8_t *block0)
 			sd_init_error = -10;	/* the reset never completed */
 			return sd_init_error;
 		}
+	}
+
+	/* Re-apply vendor spec after reset */
+	{
+		uint32_t vs = sd_rd32(SD_HC + SD_HC_VENDOR);
+		vs = (vs & ~SD_VENDOR_HC_MCLK_SEL_MASK) | SD_VENDOR_HC_MCLK_SEL_DFLT;
+		vs &= ~SD_VENDOR_CLK_PWRSAVE;
+		vs &= ~SD_VENDOR_HC_SELECT_IN_EN;
+		vs &= ~SD_VENDOR_HC_SELECT_IN_MASK;
+		vs &= ~SD_VENDOR_IO_PAD_PWR_SWITCH;
+		sd_wr32(SD_HC + SD_HC_VENDOR, vs);
 	}
 
 	/* The interrupts we poll have to be latched. */
@@ -537,6 +635,21 @@ int sd_init(uint8_t *block0)
 		trail(0x2505, sd_rd8(SD_HC + SD_HC_POWER));
 	}
 
+	/* (2b) Enable the SD controller clock and wait for it to stabilize. */
+	sd_wr16(SD_HC + SD_HC_CLK_CTRL, 1);		/* internal clock enable */
+	for (int i = 0; i < 200; i++) {
+		if (sd_rd16(SD_HC + SD_HC_CLK_CTRL) & 2u)	/* clock stable */
+			break;
+		sd_delay_us(100);
+	}
+	sd_wr16(SD_HC + SD_HC_CLK_CTRL,
+		sd_rd16(SD_HC + SD_HC_CLK_CTRL) | 4u);	/* SD clock enable */
+	sd_wr8(SD_HC + 0x2e, 0x0e);			/* data timeout: max */
+	sd_delay_us(10000);				/* 74+ card clocks */
+
+	con_hex2("SD", "clk=", sd_rd32(SD_HC + SD_HC_CLK_CTRL), "pwr=",
+		 sd_rd8(SD_HC + SD_HC_POWER));
+
 	/* (3) the commands, in the order of the CAF core. */
 	SD_STEP(SD_STEP_CMD0);
 	rc = sd_cmd(SD_CMD_GO_IDLE, 0, SD_RESP_NONE, 0);
@@ -554,7 +667,7 @@ int sd_init(uint8_t *block0)
 	}
 	trail(0x2506, rsp);
 
-	/* ACMD41: CMD55 with arg 41, then CMD41 with the OCR. Up to 100
+	/* ACMD41: CMD55 with arg 0, then ACMD41 with the OCR. Up to 100
 	 * tries, 10 ms apart (sd_ops.c:150). */
 	SD_STEP(SD_STEP_ACMD41);
 	{
@@ -562,15 +675,25 @@ int sd_init(uint8_t *block0)
 		int ready = 0;
 
 		for (i = 0; i < 100; i++) {
-			rc = sd_cmd(SD_CMD_APP, SD_CMD_APP_OP_COND, SD_RESP_R7, &rsp);
-			if (rc)
-				break;
-			rc = sd_cmd(SD_CMD_APP_OP_COND, SD_OCR_REQ, SD_RESP_48, &rsp);
-			if (rc)
-				break;
+			rc = sd_cmd(SD_CMD_APP, 0, SD_RESP_R1, &rsp);
+			if (i == 0)
+				con_hex2("SD", "cmd55 rc=", (uint32_t)rc, "rsp=", rsp);
+			if (rc) {
+				sd_delay_us(10000);
+				continue;
+			}
+			sd_delay_us(1000);
+			rc = sd_cmd(SD_CMD_APP_OP_COND, SD_OCR_REQ, SD_RESP_R3, &rsp);
+			if (i == 0)
+				con_hex2("SD", "acmd41 rc=", (uint32_t)rc, "rsp=", rsp);
+			if (rc) {
+				sd_delay_us(10000);
+				continue;
+			}
 			sd_ocr = rsp;
 			if (rsp & 0x80000000u) {	/* power-up complete */
 				ready = 1;
+				con_hex2("SD", "acmd41 ok i=", (uint32_t)i, "ocr=", rsp);
 				break;
 			}
 			sd_delay_us(10000);
@@ -584,7 +707,7 @@ int sd_init(uint8_t *block0)
 
 	/* CMD2: the CID. */
 	SD_STEP(SD_STEP_CMD2);
-	rc = sd_cmd(SD_CMD_ALL_SEND_CID, 0, SD_RESP_136, &rsp);
+	rc = sd_cmd(SD_CMD_ALL_SEND_CID, 0, SD_RESP_R2, &rsp);
 	if (rc) {
 		sd_init_error = -23;
 		return sd_init_error;
@@ -593,7 +716,7 @@ int sd_init(uint8_t *block0)
 
 	/* CMD3: the relative address. */
 	SD_STEP(SD_STEP_CMD3);
-	rc = sd_cmd(SD_CMD_SET_REL_ADDR, 0, SD_RESP_R7, &rsp);
+	rc = sd_cmd(SD_CMD_SET_REL_ADDR, 0, SD_RESP_R6, &rsp);
 	if (rc) {
 		sd_init_error = -24;
 		return sd_init_error;
@@ -603,7 +726,7 @@ int sd_init(uint8_t *block0)
 
 	/* CMD7: select the card. */
 	SD_STEP(SD_STEP_CMD7);
-	rc = sd_cmd(SD_CMD_SELECT, (uint32_t)sd_rca << 16, SD_RESP_48BUSY, &rsp);
+	rc = sd_cmd(SD_CMD_SELECT, (uint32_t)sd_rca << 16, SD_RESP_R1B, &rsp);
 	if (rc) {
 		sd_init_error = -25;
 		return sd_init_error;
@@ -618,7 +741,7 @@ int sd_init(uint8_t *block0)
 
 	/* CMD16: the block length (512). */
 	SD_STEP(SD_STEP_CMD16);
-	rc = sd_cmd(SD_CMD_SET_BLOCKLEN, 512, SD_RESP_R7, &rsp);
+	rc = sd_cmd(SD_CMD_SET_BLOCKLEN, 512, SD_RESP_R1, &rsp);
 	if (rc) {
 		sd_init_error = -27;
 		return sd_init_error;
@@ -632,6 +755,7 @@ int sd_init(uint8_t *block0)
 			sd_init_error = -28;
 			return sd_init_error;
 		}
+		con_hex2("SD", "sec0 m0=", *(uint32_t *)&block0[0], "sig=", *(uint16_t *)&block0[510]);
 		trail(0x2509, 0x5a5a5a5au);
 	}
 

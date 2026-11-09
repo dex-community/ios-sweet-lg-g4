@@ -38,8 +38,10 @@
 #define MODEL_CORE_SIZE		0x800
 /* The SDCC2 windows (the microSD slot): a SECOND host, served only when
  * its GCC clock branch is on. See model_window(). */
-#define MODEL_SD2_HC_SIZE	0x100
+#define MODEL_SD2_HC_SIZE	0x1a0
 #define MODEL_SD2_CORE_SIZE	0x800
+#define MODEL_TLMM_BASE		0xfd512000UL
+#define MODEL_TLMM_SIZE		0x100
 /* The GCC (global clock controller) window: the first 8 KB is kept, which is
  * the whole window of the real device (qcom,gcc@fc400000, reg size 0x2000).
  * The shim touches SDCC1_APPS_CBCR (0x4c4), SDCC1_AHB_CBCR (0x4c8) and the
@@ -183,6 +185,7 @@ static uint8_t model_hc[MODEL_HC_SIZE];
 static uint8_t model_gcc[MODEL_GCC_SIZE];
 static uint8_t model_sd2_core[MODEL_SD2_CORE_SIZE];
 static uint8_t model_sd2_hc[MODEL_SD2_HC_SIZE];
+static uint8_t model_tlmm[MODEL_TLMM_SIZE];
 
 /*
  * Is the SDCC2 controller clocked?
@@ -521,6 +524,8 @@ static uint32_t model_read_reg(unsigned win, unsigned off, unsigned size)
 		p = model_sd2_core + off;
 	else if (win == 4)
 		p = model_sd2_hc + off;
+	else if (win == 5)
+		return model_get(model_tlmm + off, size);
 	else
 		p = model_gcc + off;
 
@@ -611,7 +616,11 @@ static void model_write_reg(unsigned win, unsigned off, unsigned size,
 		p = model_sd2_core + off;
 	else if (win == 4)
 		p = model_sd2_hc + off;
-	else {
+	else if (win == 5) {
+		p = model_tlmm + off;
+		model_set(p, size, val);
+		return;
+	} else {
 		/* The clock controller: writing the enable bit starts the
 		 * clock, and the CLK_OFF bit (31) clears when it runs. The
 		 * shim polls for it, so it has to clear right away.
@@ -621,6 +630,11 @@ static void model_write_reg(unsigned win, unsigned off, unsigned size,
 		 * windows are NOT served, so a write to it does not
 		 * complete (the stall that hung the phone). */
 		p = model_gcc + off;
+		if (off == 0x510) {
+			/* CMD_RCGR: config update bit 0 clears immediately */
+			model_set(p, size, val & ~1u);
+			return;
+		}
 		model_set(p, size, (val & ~0x80000000u) | 1u);
 		if (off == 0x504 || off == 0x508) {
 			if (val & 1u)
@@ -775,6 +789,11 @@ static int model_window(uintptr_t a, unsigned *win, unsigned *off)
 	if (a >= gcc && a < gcc + MODEL_GCC_SIZE) {
 		*win = 2;
 		*off = (unsigned)(a - gcc);
+		return 1;
+	}
+	if (a >= MODEL_TLMM_BASE && a < MODEL_TLMM_BASE + MODEL_TLMM_SIZE) {
+		*win = 5;
+		*off = (unsigned)(a - MODEL_TLMM_BASE);
 		return 1;
 	}
 	/*
@@ -942,6 +961,9 @@ void emmc_model_config(uintptr_t dtb)
 	model_put(1, M_HC_CAPS2, 4, 0x00008007);
 	model_put(1, 0x100, 4, 0x60006400);
 	model_put(1, M_HC_VENDOR, 4, 0x00000a1c);
+	model_put(4, M_HC_CAPS1, 4, 0x342dc8b2);
+	model_put(4, M_HC_VENDOR, 4, 0x00000a1c);
+	model_set(model_tlmm + 0x48, 4, 0x00001e00);
 
 	model_pwr_on = 0;
 	model_ack_seen = 0;

@@ -70,7 +70,7 @@
  * and the image runs wherever the bootloader puts it, with no relocation
  * pass at all.
  */
-#define MMIO_DEV_N	9
+#define MMIO_DEV_N	10
 
 static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xf9824000UL,	/* 0: the eMMC core window ("core_mem", 0x800)  */
@@ -82,12 +82,13 @@ static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xfc4ab000UL,	/* 6: PSHOLD (the reset request)                */
 	0xf98a4000UL,	/* 7: the SDCC2 core window (the microSD slot)  */
 	0xf98a4900UL,	/* 8: the SDCC2 host window (the microSD slot)  */
+	0xfd512000UL,	/* 9: the TLMM SDC pad configuration (0x100)   */
 };
 
 static const uint32_t mmio_dev_size[MMIO_DEV_N] = {
 	0x00000800UL, 0x000001a0UL, 0x00002000UL, 0x00001000UL,
 	0x00001000UL, 0x00003000UL, 0x00001000UL, 0x00000800UL,
-	0x00000100UL,
+	0x000001a0UL, 0x00000100UL,
 };
 
 /* The MEMORY windows: plain RAM, harmless to read and to write. */
