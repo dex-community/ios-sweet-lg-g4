@@ -1865,6 +1865,32 @@ scrittura, la lettura e la seconda lettura sul TLMM).
 FATTO: tutti gli 11 check di `tools/qemu-sd.py` ora passano (`ALL CHECKS PASSED`).
 Anche `tools/qemu-emmc.py --mode always` (13 comandi, 768 parole) e `tools/qemu-mmio-guard.py` (3 rifiuti) restano verdi.
 
+---
+
+## Sessione 2026-11-09, quinta parte: test live sul telefono (run con SHIM_SD_INIT=1 e SHIM_SD_PAYLOAD=1)
+
+Test eseguito sul telefono reale (partendo da fastboot):
+1. Flashata l'immagine `shim/out/shim-boot-sd.img` nella partizione `boot`.
+2. Esecuzione dello shim sul telefono: watchdog armato, nessuna schermata nera/hang, pstore scritto, disarmo watchdog regolare e reboot automatico in recovery TWRP 3.7.
+3. Ripristino immediato e verificato per SHA256 della partizione `boot` con `backup/boot-stock.img` (`070980b26f62d79f...`).
+4. Estratto `/sys/fs/pstore/console-ramoops-0` salvato in `research/raw-2026-11-09/pstore-sd-live.bin`.
+
+### Risultato misurato sul telefono reale
+
+Nel pstore:
+```text
+EMMC prepare=FFFFFFF4 stage=00000004
+SD rc=FFFFFFEC stage=00000007
+SD err=FFFFFFEC rca=00000000
+...
+SDPAY preFFFFFFEC stage=00000007
+```
+- Lo slot microSD (SDCC2) è vivo: i clock GCC AHB/APPS e il RCG a 400 kHz salgono regolarmente, il reset core e HC completano, i registri rispondono (`caps = 0x342dc8b2`).
+- L'errore avviene a `stage=7` (`SD_STEP_CMD0`) con `rc=FFFFFFEC` (`-20`).
+- Causa identificata: `shim/sd.c` definisce `#define SD_HC_CLK_CTRL 0x2c`, ma **non programma mai** il registro `CLK_CTRL` dell'host controller SDHCI (a differenza di `emmc_lk_bringup.inc` che abilita clock interno bit 0, attende stabilità bit 1 e abilita SD clock bit 2). Senza SD clock abilitato nel controller, i comandi verso la microSD vanno in timeout.
+- In recovery TWRP confermato: la microSD è presente (`/dev/block/mmcblk1`, 32GB SS32G), la partizione dati FAT32 parte dal settore 8192 (lasciando liberi i settori 2048..8191 per il payload header e test payload), e i pin SDC2 (150..152) sono configurati regolarmente su `f98a4900.sdhci`.
+
+
 ### Causa reale dei fallimenti del report (diversa dai sospetti iniziali)
 
 Nel report `PROBLEMA-SD-PAYLOAD.md` si sospettava che il ramo `sd_payload_load()` non venisse eseguito. In realtà veniva eseguito, ma falliva prima di stampare `SDPAY len=` e impostare il loader:
