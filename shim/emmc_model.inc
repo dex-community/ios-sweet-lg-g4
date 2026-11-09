@@ -400,16 +400,17 @@ static void model_sd2_build_response(void)
 		break;
 	case MCMD_SD_READ_BLOCK: {	/* CMD17: R1 + one sector */
 		uint32_t lba = model_sd2_cmd_arg;
-		uint32_t idx = (lba >= MODEL_SD2_PAYLOAD_LBA) ?
-				lba - MODEL_SD2_PAYLOAD_LBA : lba;
 
 		model_sd2_rsp[0] = 0x00000900;
 		for (unsigned i = 0; i < 512; i++)
 			model_sd2_data[i] = 0;
-		if (idx < model_sd2_disk_blocks) {
-			for (unsigned i = 0; i < 512; i++)
-				model_sd2_data[i] = model_sd2_blocks[idx][i];
-		} else if (idx == 0 && model_sd2_disk_valid) {
+		if (lba >= MODEL_SD2_PAYLOAD_LBA) {
+			uint32_t idx = lba - MODEL_SD2_PAYLOAD_LBA;
+			if (idx < model_sd2_disk_blocks) {
+				for (unsigned i = 0; i < 512; i++)
+					model_sd2_data[i] = model_sd2_blocks[idx][i];
+			}
+		} else if (lba == 0 && model_sd2_disk_valid) {
 			for (unsigned i = 0; i < 512; i++)
 				model_sd2_data[i] = model_sd2_disk[i];
 		}
@@ -853,6 +854,27 @@ void emmc_model_config(uintptr_t dtb)
 	model_mode = MODEL_MUTE;
 	model_delay_ms = 100;
 	model_sd_payload = 0;
+
+	model_sd2_clocked = 0;
+	model_sd2_cmd_pending = 0;
+	model_sd2_app_prefix = 0;
+	model_sd2_rca = 1;
+	model_sd2_data_len = 0;
+	model_sd2_data_pos = 0;
+	model_sd2_disk_valid = 0;
+	/* The CID and the CSD of the model card: the CID is the one of the
+	 * microSD of the phone (SS32G), the CSD is a plausible SDHC one. */
+	model_sd2_disk_blocks = 0;
+
+	model_sd2_cid[0] = 0x03534453;
+	model_sd2_cid[1] = 0x53333247;
+	model_sd2_cid[2] = 0x80a46843;
+	model_sd2_cid[3] = 0x0e010a00;
+	for (unsigned i = 0; i < 16; i++)
+		model_sd2_csd[i] = 0;
+	model_sd2_csd[0] = 0x40;		/* the structure of the CSD */
+	model_sd2_csd[1] = 0x0e;		/* CSD version 2.0 (SDHC)  */
+
 	if (dtb) {
 		if (fdt_prop_u64(dtb, "/chosen", "emmc-model", &v))
 			model_mode = (uint32_t)v;
@@ -921,25 +943,6 @@ void emmc_model_config(uintptr_t dtb)
 	model_put(1, 0x100, 4, 0x60006400);
 	model_put(1, M_HC_VENDOR, 4, 0x00000a1c);
 
-	model_sd2_clocked = 0;
-	model_sd2_cmd_pending = 0;
-	model_sd2_app_prefix = 0;
-	model_sd2_rca = 1;
-	model_sd2_data_len = 0;
-	model_sd2_data_pos = 0;
-	model_sd2_disk_valid = 0;
-	/* The CID and the CSD of the model card: the CID is the one of the
-	 * microSD of the phone (SS32G), the CSD is a plausible SDHC one. */
-	model_sd2_disk_blocks = 0;
-
-	model_sd2_cid[0] = 0x03534453;
-	model_sd2_cid[1] = 0x53333247;
-	model_sd2_cid[2] = 0x80a46843;
-	model_sd2_cid[3] = 0x0e010a00;
-	for (unsigned i = 0; i < 16; i++)
-		model_sd2_csd[i] = 0;
-	model_sd2_csd[0] = 0x40;		/* the structure of the CSD */
-	model_sd2_csd[1] = 0x0e;		/* CSD version 2.0 (SDHC)  */
 	model_pwr_on = 0;
 	model_ack_seen = 0;
 	model_cmd_pending = 0;

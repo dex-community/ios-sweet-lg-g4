@@ -1857,3 +1857,22 @@ always`: 13 comandi, 768 parole al buffer).
 
 FATTO: il self-test della allowlist e' passato con **3 refuse** (la
 scrittura, la lettura e la seconda lettura sul TLMM).
+
+---
+
+## Sessione 2026-11-09, quarta parte: risolto il caricamento del payload microSD (shim/sd_payload.c, shim/emmc_model.inc)
+
+FATTO: tutti gli 11 check di `tools/qemu-sd.py` ora passano (`ALL CHECKS PASSED`).
+Anche `tools/qemu-emmc.py --mode always` (13 comandi, 768 parole) e `tools/qemu-mmio-guard.py` (3 rifiuti) restano verdi.
+
+### Causa reale dei fallimenti del report (diversa dai sospetti iniziali)
+
+Nel report `PROBLEMA-SD-PAYLOAD.md` si sospettava che il ramo `sd_payload_load()` non venisse eseguito. In realtà veniva eseguito, ma falliva prima di stampare `SDPAY len=` e impostare il loader:
+
+1. **`model_sd2_disk_blocks` azzerato dopo essere stato impostato a 2**:
+   in `shim/emmc_model.inc`, all'interno di `emmc_model_config()`, il blocco `if (model_sd_payload)` impostava `model_sd2_disk_blocks = 2`. Subito sotto, il codice di default azzerava incondizionatamente `model_sd2_disk_blocks = 0`. Di conseguenza, `idx < model_sd2_disk_blocks` era sempre falso, il blocco 2048 veniva restituito pieno di zeri e `sd_payload_load()` falliva subito con codice `-2` (`0xFFFFFFFE`, magic mismatch). Spostata l'inizializzazione dei default di SD2 a inizio funzione.
+2. **Mappatura LBA in CMD17 del modello**:
+   in `emmc_model.inc`, `case MCMD_SD_READ_BLOCK`: per LBA < 2048 (es. lettura settore 0 in `sd_init()`), l'operatore ternario mappava `idx = lba = 0`, restituendo impropriamente il blocco del payload invece del settore 0. Corretto separando esplicitamente `lba >= MODEL_SD2_PAYLOAD_LBA` dal fallback settore 0.
+3. **`SD_PAYLOAD_RAM` in QEMU virt (`0x10000000` vs `0x42000000`)**:
+   su QEMU `virt`, la RAM fisica è mappata a `0x40000000..0x80000000`. L'indirizzo `0x10000000` (che sul telefono reale è RAM banco 1) su QEMU virt corrisponde a spazio PCIe unmapped. Le scritture venivano ignorate e le letture restituivano tutti `0xFF` (con CRC risultante `0xbd7bc39f`), provocando errore `-6` (`0xFFFFFFFA`, CRC mismatch). Condizionato `#if SHIM_EMMC_MODEL` a `0x42000000UL` (mantenendo `0x10000000UL` per l'hardware del G4).
+

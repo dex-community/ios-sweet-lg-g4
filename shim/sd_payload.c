@@ -23,7 +23,11 @@
  * above 0x80000000: the two do not overlap, and the loader refuses a
  * payload that would overlap the kernel anyway.
  */
+#if SHIM_EMMC_MODEL
+#define SD_PAYLOAD_RAM		0x42000000UL
+#else
 #define SD_PAYLOAD_RAM		0x10000000UL
+#endif
 /* The biggest payload we accept (64 MiB): more than that would not fit
  * with any margin. */
 #define SD_PAYLOAD_MAX		(64u << 20)
