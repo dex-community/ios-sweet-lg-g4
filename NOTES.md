@@ -1959,3 +1959,31 @@ Abbiamo preparato e flashato l'immagine completa di XNU:
    - DTB: QCDT v3 H815 (`0xb64`)
 3. Flashata nella partizione `boot` con `dd` in TWRP e verificata per SHA256.
 4. Riavviato il telefono per avviare il caricamento di iOS XNU.
+
+---
+
+## Sessione 2026-11-09, settima parte: Setup LAF Unbrick toolkit, estrazione KDZ e auto-fallback in TWRP
+
+### 1. Condizioni Hardware dei Pulsanti Fisici
+- I pulsanti **Power** e **Volume Giù** non funzionano correttamente sul dispositivo.
+- L'unico pulsante fisico funzionante e affidabile è **Volume Su** (utilizzato per entrare in Download Mode / modalità ripristino LAF collegando il cavo USB).
+
+### 2. Toolkit di Ripristino LAF (Download Mode) e KDZ
+1. **Estrazione KDZ dal telefono**:
+   - Trovato `/sdcard/Europe H81520C_00_1218.kdz` (1.7 GB) sul telefono in TWRP.
+   - Estratto localmente in `kdz/Europe H81520C_00_1218.kdz`.
+   - Disimballato il contenitore DZ in `kdz/H81520c_00.dz`.
+2. **Aggiornamento di `kdztools`**:
+   - Corretto `tools/kdztools/undz.py` per gestire gli header moderni v20c (CRC32 opzionale a zero e slice unallocated).
+   - Estratte le partizioni stock in `kdz/extracted/`: `PrimaryGPT.image`, `boot.image`, `recovery.image`, `aboot.image`.
+3. **Ambiente Python e `lglaf`**:
+   - Configurato ambiente virtuale `.venv` con `pyusb` e `cryptography`.
+   - Verificati `tools/lglaf/lglaf.py` e `tools/lglaf/partitions.py`.
+   - Creato script di automazione `tools/laf-tool.sh` (comandi: `list`, `restore-boot`, `restore-recovery`, `reboot`, `reboot-recovery`, `shell`).
+   - Procedura unbrick in Download Mode: a telefono spento, tenere premuto **Volume Su** e collegare il cavo USB -> eseguire `./tools/laf-tool.sh restore-boot`.
+
+### 3. Sicurezza per i test di Boot XNU (Auto-fallback in TWRP)
+Per prevenire qualsiasi bootloop in assenza dei tasti fisici:
+- `shim/loader.c` scrive esplicitamente `mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE)` prima del salto in XNU:
+  in caso di timeout del watchdog hardware (60s) o reset, il bootloader LK rileva `RECOVERY_MODE` nella memoria IMEM e **si riavvia automaticamente in TWRP recovery con ADB attivo**, senza richiedere alcuna pressione di tasti fisici.
+- La partizione `boot` attuale è stata ripristinata con `backup/boot-stock.img` (SHA256 `070980b2...`) per garantire la sicurezza del dispositivo.

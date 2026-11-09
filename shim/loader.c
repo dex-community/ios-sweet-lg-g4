@@ -8,6 +8,8 @@
  * and caches off, x0 = boot_args (physical).
  */
 #include <stdint.h>
+#include "g4.h"
+#include "mmio.h"
 #include "console.h"
 #include "fdt.h"
 #include "pstore.h"
@@ -163,6 +165,10 @@ const char *loader_boot(uintptr_t dtb)
 	pstore_console_write(con_log, (unsigned)con_log_len);
 #if SHIM_WDT_GUARD
 	g4_wdt_arm(60000);
+#endif
+#if !SHIM_EMMC_MODEL
+	/* Ensure LK reboots straight to TWRP recovery on watchdog reset or crash */
+	mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE);
 #endif
 #endif
 
