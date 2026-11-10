@@ -78,6 +78,8 @@ jobs:
           set -e
           cd "$RUNNER_TEMP/kernel"
           export ARCH=arm64
+          # This 3.10 tree does not create the output directory by itself.
+          mkdir -p build
           make O=build stock_defconfig
           # The variant option of this tree (VARIANT_DEFCONFIG) is dead code:
           # scripts/kconfig/Makefile exports it but nothing reads it, so the
