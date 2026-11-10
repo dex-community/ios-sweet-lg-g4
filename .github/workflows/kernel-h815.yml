@@ -49,7 +49,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison flex libssl-dev libncurses-dev \
-            cpio rsync xz-utils python3 python2
+            cpio rsync xz-utils python3 python2 gcc-9
           # The kernel Makefile compiles every file through
           # scripts/gcc-wrapper.py, which is a python 2 script, and its
           # shebang asks for "python". Python 2 is gone from ubuntu-24.04,
@@ -98,12 +98,25 @@ jobs:
           make O=build olddefconfig
           grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1)=' build/.config
 
+      - name: Patch the old dtc for bison 3
+        run: |
+          set -e
+          cd "$RUNNER_TEMP/kernel"
+          # This dtc defines yylloc in the lexer (line 42) and in the parser
+          # (line 27). With bison >= 3.0 both end up in the object files and
+          # the link fails with "multiple definition of yylloc"; only the
+          # parser has to define it.
+          sed -i 's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+          grep -n 'yylloc' scripts/dtc/dtc-lexer.l | head -3
+
       - name: Build
         run: |
           set -e
           cd "$RUNNER_TEMP/kernel"
           export ARCH=arm64
-          make O=build -j"$(nproc)"
+          # gcc 9 still defaults to -fcommon, which the host tools of a
+          # tree of 2016 expect; gcc 11 does not.
+          make O=build HOSTCC=gcc-9 -j"$(nproc)"
 
       - name: Collect the artifacts
         if: always()
