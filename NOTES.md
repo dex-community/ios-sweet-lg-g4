@@ -3152,3 +3152,39 @@ perche' costano tempo:
   e' la prossima misura, e non costa niente (il telefono e' in fastboot
   adesso, il ciclo e' `fastboot boot twrp-h815-hfs.img` +
   `tools/read-shim-log.py`).
+
+---
+## 2026-11-10 (sessione sera): CMD2 PASSATO - FINE DEL BLOCCO eMMC
+
+### FATTO 18 — Il loop CMD1 aspettava bit 30 invece di bit 31
+
+Il log del run 2026-11-10-1825 mostrava che CMD1 si fermava su `rsp=40FF8080` (bit 30 = power-up) ma il bit 31 (busy) non era mai raggiunto. Di conseguenza CMD2 falliva con `rc=FFFFFFFD`.
+
+**Root cause identificata**: il loop CMD1 in `emmc_lk_bringup.inc` faceva un numero fisso di iterazioni (`ncmd1=1 o 2`) invece di aspettare che il bit 31 dell'OCR fosse settato, come fa il driver Linux (`G4-Titan-Kernel`, `sdhci.c`).
+
+**Fix applicato** (shim/emmc_lk_bringup.inc, linea 533-543):
+```c
+/* CMD1: the card powers up and answers with its OCR. */
+/* Wait for bit 31 (busy) like the Linux driver does. */
+int i;
+for (i = 0; i < 1000; i++) {
+    if (emmc_cmd(1, ocr, CMD_RESP_R3, &rsp))
+        return emmc_ident_fail(0);
+    emmc_lk_stage = 1;
+    if (rsp & 0x80000000u) /* busy = 1 */
+        break;
+    emmc_delay_us(1000);
+}
+```
+
+**Risultato** (log 2026-11-10-18xx):
+- CMD1 continua fino a `rsp=C0FF8080` (bit 31 settato)
+- **C2OK v=00000009** — CMD2 con 136+CRC passa al primo tentativo
+- CID letto correttamente: `48B72E52 373400B4 30333247`
+- CMD3 → CMD7 → CMD16 completano con `rc=00000000`
+- `EMMC sec=03A3E000` (62.908.672 settori = 29.7 GB)
+- Card identificata, writes disattivati (sola lettura)
+
+**SHA shim**: `fec279c0436e3b4332ea42237396c90a4ac21b15bca9e966bffa62c6b391f3ef`
+
+**Prossimo passo**: testare la patch HFS+ per montare il rootfs iOS in sola lettura dalla recovery.

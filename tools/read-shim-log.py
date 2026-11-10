@@ -22,6 +22,7 @@ import sys
 SCRATCH = 0x50000000
 PAGE = 4096
 PAGES = 96
+MARKER = "G4SHIMLG"
 
 
 def read_phone():
@@ -49,6 +50,9 @@ def main(argv):
     text = data[:end].decode("ascii", "replace")
     if not text.strip():
         sys.exit("no log in the dump (the area is empty)")
+    # Check for the G4SHIMLG marker to verify log integrity
+    if not text.startswith(MARKER):
+        sys.exit(f"no {MARKER} marker: the RAM has been overwritten, rerun the shim")
     print(text)
     return 0
 

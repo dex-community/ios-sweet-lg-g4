@@ -531,13 +531,17 @@ static int emmc_lk_bringup(const struct lk_var *v)
 			if (emmc_cmd(0, 0, CMD_RESP_NONE, 0))
 				return emmc_ident_fail(0);
 			/* CMD1: the card powers up and answers with its OCR. */
-			for (int i = 0; i < ncmd1; i++) {
+			/* Wait for bit 31 (busy) like the Linux driver does. */
+			int i;
+			for (i = 0; i < 1000; i++) {
 				if (emmc_cmd(1, ocr, CMD_RESP_R3, &rsp))
 					return emmc_ident_fail(0);
-				emmc_lk_stage = 1;	/* the card answered */
+				emmc_lk_stage = 1;
+				if (rsp & 0x80000000u) /* busy = 1 */
+					break;
 				emmc_delay_us(1000);
 			}
-			trail(0x0075, (uint32_t)ncmd1);
+			trail(0x0075, (uint32_t)i);
 			trail(0x0076, rsp);
 			/*
 			 * Bit 30 of the OCR is the power-up status (bit 30 is
