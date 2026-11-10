@@ -1,6 +1,6 @@
 # STATUS — iOS 16 on LG G4 (H815)
 
-Last updated: 2026-11-05
+Last updated: 2026-11-10
 
 ## Goal
 
@@ -17,7 +17,7 @@ touch and hardware buttons.
 | 0 — setup and analysis | **done** | Hardware facts extracted and cross-checked; see `docs/g4-hardware/` |
 | 1 — shim + minimal boot | **mostly done** | Shim builds, passes the offline boot-image check, runs under QEMU **and on the real phone** (LK loads it, it runs to the end and resets itself). The panel does not show it: the display driver is Phase 4 |
 | 2 — XNU kernel and RAM disk | **in progress** | The upstream `ios-sweet` turns out to be a port of XNU to a **Xiaomi phone with a device tree** (IODTPlatformExpert, DT virtual timer, boot CPU without PSCI), i.e. the same shape as this board, so its patch set is the base. The kernel is built **in CI** (macos-14, Xcode 15.x — the only `iig` that matches the xnu-8796 IORPC ABI), not locally. The G4 adaptations are done: `-march=armv8-a+crypto` (the G4 is all Cortex-A53, armv8.0 — armv8.2 lets the compiler emit LSE/complex instructions the A53 does not have) and an `IONameMatch = 'lg,h815'` entry so the platform expert attaches to our ADT. `tools/build-g4-image.sh` chains CI artifact → ADT → payload → LK boot image |
-| 3 — eMMC storage and iOS root | **in progress** | the controller is healthy and the bus is powered (CORE+0xdc = BUS_ON after HC+0x29 = 0x0f) but the card is silent: CMD5/CMD1 end in a *command timeout* with a zero response. Measured over 8 bring-up variants in 3 runs (3.3 V / 1.8 V, with and without the LK's PWRCTL ack, with and without a 10 s delay, with and without HC+0x29, with the LK's own registers). The shim now leaves its log in the phone's ramoops zone, so the controller registers are readable after a run (`tools/fetch-pstore.sh`, GUIDE-04-PSTORE.md). Leading hypothesis: the eMMC VCC regulator (pm8994_l20, `vdd-supply`) is not powered by the shim, which has no regulator driver (H7). XNU itself still needs an eMMC driver (the sweet port reads the root from UFS): the UniXNU driver is the reference | **Sicurezza:** dal 2026-11-09 gli accessi MMIO passano per una allowlist a runtime (`shim/mmio.h`) e un audit statico nella build (`tools/check-mmio-writes.py`): due hang del telefono erano scritture a controller mai inizializzati. Dettagli in `GUIDE-05-MMIO-SAFE.md`.
+| 3 — eMMC storage and iOS root | **in progress** | La carta **risponde**: e' una Samsung 032G74 (CID `11010030333247373400b448b72e5200`), CMD5/CMD7/CMD0/CMD1 vanno a buon fine e restituiscono l'OCR. L'unico comando che fallisce e' **CMD2 (SEND_ARG)**, con un interrupt di errore (`int=00088000`, non un timeout). Il driver Linux che funziona su questo telefono programma CMD2 come 136 bit + CRC7 **senza** il check dell'indice, mentre lo shim lo programmava con il check dell'indice: e' il sospetto, e il codice ora fa uno sweep delle quattro combinazioni (l'esito dello sweep non e' ancora stato letto: vedi `NOTES.md` FATO 14). Il rootfs iOS su `userdata` e' un volume HFS+ **case-sensitive** ('HX'), journaled e **senza backup volume header**: e' proprio il backup mancante che faceva fallire il mount del driver Linux, e la patch e' scritta (`kernel/patches/0001-hfsplus-mount-a-volume-with-no-backup-volume-header.patch`, applica pulita). Il volume si monta in sola lettura, quindi il rootfs non viene toccato. XNU stesso ha ancora bisogno di un driver eMMC (quello di UniXNU e' il riferimento) | **Sicurezza:** dal 2026-11-09 gli accessi MMIO passano per una allowlist a runtime (`shim/mmio.h`) e un audit statico nella build (`tools/check-mmio-writes.py`): due hang del telefono erano scritture a controller mai inizializzati. Dettagli in `GUIDE-05-MMIO-SAFE.md`.
 | 4 — touch, buttons, display | **in progress** | Touch is the Synaptics `s3528` @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2. The display is command-mode and needs a real MDP/DSI driver; the NetHunter G4 kernel is the reference |
 | 5 — polish and documentation | partial | `GUIDE-00`, `GUIDE-01`, `STATUS.md` |
 
@@ -38,6 +38,14 @@ touch and hardware buttons.
   run reaches the diagnostics and prints them, which validates the device
   tree parsing, the framebuffer lookup, the console and the payload
   rejection path.
+- A **Linux kernel built for this phone** (`.github/workflows/kernel-h815.yml`,
+  the Titan 3.10.108 tree) with `CONFIG_DEVMEM` and `CONFIG_HFSPLUS_FS`: it
+  boots with `fastboot boot` and gives `/dev/mem`, which is how the shim's
+  log is read back from the RAM (`tools/read-shim-log.py`).
+- The shim's log chain works end to end: `fastboot boot` the shim, the
+  phone resets itself into the recovery, then `fastboot boot` the kernel
+  with `/dev/mem` and read `0x50000000`. The log of the run of 2026-11-10
+  is in `docs/shim-log-2026-11-10.txt`.
 
 ## What does not work yet
 
@@ -52,8 +60,14 @@ touch and hardware buttons.
 - The XNU kernel has not been built for `msm8992` yet, and the ADT has not
   been generated for the G4.
 - No eMMC driver, no touch driver, no button driver, no display driver.
-- The iOS root image has not been built (the IPSW is on disk, so this is
-  unblocked as soon as a Linux box or `hfsprogs` is available).
+- The iOS rootfs is **on the phone** (HFS+ case-sensitive on `userdata`,
+  18.35 GB of volume) but the stock kernel cannot mount it: the volume has
+  no backup volume header and the driver refuses it. The patch that accepts
+  it is written and the CI that applies it is ready, but the kernel with
+  the patch **has not been built yet**, so the rootfs has not been opened.
+- The shim's CMD2 (SEND_ARG) still fails on the phone. The sweep of the
+  four response-type combinations is compiled and running on the phone, but
+  its log has not been read back yet (`NOTES.md` FATTO 14).
 
 ## Hardware facts (all from the phone's own device tree)
 
@@ -108,6 +122,11 @@ touch and hardware buttons.
 ## Rules being followed
 
 - Nothing is flashed permanently: only `fastboot boot` (temporary).
-- `userdata` is only written after an explicit confirmation.
+- `userdata` is only written after an explicit confirmation. The HFS+ mount
+  is read-only by construction (the driver forces `MS_RDONLY` on a
+  journaled/locked volume), so the rootfs cannot be touched by accident.
+- **Never detach a driver of a block device that has a mounted volume**:
+  doing that (sdhci_msm with `mmcblk0p49` on `/cache`) crashed the phone
+  and left its USB stack wedged for a full battery pull (`NOTES.md` FATTO 16).
 - Every failed attempt is recorded with its exact error in `NOTES.md`.
 - After 10 failed attempts at the same step, stop and ask.

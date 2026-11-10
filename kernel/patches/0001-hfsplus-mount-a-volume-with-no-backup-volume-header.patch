@@ -1,0 +1,67 @@
+fs/hfsplus: mount a volume that has no backup volume header
+
+The iOS rootfs on `userdata` (the H815 phone) is an HFS+ volume with the
+case-sensitive signature "HX" and 4096 byte blocks. The primary volume
+header is at offset 1024, as the spec says, and it is a good one: the
+allocation file and the catalog file are described in it, and the driver
+reads them from there.
+
+The volume has NO backup volume header: the place where the copy belongs
+(the second to last sector of the volume) is a hole of zeroes, and so is
+the end of the partition. The driver reads that hole, compares its
+signature with the primary one, finds them different and refuses the
+mount:
+
+    hfsplus: invalid secondary volume header
+
+The backup is only a spare copy of the primary header. The driver uses the
+primary one for everything it needs (the block size, the catalog file, the
+allocation file), and the backup only in the HFSPLUS_IOC_BLESS ioctl and
+in the write-back path. A missing backup is therefore no reason to refuse
+the mount.
+
+A backup that IS there but carries another signature is still an
+inconsistency, and is still refused: only the "there is no backup at all"
+case is accepted.
+
+The volume is mounted read-only, so nothing is written to `userdata`.
+
+--- a/fs/hfsplus/wrapper.c
++++ b/fs/hfsplus/wrapper.c
+@@ -234,8 +234,34 @@
+
+ 	error = -EINVAL;
+ 	if (sbi->s_backup_vhdr->signature != sbi->s_vhdr->signature) {
+-		pr_warn("invalid secondary volume header\n");
+-		goto out_free_backup_vhdr;
++		u16 bsig = be16_to_cpu(sbi->s_backup_vhdr->signature);
++		u16 psig = be16_to_cpu(sbi->s_vhdr->signature);
++
++		/*
++		 * A volume can have NO backup volume header at all: the copy
++		 * that belongs at the end of the volume is then a hole (all
++		 * zeroes) and the driver used to refuse the mount because
++		 * of it ("invalid secondary volume header").
++		 *
++		 * The backup is only a spare copy of the primary header.
++		 * The driver reads the primary one and uses it for
++		 * everything (block size, catalog file, allocation file),
++		 * and the backup is used only by the HFSPLUS_IOC_BLESS ioctl
++		 * and by the write-back path. A missing backup is therefore
++		 * no reason to refuse the mount, and refusing it means that
++		 * a volume written by a tool that does not write the backup
++		 * cannot be read at all.
++		 *
++		 * A backup that IS there but carries another signature is
++		 * still an inconsistency, and is still refused.
++		 */
++		if (bsig != HFSPLUS_VOLHEAD_SIG && bsig != HFSPLUS_VOLHEAD_SIGX) {
++			pr_warn("hfsplus: no backup volume header (signature 0x%04x), the primary one (0x%04x) is used alone\n",
++				bsig, psig);
++		} else {
++			pr_warn("invalid secondary volume header\n");
++			goto out_free_backup_vhdr;
++		}
+ 	}
+
+ 	blocksize = be32_to_cpu(sbi->s_vhdr->blocksize);

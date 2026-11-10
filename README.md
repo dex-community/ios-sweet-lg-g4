@@ -6,18 +6,18 @@ This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generati
 
 It starts from [`dipa-studio/ios-sweet`](https://github.com/dipa-studio/ios-sweet) (XNU on a Xiaomi `sweet`, SM7150), uses [`shrimpapplepro/UniXNU-lumia950xl`](https://github.com/shrimpapplepro/UniXNU-lumia950xl) as the eMMC reference (same MSM8992 SDHCI controller), and [`ios-topaz`](https://github.com/turgayasuk-sketch/ios-topaz) as the display bring-up reference.
 
-> **Status: experimental bring-up, not a usable phone OS.** XNU reaches its entry point on the real phone and the iOS root is on disk, but iOS does not boot yet: the eMMC is not yet readable from the shim/XNU, and there is no working display driver. As of 2026-11-10 the phone is fully recoverable and back on its stock boot image.
+> **Status: experimental bring-up, not a usable phone OS.** XNU reaches its entry point on the real phone and the iOS root is on disk, but iOS does not boot yet: the eMMC is not yet readable from the shim/XNU (the card answers, one command does not), and there is no working display driver. As of 2026-11-10 the phone is fully recoverable: every test is a `fastboot boot`, nothing is written.
 
 ## Where the project stands
 
 | Area | State |
 | --- | --- |
 | Shim | Builds with `aarch64-elf-gcc`, wraps into an LK-style boot image, runs on the real phone |
-| Boot chain | LK → flashed `boot` partition → shim → XNU. **This LK does not accept `fastboot boot`**, so every test is a flash plus an automatic restore |
+| Boot chain | LK → flashed `boot` partition → shim → XNU. **This LK does accept `fastboot boot`**: every test is a temporary boot, nothing is written on the phone |
 | XNU entry | Reached on hardware: 11 Mach-O segments loaded, ADT + boot-args prepared, jump to `__start` at PA `0x8147B488` |
 | Kernel CI | `.github/workflows/xnu.yml` builds the patched xnu-8796 kernel on macOS runners |
-| Rootfs | iOS 16.7.16 iPhone X HFS+ (case-sensitive, journaled) written to `userdata` (`mmcblk0p50`), 17.5 GB, `fsck_hfs` OK |
-| eMMC from shim | Card present but silent: CMD5/CMD1 time out. The missing piece was the HS400 clock path; the fix changed the failure mode to a bootloop (indirect proof the card answered), but it is not yet usable |
+| Rootfs | iOS 16.7.16 iPhone X HFS+ (case-sensitive 'HX', journaled) written to `userdata` (`mmcblk0p50`): 18.35 GB of volume, 4096 byte blocks. **No backup volume header**, which is why no stock kernel can mount it; the patch that accepts it is written (`kernel/patches/`) |
+| eMMC from shim | The card **answers**: Samsung 032G74, CMD5/CMD7/CMD0/CMD1 all work and return the OCR. The only failing command is **CMD2 (SEND_ARG)**, with an error interrupt; the Linux driver that works on this phone programs it without the index check, and the shim now sweeps the four possible response types |
 | RAM disk | A minimal `sweet-init` Mach-O PID 1 with heartbeat, packed into the payload |
 | Fallback | Shim arms a 60 s watchdog and writes `LK_RECOVERY_MODE`, so the phone returns to TWRP without the damaged buttons |
 | Display | LG panel is JDI NT36850, 1440×2560, **command mode**, dual MIPI DSI. The active pipe is **RGB2/INTF2** (MDP3), not VIG0 |
@@ -41,23 +41,43 @@ The shim draws diagnostics into the framebuffer and writes a log to the phone's 
 
 ## Current blocker and next step
 
-The eMMC controller is healthy and the card is detected, but the shim's commands time out. The latest fix restores the HS400 clock path (`LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE`) before talking to the card; the resulting bootloop shows the card now reacts, but the run cannot be diagnosed through pstore reliably.
+**The eMMC is one command away.** The card is a Samsung 032G74 and it
+answers: the wake-up, the select, the idle and the `SEND_OP_COND` (which
+returns the OCR with the power-up bit) all work. The only command that
+fails is **CMD2 (SEND_ARG)**, and it fails with an *error interrupt*, not
+with a timeout: the controller says the answer is wrong.
 
-The next step is the custom Linux kernel built by `.github/workflows/kernel-h815.yml` (NetHunter CAF 3.10 tree with `CONFIG_DEVMEM`, `CONFIG_HFS_FS`, `CONFIG_HFSPLUS_FS`):
+The driver Linux that works on this phone sends CMD2 as a 136 bit answer
+with the CRC7 check and **without** the index check; the shim sent it with
+the index check as well. That is the only difference, and the shim now
+tries the four combinations one after the other and writes the outcome in
+the log. Reading that log is the next measurement, and it costs nothing:
+the phone is in fastboot, `fastboot boot` the shim, let it reset itself
+into the recovery, then `fastboot boot` the kernel with `/dev/mem` and
+read `0x50000000` (`tools/read-shim-log.py`).
 
-1. boot it from TWRP's ramdisk (`tools/pack-twrp-kernel.sh`);
-2. read the shim trail with `tools/read-trail-imem.py` through `/dev/mem`, to find which phase hangs;
-3. read the shim scratch area at `0x50000000`;
-4. mount `userdata` as HFS+ and read the iOS root without rewriting it.
+**The iOS rootfs is readable in principle, but not yet in practice.** The
+volume on `userdata` is HFS+ case-sensitive, journaled and **without a
+backup volume header**; the Linux driver refuses a volume whose backup is
+missing (`hfsplus: invalid secondary volume header`), and that is the one
+thing that stops the mount. The patch is written and applies cleanly; the
+CI builds the kernel with it (`.github/workflows/kernel-h815.yml`). The
+driver forces the mount read-only on a journaled volume, so the rootfs
+cannot be damaged by it.
 
-Display work (clocking MDSS, then re-pointing the RGB2 scanout) is the second track. The panel keeps the last frame in command mode, so "the LG logo is visible" is **not** proof that the MDP is clocked.
+**Then the display.** The panel is driven by the **RGB2 pipe on INTF2**
+(MDP3), not by VIG0, so the `ios-topaz` patch that re-points VIG0 does not
+apply here: the MDP has to be clocked and the RGB2 scanout re-armed. The
+safe place to measure all of this is the recovery, through
+`/sys/kernel/debug/mdp/`, never with a probe in the shim.
 
 ## Safety rules
 
 - **Never write to an uninitialised controller.** Every MMIO access goes through `mmio_rd32`/`mmio_wr32` (`shim/mmio.h`) and the runtime allowlist. An allowlist entry does not prove the clock is on: three hangs came from probing blocks whose clock was off. See `GUIDE-05-MMIO-SAFE.md`.
-- **`boot` must always return to stock.** `tools/run-t2.sh` flashes, measures, pulls the log and restores `backup/boot-stock.img`. The LAF restore path needs KILO authentication, mode 2 (`tools/lglaf/partitions.py`).
+- **Do not write on the phone.** Every test is a temporary `fastboot boot`: nothing is flashed, the `boot` partition is not touched. The old flash-and-restore path (`tools/run-t2.sh`, `backup/boot-stock.img`, LAF restore with KILO authentication) is kept only for the case where the phone has to be recovered.
 - **Never touch `misc`, `cache`, `aboot`, `sbl1`, `tz`, `rpm`, `hyp`, `persist`, `modem`.** The eMMC driver only allows the two `spare` sectors.
-- **Do not rewrite `userdata`.** The iOS HFS+ volume is already written and verified (`fsck_hfs` OK); the goal is to read it.
+- **Do not rewrite `userdata`.** The iOS HFS+ volume is already written and verified; the goal is to read it. The driver mounts it read-only by itself (a journaled volume is forced to `MS_RDONLY`), and the rootfs must stay byte-identical.
+- **Never detach a driver of a block device that has a mounted volume.** Doing it with the eMMC (`mmcblk0p49` on `/cache`) crashed the phone and left its USB stack wedged until the battery was pulled. Measure with tracepoints instead.
 - Keep partition dumps, serial numbers, recovery images, Apple firmware and downloaded build trees out of git.
 
 ## Repository layout
@@ -68,7 +88,8 @@ Display work (clocking MDSS, then re-pointing the RGB2 scanout) is the second tr
 | `xnu/patches/` | XNU patch series (applied in order by CI) |
 | `xnu/out-*/` | CI build outputs used locally |
 | `.github/workflows/xnu.yml` | XNU kernel CI (macOS) |
-| `.github/workflows/kernel-h815.yml` | Linux H815 kernel CI with DEVMEM + HFS+ (for diagnostics) |
+| `.github/workflows/kernel-h815.yml` | Linux H815 kernel CI with DEVMEM + HFS+ (for diagnostics), applies `kernel/patches/` |
+| `kernel/patches/` | Patches for the Linux kernel of the phone (the HFS+ one first) |
 | `tools/mkadt.py` | Generates the Apple Device Tree from the G4 layout and iPhone X identity |
 | `tools/mkpayload.py`, `tools/mkinit.py` | Pack kernel + ADT + ramdisk into the shim payload |
 | `tools/build-g4-image.sh` | Chains CI artifact → ADT → payload → LK boot image |
@@ -79,6 +100,7 @@ Display work (clocking MDSS, then re-pointing the RGB2 scanout) is the second tr
 | `tools/check-mmio-writes.py` | Static audit: no raw store may bypass the MMIO allowlist |
 | `tools/qemu-g4.py`, `qemu-emmc.py`, `qemu-mmio-guard.py` | Offline QEMU tests for framebuffer, eMMC model and MMIO guard |
 | `tools/fetch-pstore.sh`, `read-pstore.py`, `read-trail-imem.py` | Log retrieval |
+| `tools/read-shim-log.py`, `boot-test-kernel.sh`, `check-kernel-hfs.sh` | The shim → RAM log cycle and the checks on the diagnostic kernel |
 | `tools/sweet-root-tweaks.py`, `mkiosroot.sh` | iOS root image preparation |
 | `backup/` | Partition backups (not in git) |
 | `docs/`, `GUIDE-*.md`, `STATUS.md`, `NOTES.md` | Hardware facts, procedures and full engineering log |

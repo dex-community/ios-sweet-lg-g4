@@ -2983,3 +2983,172 @@ header`.
 Per leggerlo servono due strade diverse: un tool userspace che parla HFS+
 (hfsplus-tools) oppure estrarre il volume sul PC e montarlo li' con
 `hdiutil`. Il rootfs iOS **non** e' stato toccato: e' solo stato letto.
+
+## 2026-11-10 (terza sessione): il CMD2 e il volume HFS+
+
+Tutto quello che segue e' **misurato**, non dedotto. La sessione ha
+lavorato su due filoni: il CMD2 (SEND_ARG) che e' l'ultimo comando che
+fallisce nello shim, e la lettura del rootfs iOS su `userdata`.
+
+### FATTO 14 — il CMD2: il tipo di risposta e' il sospetto, e si puo' misurare
+
+Il run del 2026-11-10 (log in `docs/shim-log-2026-11-10.txt`) mostra, per
+la prima volta, la carta che risponde:
+
+```
+CMD5 broadcast  rc=FFFFFFFD int=00018000   (timeout: la carta eMMC non
+                                           accetta l'indirizzo broadcast)
+CMD5 con RCA 2  rc=00000000  rsp=00001400
+CMD7 select     rc=00000000  rsp=00000700
+CMD0 (idle)     rc=00000000
+CMD1 x 37       rc=00000000  rsp=40FF8080 / 00FF8080 / C0FF8080
+CMD2 (SEND_ARG) rc=FFFFFFFD  int=00088000  rsp=48B72E52   <-- fallisce
+```
+
+`FFFFFFFD` non e' un timeout: e' -3, cioe' **interrupt di errore**
+(-2 sarebbe il timeout). `int=00088000` = bit 15 + bit 19.
+
+Il confronto con il driver Linux che funziona su questo telefono
+(`G4-Titan-Kernel`, `drivers/mmc/host/sdhci.c` +
+`include/uapi/linux/mmc/core.h`) dice come il CMD2 va programmato:
+
+```
+MMC_RSP_R1 = PRESENT|CRC|OPCODE   ->  48 bit + CRC7 + index
+MMC_RSP_R2 = PRESENT|136|CRC      ->  136 bit + CRC7     (SENZA index!)
+MMC_RSP_R3 = PRESENT              ->  48 bit, senza CRC7 e senza index
+```
+
+Il core usa `MMC_RSP_R2` per CMD2 e `MMC_RSP_R1` per CMD3. Lo shim
+programmava CMD2 come `CMD_RESP_136` = **136 bit + CRC7 + index**: la
+differenza rispetto al driver funzionante e' **il check dell'indice**.
+
+La carta e' una **Samsung 032G74**, CID `11010030333247373400b448b72e5200`
+(letto dal sysfs della recovery), RCA 2. Il `rsp=48B72E52` del CMD2
+fallito contiene i byte `48 b7 2e 52` del CID: e' la traccia del CID che il
+bootloader aveva letto al boot, non una risposta.
+
+Cosa e' cambiato nel codice (`shim/emmc.c`, `shim/emmc_lk_bringup.inc`):
+
+* `emmc_cmd()` e' stato scomposto in `emmc_cmd_flags()`, che prende i
+  flag del registro comando cosi' come sono: serve per provare le
+  combinazioni senza duplicare la funzione;
+* le risposte sono **stati stampate tutte e quattro** (0x0c, 0x10, 0x14,
+  0x18): il driver Linux legge l'OCR da 0x0c e la RCA da 0x18 (facendo
+  un giro a ritroso e uno shift di 8), lo shim leggeva solo 0x10 e non si
+  sapeva quale dei due fosse giusto;
+* il CMD2 ora e' uno **sweep**: prova in ordine 136+CRC (come il driver
+  funzionante), 136+CRC+index (come prima), 48+CRC, 48 senza CRC, e per
+  ogni combinazione stampa il risultato. Il primo che passa vince e il
+  log dice quale e';
+* il CMD1 non viene piu' fermato sul bit 31 dell'OCR ma sul **bit 30**,
+  che e' il power-up status secondo la spec eMMC: il bit 31 e' quello
+  che il core Linux usa (MMC_CARD_BUSY) e nel run precedente compariva
+  solo alla 37esima CMD1, mentre la carta era gia' pronta alla prima
+  (rsp=40FF8080, bit 30 alto). La sequenza CMD1 e' passata da 37 comandi
+  a 1.
+
+Build: `shim/out/shim-boot.img`, sha256
+`c5622cc7040502071ca534a06cb05752d28af936e1591644c5c3cf2d6f13455a`,
+audit MMIO verde (`ok: no raw store bypasses the MMIO allowlist`).
+
+**Non ancora misurato sul telefono**: lo sweep e' stato compilato e
+lanciato (`fastboot boot`, 16:17), ma al momento di scrivere questo
+appunto il log non era ancora stato letto dalla RAM. Il ciclo di lettura
+e' `fastboot boot shim` -> il telefono si riavvia in recovery -> `adb
+reboot bootloader` -> `fastboot boot twrp-h815-hfs.img` -> `tools/read-shim-log.py`.
+
+### FATTO 15 — il volume HFS+ di userdata, misurato bene (FATTO 13 era impreciso)
+
+Letto dal telefono con `dd if=/dev/block/mmcblk0p50` (partizione: settori
+12419072..61046783, 48.627.712 settori = 24,9 GB):
+
+```
+offset 1024  48 58 00 05 00 80 00 21 48 46 53 4a ...
+             'HX'  ver5  attributi 0x00800021  lastMountedVersion 'HFSJ'
+```
+
+* firma **'HX'** = HFS+ **case-sensitive** (HFSX);
+* `lastMountedVersion = 'HFSJ'` (0x4846534a) e' il marcatore con cui la
+  spec dice "il volume e' journaled";
+* attributi `0x00800021`: bit 0 = volume smontato pulito, bit 15
+  (0x8000) = **SOFTLOCK**, bit 23 = 0x800000 (software write);
+* **block size 4096**, `totalBlocks = 4.480.000` (18,35 GB di volume
+  utili, il resto della partizione e' di coda), `freeBlocks = 1.551.163`;
+* catalog file: 128 MB, primo extent al blocco 183691;
+* allocation file: 561.152 byte, extent al blocco 1.
+
+**Correzione a FATTO 13**: la stringa 'HFSJ' **non** e' a offset 1536 ma a
+offset **1032**, cioe' dentro il volume header (campo `lastMountedVersion`).
+L'offset 1536 (dove sta il journal info block) e' **tutto zero**: il
+volume e' marcato journaled ma **non ha un journal vero e proprio**, e
+non ha nessun backup volume header (l'ultimo settore della partizione e
+tutto zero, e anche la fine del volume lo e').
+
+Per il montaggio questo e' la notte buona: il driver `hfsplus` di Linux
+**non usa il journal** e con gli attributi che abbiamo **si monta in sola
+lettura da solo** (`fs/hfsplus/super.c`: "filesystem is marked locked,
+leaving read-only"), quindi il rootfs iOS non viene toccato.
+
+### FATTO 16 — il blocco del mount era il backup volume header, e il telefono si e' bloccato due volte
+
+Il driver rifiutava il volume con `hfsplus: invalid secondary volume
+header`. Il codice (`fs/hfsplus/wrapper.c`) spiega perche':
+
+```c
+error = hfsplus_submit_bio(sb, part_start + part_size - 2, ...);
+if (sbi->s_backup_vhdr->signature != sbi->s_vhdr->signature) {
+        pr_warn("invalid secondary volume header\n");
+        goto out_free_backup_vhdr;   /* <- il mount muore qui */
+}
+```
+
+Il backup volume header e' letto dagli ultimi due settori della
+**partizione**, che qui sono **zero**: la firma non coincide con quella
+del volume header primario ('HX') e il mount muore. Il backup e' solo una
+copia di riserva del primario (il driver usa il primario per blocco,
+catalog file e allocation file; il backup serve solo all'ioctl di "bless"
+e al write-back), quindi **mancare non e' un motivo per rifiutare**.
+
+Patch scritta: `kernel/patches/0001-hfsplus-mount-a-volume-with-no-backup-volume-header.patch`
+(accetta il volume solo quando il backup **non c'e' affatto**: se c'e' ma
+ha un'altra firma, il mount viene ancora rifiutato). La CI
+(`.github/workflows/kernel-h815.yml`) la applica con `git apply` prima
+della build. La patch applica pulita (`patch -p1 --dry-run` senza errori).
+
+Nota: il backup verrebbe letto dalla **partizione** e non dal volume, ma
+su questo telefono volume e partizione hanno la stessa fine, quindi la
+differenza non c'e'.
+
+Due blocchi del telefono, entrambi risolti, entrambi da mettere a verbale
+perche' costano tempo:
+
+1. **L'unbind del driver sdhci_msm con la carta montata ha fatto
+   crashare il telefono.** L'esperimento (leggere i flag reali dei comandi
+   MMC con i tracepoint) era ben fatto ma troppo invasivo: con
+   `mmcblk0p49` montata su `/cache`, staccare il driver ha fatto perdere
+   il device node. Il telefono si e' riavviato con lo stack USB wedged:
+   si enumerava come "LGE Android Phone" (0x1004:0x6340) con
+   l'interfaccia fastboot (vendor specific, bulk IN/OUT) ma **nessuna
+   risposta** al protocollo, e lo schermo nero. Il recovery e' ripartito
+   da solo dopo ~3 minuti, come prima. **La lezione: non staccare il
+   driver di un device che ha un volume montato.** Con il tracepoint
+   avrei potuto leggere i flag di CMD1/CMD2/CMD3 senza toccare niente,
+   se avessi pensato prima all'alternativa.
+2. **Telefono con lo stack USB wedged: serve staccare la batteria.**
+   L'interfaccia USB di LAF e quella di fastboot hanno lo stesso
+   descrittore (class 255 / subclass 255 / protocol 255, endpoint bulk),
+   quindi dai descrittori non si distinguono: e' il protocollo che dice
+   quale sia. Tenne premuto Volume Su non serve a nulla in quello stato.
+   Con la batteria staccata e il telefono riacceso, il fastboot e'
+   tornato subito e normale.
+
+### FATTO 17 — cosa NON e' stato fatto (e non va rifatto)
+
+* **non** e' stato staccato il driver sdhci_msm con la carta montata
+  (vedi FATTO 16);
+* la CI del kernel con la patch hfsplus **non e' stata lanciata**: la
+  sessione si e' fermata all'aggiornamento della documentazione;
+* il log dello shim con lo sweep del CMD2 **non e' stato ancora letto**:
+  e' la prossima misura, e non costa niente (il telefono e' in fastboot
+  adesso, il ciclo e' `fastboot boot twrp-h815-hfs.img` +
+  `tools/read-shim-log.py`).
