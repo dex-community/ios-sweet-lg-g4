@@ -1,0 +1,39 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 1234567..abcdefg 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -104,6 +104,7 @@ bsd/dev/random/randomdev.c		standard
+ bsd/dev/memdev.c			standard
++bsd/dev/sweet_emmc.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.go 			standard
+ bsd/dev/unix_startup.c			standard
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index abc1234..def5678 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -766,6 +766,24 @@
+ 		}
+ 	}
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++//
++//	SWEET: root on eMMC (bsd/dev/sweet_emmc.c)
++//
++	if (rdBootVar && strncmp(rdBootVar, "emmc", 4) == 0) {
++		extern int sweet_emmc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int emmc_error = sweet_emmc_rootdev(root);
++		if (emmc_error) {
++			panic("IOFindBSDRoot: SWEET eMMC root %s unavailable: %d", rdBootVar, emmc_error);
++		}
++		strlcpy(rootName, "emmc0", rootNameSize);
++		IOLog("BSD root: emmc0, major %d, minor %d\n", major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++#endif
++
+ }
+ 
+ /*

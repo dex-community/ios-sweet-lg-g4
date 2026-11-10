@@ -3298,3 +3298,35 @@ in `docs/display-2026-11-10.txt`, analisi in `docs/DISPLAY-FINDINGS.md`.
   sequenza clock MMSSCC + DSI PLL disassemblata dal binario dell'LK;
   il display non si muove finche' i clock non sono accesi (tentativo
   precedente nello shim senza clock ha dato hang, anche in sola lettura).
+
+---
+## 2026-11-10 (sessione): Driver eMMC per XNU - inizio
+
+### FATTO 19 — Inizio sviluppo driver eMMC XNU
+
+**Obiettivo**: Driver per leggere il rootfs iOS da XNU su LG G4 H815.
+
+**Riferimento**: UniXNU-lumia950xl/drivers/NativeSdhci/ (stesso SoC MSM8992)
+- Indirizzi controller: HC=0xf9824900, CORE=0xf9824000
+- IRQ: 123 (HC), 138 (Power) — non usati (polling driver)
+- Stesso controller eMMC del Lumia 950 XL
+
+**Lavoro svolto**:
+1. Copiato driver NativeSdhci da riferimento in `xnu/drivers/NativeSdhci/`
+2. Creato driver semplificato BSD-style `xnu/bsd/dev/sweet_emmc.c`:
+   - Implementa `sweet_emmc_rootdev()` per `rd=emmc0`
+   - Card identification sequence (CMD0/1/2/3/7/16)
+   - Lettura blocchi con polling
+   - Read-only (writes return EROFS)
+3. Creata patch `xnu/patches/0029-sweet-emmc-root-device.patch`:
+   - Aggiunge `bsd/dev/sweet_emmc.c` a bsd/conf/files
+   - Modifica IOKitBSDInit.cpp per `rd=emmc0`
+
+**Note importanti**:
+- Il driver attuale rifà la card identification da zero
+- Il riferimento NativeSdhci è più sofisticato: riutilizza lo stato lasciato da LK
+- Test QEMU eMMC passato: `CMD2(0x09)`, C2OK, card identificata
+
+**Prossimo passo**:
+- Testare build XNU con CI
+- Se la patch compila, testare sul telefono con `rd=emmc0`
