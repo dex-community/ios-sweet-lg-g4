@@ -2793,3 +2793,30 @@ Bootare il kernel con `CONFIG_DEVMEM` e `CONFIG_HFSPLUS_FS`, poi:
    sapere **quale fase** hanga nel bootloop;
 2. leggere `0x50000000` (scratch RAM) con `dd if=/dev/mem`;
 3. montare `userdata` (il rootfs iOS) con `mount -t hfsplus` e leggerlo.
+
+### FATTO 6 — CORREZIONE: il "limite di 28 MB" di `fastboot boot` non esiste
+
+Una mia conclusione di questa sessione era sbagliata e va corretta: avevo
+dedotto che l'LK accettasse `fastboot boot` solo fino a ~28 MB, e lo avevo
+motivato con i due tentativi falliti da 40 MB. Ricontrollati, quei due
+fallimenti **non** avevano la dimensione come causa:
+
+* `fastboot boot backup/nethunter-boot.img` (40 MB) e
+  `fastboot boot backup/boot-stock.img` (40 MB) sono stati **accettati**
+  dal bootloader (`Sending 'boot.img' (40 MB) OKAY`, `Booting OKAY`): il
+  telefono si e' riavviato e non e' partito perche' il ramdock da 1 MB
+  vuole la ROM NetHunter installata, non perche' l'immagine fosse troppo
+  grande;
+* il "NetHunter troncato" da 11,6 MB non partiva perche' era troncato.
+
+Il limite reale e' `max-download-size` (512 MiB) e la dimensione dello
+scratch in RAM del bootloader. La documentazione del kernel LG parla di
+un'area scratch da 256 MB.
+
+**Perche' il kernel si impacchetta gzip.** Non per la dimensione, ma per
+il formato: le due immagini che sono gia' partite su questo telefono
+(`backup/twrp-3.7.0_9-0-g4.img` e `twrp-nethunter.img`) hanno il kernel
+**gzip** (magic `1f 8b`, 9.346.265 e 9.379.377 byte, che decomprimono in
+22.679.056 byte), e l'LK li decomprime. Il kernel nuovo gira in gzip per
+stare nel formato che l'LK ha gia' dimostrato di accettare; con il kernel
+grezzo l'immagine sarebbe 36,6 MB, con il kernel gzip 24,1 MB.
