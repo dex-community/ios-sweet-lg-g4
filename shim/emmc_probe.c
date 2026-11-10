@@ -160,7 +160,16 @@ static void ep_dump_regs(void)
 	con_str("E0 ctrl1 ", "");
 	con_hex("", rd32(HC + HC_CTRL1));
 	con_str("E0 pwrctrl ", "");
-	con_hex("", rd32(HC + HC_POWER_CTRL));
+	/*
+	 * SDHCI_PWR_CONTROL is a BYTE register at 0x29. Reading it as a 32 bit
+	 * word is an unaligned access, and the controller answers it with a
+	 * bus error: the run of 2026-11-10 died exactly there, with
+	 * FAR = 0xf9824929 and a data abort, right after this line was
+	 * printed. The bring-up code (shim/emmc_lk_bringup.inc) already reads
+	 * and writes this register as a byte; this dump did not, and that is
+	 * what made the phone reboot in a loop.
+	 */
+	con_hex("", rd8(HC + HC_POWER_CTRL));
 	con_str("E0 clkctl ", "");
 	con_hex("", rd32(HC + HC_CLK_CTRL));
 	con_str("E0 intstat ", "");

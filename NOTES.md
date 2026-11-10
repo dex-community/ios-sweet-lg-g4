@@ -2901,3 +2901,84 @@ commit che **non** e' nel repository `aoleary/G4-Titan-Kernel` (nessun
 branch e nessun fetch per SHA lo restituisce): e' un commit di un fork o di
 una copia locale. Per la CI si usa il branch `titan_bpf2` (`acc9bfa9`),
 che e' la stessa base 3.10.108 "TOSSUG Baby Fish".
+
+### FATTO 11 — IL BOOTLOOP: un accesso non allineato a HC+0x29
+
+Con il kernel con `CONFIG_DEVMEM` (costruito dalla CI) il log dello shim si
+legge **dalla RAM**, senza pstore e senza strumenti esterni: il shim lo
+scrive a `0x50000000` e `dd if=/dev/mem bs=4096 skip=327680` lo legge
+(196608 byte letti, il log in ASCII in testa). Il ciclo e':
+
+    fastboot boot shim/out/shim-boot.img     # il shim gira e scrive il log
+    fastboot boot twrp-h815-hfs.img          # il kernel HFS+ parte, ADB
+    adb exec-out 'dd if=/dev/mem ...'        # e il log si legge
+
+Il log letto (run del 2026-11-10, build con i fix HS400) termina cosi':
+
+    E0 begin
+    E0 core_pow    0000000000000041
+    E0 core_mciver 000000001000003E
+    E0 core_hcmode 0000000000000000
+    E0 core_10c    0000000000000000
+    E0 hc_vendor   0000000000340B1C
+    E0 pres        0000000001F80000
+    E0 ctrl1       0000000000000B30
+    E0 pwrctrl
+    PANIC SYNC
+    SLOT n=00000004 cpu=80000000
+    STAGE e0d0
+    ESR 0000000096000021
+    ELR 0000000000098318
+    FAR 00000000F9824929
+    X0  00000000F9824929
+
+**`FAR = 0xf9824929` e `HC = 0xf9824900`: il fault e' la lettura di
+`HC+0x29`, cioe' `SDHCI_PWR_CONTROL`, che e' un registro a BYTE.** La
+lettura a 32 bit di un indirizzo non allineato a 4 fa rispondere il
+controller con un errore di bus (data abort, ESR 0x96000021) e il telefono
+si riavvia: **e' questo il bootloop**.
+
+Due indizi che non puo' essere altro:
+* `HC+0x24` (PRESENT) e `HC+0x28` (CTRL1) si leggono senza problemi e sono
+  nella **stessa pagina** di 0x29: la pagina e' mappata, quindi il fault non
+  e' di traduzione ma di allineamento;
+* il codice di bring-up (`shim/emmc_lk_bringup.inc`) gia' legge e scrive
+  `HC+0x29` con `rd8`/`wr8`: solo il dump di `shim/emmc_probe.c` lo leggeva
+  a 32 bit.
+
+Correzione: `shim/emmc_probe.c` ora usa `rd8(HC + HC_POWER_CTRL)`. Un audit
+di tutti gli accessi a 32 bit del progetto non trova altri offset non
+allineati a 4.
+
+La lezione: con il controller MMC, **ogni registro a byte va letto a byte**.
+Il dump E0 era la prima cosa che leggeva quel registro, perche' e' il primo
+del blocco dopo CTRL1: e' per questo che il probe non era mai arrivato
+oltre.
+
+### FATTO 12 — il kernel con DEVMEM e HFS+ e' costruito e parte
+
+La CI (`.github/workflows/kernel-h815.yml`) compila il **kernel Titan**
+3.10.108 (`aoleary/G4-Titan-Kernel`, branch `titan_bpf2`) con
+`CONFIG_DEVMEM`, `CONFIG_HFS_FS` e `CONFIG_HFSPLUS_FS`, e il risultato
+**parte**: `Linux version 3.10.108-gacc9bfa9`, ADB attivo, `/dev/mem`
+presente, `hfsplus` in `/proc/filesystems`.
+
+L'Image e' 22.155.336 byte; impacchettato gzip (9.234.167) con il ramdisk
+TeamWin e il dt.img del telefono dà un boot image di 24.109.056 byte,
+avviato con `fastboot boot` senza scrivere nulla sul telefono.
+
+Nota: `CONFIG_DEVMEM` permette di leggere la **RAM** (`0x50000000` si
+legge), ma non l'**IMEM** a `0xfe80f000`: quello non e' RAM e `/dev/mem`
+risponde "Bad address" su arm64. Il trail IMEM va letto in un altro modo.
+
+### FATTO 13 — il volume su userdata e' HFS+ journaled
+
+La firma e' a offset 1024: `48 58` = **"HX"** (HFSX), versione 5, e subito
+dopo `48 46 53 4a` = **"HFSJ"**, il journal info block. Il volume e' quindi
+HFS+ **journaled**, e il driver `hfsplus` del kernel Linux non supporta il
+journaling: il mount fallisce con `hfsplus: invalid secondary volume
+header`.
+
+Per leggerlo servono due strade diverse: un tool userspace che parla HFS+
+(hfsplus-tools) oppure estrarre il volume sul PC e montarlo li' con
+`hdiutil`. Il rootfs iOS **non** e' stato toccato: e' solo stato letto.
