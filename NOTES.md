@@ -2820,3 +2820,63 @@ il formato: le due immagini che sono gia' partite su questo telefono
 22.679.056 byte), e l'LK li decomprime. Il kernel nuovo gira in gzip per
 stare nel formato che l'LK ha gia' dimostrato di accettare; con il kernel
 grezzo l'immagine sarebbe 36,6 MB, con il kernel gzip 24,1 MB.
+
+### FATTO 7 — il pstore si legge col TWRP TeamWin, e dice chi e' il kernel funzionante
+
+Il canale del pstore **non** e' perso: e' il kernel sbagliato a perderlo.
+Confrontando i due kernel che girano sul telefono:
+
+* il **NetHunter CAF** (quello di `twrp-nethunter.img`) ha
+  `console [pstore-1] enabled` nel dmesg, cioe' `CONFIG_PSTORE_CONSOLE` **attivo**:
+  scrive la propria console sul ramoops e sovrascrive il record del shim;
+* il **TWRP TeamWin** (`backup/twrp-3.7.0_9-0-g4.img`) non ha
+  `CONFIG_PSTORE_CONSOLE`: quando parte, `/sys/fs/pstore/console-ramoops-0`
+  contiene **la console del kernel precedente**.
+
+Verificato: dopo un boot di `twrp-nethunter.img` e poi uno di TeamWin, il
+file contiene la console del kernel NetHunter (3.10.108), non quella del
+TeamWin. **Per leggere una console di kernel si deve quindi avviare il
+TeamWin, non il NetHunter.**
+
+### FATTO 8 — il kernel che funziona su questo telefono e' il Titan 3.10.108
+
+Nella console del kernel salvata nel pstore:
+
+    CPU: 2 PID: 1 Comm: swapper/0 Not tainted 3.10.108-gbc450f725 #3
+    Hardware name: Qualcomm Technologies, Inc. MSM8992 P1 GLOBAL COM (DT)
+
+`3.10.108-gbc450f725` e' il **kernel Titan** (`aoleary/G4-Titan-Kernel`,
+branch `titan_bpf2`, HEAD `acc9bfa9`), non il tree
+`nepheloid/nethunter_kernel_g4`, che e' **3.10.84** ("TOSSUG Baby Fish",
+stessa base CAF). Il riepilogo precedente li confondeva.
+
+Il kernel Titan e' anche quello giusto per la scheda: `twrp_g4_defconfig`
+ha `CONFIG_MACH_MSM8992_P1_GLOBAL_COM=y` e
+`CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="msm8992-p1_global_com-rev-a
+...-rev-b ...-rev-c ...-rev-10"`, e i suoi `dts` ci sono
+(`arch/arm64/boot/dts/lge/msm8992-p1_global_com/`). La differenza di
+dimensione fra i due kernel (22.679.056 byte raw contro 21.650.712) sono
+esattamente i quattro dtb appenditi (4 x 307.200 = 1.228.800 byte).
+
+**Il kernel 3.10.84 non parte**: `fastboot boot` accetta l'immagine, il
+telefono torna in fastboot dopo 10 secondi e nel ramoops **non c'e' una
+riga** della sua console (il pstore contiene ancora quella del 3.10.108,
+zero panic). Il fallimento e' quindi a monte del kernel, non un crash.
+
+Nota: la console del 3.10.108 salvata nel pstore contiene un
+`WARNING: irq_set_affinity_notifier ... overwriting previous IRQ affinity
+notifier` (`kernel/lge/msm8992/kernel/irq/manage.c:285`): e' un warning, non
+un panic, e il kernel parte lo stesso.
+
+### FATTO 9 — la partizione `boot` non e' piu' il backup stock
+
+Dump di `mmcblk0p38` (41.943.040 byte): sha256 `09d9ee0bc0a4100c3469d8922b3752527efe6537816d3c00755e14bd5f33f786`,
+diverso da `backup/boot-stock.img` (`070980b2...`). Il contenuto e' un boot
+image ANDROID con kernel da 9.379.377 byte (gzip, 22.679.056 raw, il
+NetHunter/Titan) e ramdisk da 1.015.380 byte: il boot image **del progetto**
+(kernel + ramdisk sweet), non lo stock e non il TWRP TeamWin.
+
+Non e' un danno e non e' stato fatto in questa sessione (qui si e' sempre
+usato `fastboot boot`, che non scrive nulla). Per ripristinare il backup
+c'e' `tools/lglaf/partitions.py boot --restore backup/boot-stock.img`, gia'
+collaudato; la partizione `boot` non e' comunque necessaria per i test.
