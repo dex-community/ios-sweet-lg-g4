@@ -94,9 +94,10 @@ jobs:
           bash scripts/config --file build/.config \
             -e DEVMEM \
             -e HFS_FS \
-            -e HFSPLUS_FS
+            -e HFSPLUS_FS \
+            -e MACH_MSM8992_P1_GLOBAL_COM
           make O=build olddefconfig
-          grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1)=' build/.config
+          grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1|MACH_MSM8992_P1_GLOBAL_COM)=' build/.config
 
       - name: Patch the old dtc for bison 3
         run: |
