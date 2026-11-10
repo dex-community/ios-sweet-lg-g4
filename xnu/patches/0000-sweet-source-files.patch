@@ -212,14 +212,14 @@ index 0000000..53ef344
 +    printf("emmc: initializing...\n");
 +    
 +    /* Map registers - use pmap_map instead of ml_io_map */
-+    hc_base = pmap_map(HC_BASE, HC_BASE + HC_SIZE, VM_PROT_READ | VM_PROT_WRITE, VM_WIMG_IO);
++    hc_base = ml_io_map(HC_BASE, HC_SIZE);
 +    if (!hc_base) {
 +        printf("emmc: failed to map HC registers\n");
 +        return -1;
 +    }
 +    
 +    /* Allocate bounce buffer - use kernel_memory_allocate */
-+    kr = kernel_memory_allocate(kernel_map, &emmc_buffer, EMMC_BUFFER_SIZE, 0, KMA_KOBJECT | KMA_ZERO);
++    kr = kernel_memory_allocate(kernel_map, &emmc_buffer, EMMC_BUFFER_SIZE, 0, KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_NONE);
 +    if (kr != KERN_SUCCESS) {
 +        printf("emmc: failed to allocate buffer\n");
 +        return -1;
@@ -356,7 +356,7 @@ index 0000000..53ef344
 +static int emmc_read(dev_t dev, struct uio *uio, int ioflag)
 +{
 +    uint64_t offset = uio->uio_offset;
-+    int n = uio_resid_64(uio);
++    user_ssize_t n = uio_resid_64(uio);
 +    int error = 0;
 +    
 +    if (!emmc_initialized)
@@ -399,13 +399,13 @@ index 0000000..53ef344
 +    .d_close = emmc_close,
 +    .d_read = emmc_read,
 +    .d_write = emmc_write,
-+    .d_ioctl = noioctl,
-+    .d_stop = nostop,
-+    .d_reset = noreset,
++    .d_ioctl = enoioctl,
++    .d_stop = eno_stop,
++    .d_reset = eno_reset,
 +    .d_ttys = NULL,
-+    .d_select = noselect,
-+    .d_mmap = nommap,
-+    .d_strategy = nostrategy,
++    .d_select = eno_select,
++    .d_mmap = eno_mmap,
++    .d_strategy = eno_strat,
 +    .d_awake = NULL,
 +    .d_bcount = 0,
 +    .d_type = 0
@@ -438,6 +438,8 @@ index 0000000..53ef344
 +    *dev = makedev(12, 0);
 +    return 0;
 +}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 +    
