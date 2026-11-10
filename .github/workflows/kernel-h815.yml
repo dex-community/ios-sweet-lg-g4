@@ -1,0 +1,113 @@
+name: kernel-h815
+
+# The kernel for this phone has to be built on Linux: the CAF 3.10 tree wants
+# GCC 4.9 and the dtbTool binary is an x86_64 ELF. On a Mac there is no
+# Docker, so the build runs here.
+#
+# What this produces is the kernel image for the H815 (the international
+# LG G4), with two things turned on that the recovery images do not have:
+#
+#   CONFIG_DEVMEM      -> /dev/mem, to read the IMEM trail and the RAM the
+#                          shim left behind (tools/read-trail-imem.py)
+#   CONFIG_HFSPLUS_FS  -> to mount the iOS rootfs, which lives on `userdata`
+#                          in HFS+ and that no stock kernel can read
+#
+# The board is never to be confused with the others: only the H815 variant
+# is built here. The h810/h811/h812/h818/h819/ls991 variants are different
+# phones (h810 even boots with androidboot.serialno=LGLS991).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kernel-h815.yml'
+
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    name: kernel-h815-hfsplus-devmem
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Fetch the kernel source
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/kernel"
+          cd "$RUNNER_TEMP/kernel"
+          git init -q
+          git remote add origin https://github.com/nepheloid/nethunter_kernel_g4.git
+          # The commit the working copy was verified against.
+          git fetch -q --depth 1 origin 850e70b7 || git fetch -q --depth 1 origin
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libncurses-dev \
+            cpio rsync xz-utils python3
+
+      - name: Install the toolchain (GCC 4.9)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          # The prebuilt AOSP aarch64 GCC 4.9: the same compiler the kernel
+          # was written for. The old Linaro download is gone from its site.
+          curl -sSL -o tc.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/android-5.0.0_r4.tar.gz"
+          mkdir -p tc
+          tar xzf tc.tar.gz -C tc
+          # Find the compiler wherever the archive put it.
+          GCC=$(find "$RUNNER_TEMP/tc" -name 'aarch64-linux-android-gcc' -type f | head -1)
+          if [ -z "$GCC" ]; then
+            echo "no aarch64-linux-android-gcc in the archive" >&2
+            ls -R "$RUNNER_TEMP/tc" | head -50 >&2
+            exit 1
+          fi
+          PREFIX=$(dirname "$GCC")/aarch64-linux-android-
+          echo "CROSS_COMPILE=$PREFIX" >> "$GITHUB_ENV"
+          echo "using $PREFIX"
+          "$PREFIX"gcc --version | head -2
+
+      - name: Configure the kernel (H815 + the two options we need)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP/kernel"
+          export ARCH=arm64
+          make O=build stock_defconfig
+          # The variant option of this tree (VARIANT_DEFCONFIG) is dead code:
+          # scripts/kconfig/Makefile exports it but nothing reads it, so the
+          # board is selected in the config itself.
+          ./scripts/config --file build/.config \
+            -e DEVMEM \
+            -e HFS_FS \
+            -e HFSPLUS_FS
+          make O=build olddefconfig
+          grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1)=' build/.config
+
+      - name: Build
+        run: |
+          set -e
+          cd "$RUNNER_TEMP/kernel"
+          export ARCH=arm64
+          make O=build -j"$(nproc)"
+
+      - name: Collect the artifacts
+        if: always()
+        run: |
+          mkdir -p out
+          cp "$RUNNER_TEMP/kernel/build/arch/arm64/boot/Image" out/Image 2>/dev/null || true
+          cp "$RUNNER_TEMP/kernel/build/.config" out/config-h815-hfsplus-devmem 2>/dev/null || true
+          ls -la out || true
+
+      - name: Upload the kernel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-h815-hfsplus-devmem
+          path: out/
+          if-no-files-found: warn
