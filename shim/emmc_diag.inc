@@ -9,9 +9,9 @@
  *   every variant is tried in the same boot, in order, and the one that got
  *   the furthest is reported through the wait time:
  *
- *       wait = 40 s + 50 s * variant + 10 s * stage
+ *       wait = 40 s + 25 s * variant + 5 s * stage
  *
- *   variant 0..7  which variant (see the table below)
+ *   variant 0..9  which variant (see the table below)
  *   stage   0..3  how far it got (0 nothing, 1 CMD1 answered, 2 CMD1 ready,
  *                 3 identified)
  *
@@ -63,18 +63,19 @@ static const struct lk_var lk_diag_variants[] = {
 	 *                           the bus power comes from the PMIC)
 	 *   nobody answers      -> the factor of the run 5 is not reproduced
 	 */
-	/* 0: the run 5 winner, unchanged (control). */
-	{ 0x0f, 400000, 0 },
+	/* 0: the run 5 winner + the clock path back to legacy (the default). */
+	{ 0x0f, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE },
 	/* 1: the control + the LK's PWRCTL acknowledgement. */
-	{ 0x0f, 400000, LK_F_PWR_ACK },
+	{ 0x0f, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE | LK_F_PWR_ACK },
 	/* 2: the same + 10 s before the identification. */
-	{ 0x0f, 400000, LK_F_PWR_ACK | LK_F_DELAY_10S },
+	{ 0x0f, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE |
+	  LK_F_PWR_ACK | LK_F_DELAY_10S },
 	/* 3: the control without writing HC+0x29 at all. */
-	{ LK_PWR_KEEP, 400000, 0 },
+	{ LK_PWR_KEEP, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE },
 	/* 4: the voltage the factory LK really uses on this CAPS1 (1.8 V). */
-	{ 0x0b, 400000, 0 },
+	{ 0x0b, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE },
 	/* 5: 1.8 V + the LK's PWRCTL acknowledgement. */
-	{ 0x0b, 400000, LK_F_PWR_ACK },
+	{ 0x0b, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE | LK_F_PWR_ACK },
 	/*
 	 * 6 and 7: the registers the factory LK writes (INT_ENABLE 0x000b /
 	 * 0xffff and CTRL1 = 0x10).
@@ -87,9 +88,35 @@ static const struct lk_var lk_diag_variants[] = {
 	 * mode, where the two ways of driving the power fight each other.
 	 */
 	/* 6: the LK's registers, at 3.3 V. */
-	{ 0x0f, 400000, LK_F_LK_REGS },
+	{ 0x0f, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE | LK_F_LK_REGS },
 	/* 7: the LK's registers, at 1.8 V (the voltage the LK really uses). */
-	{ 0x0b, 400000, LK_F_LK_REGS },
+	{ 0x0b, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE | LK_F_LK_REGS },
+	/*
+	 * 8 and 9 (2026-11-10): THE CLOCK PATH.
+	 *
+	 * The card of this phone is an HS400 card (the dmesg of the phone's
+	 * own Android kernel says "new HS400 MMC card at address 0001"), the
+	 * LK talks to it in HS400 and leaves the MCI on the HS400 clock path
+	 * (CORE_VENDOR_SPEC: MCLK_SEL = HS400, SELECT_IN = HS400). The
+	 * working Linux driver puts the path back to legacy before it talks
+	 * to a card that is not in HS400; the eight variants above never did,
+	 * because LK_F_VENDOR_RESET and LK_F_CLR_PWRSAVE were defined and
+	 * never used.
+	 *
+	 *   V8  the OLD control: no clock path reset at all. It has to stay
+	 *       mute: it is the comparison that proves the clock path was
+	 *       the factor.
+	 *   V9  the clock path reset alone, with the card clock gating (the
+	 *       CORE_CLK_PWRSAVE bit) left as the LK left it.
+	 *
+	 * With ten variants the wait goes up to 40 + 25*9 + 5*3 = 280 s, so
+	 * the diagnostic build needs a longer watchdog than the 60 s of the
+	 * normal one (WDT_GUARD_MS=300000).
+	 */
+	/* 8: the OLD control, without the clock path reset. */
+	{ 0x0f, 400000, 0 },
+	/* 9: the clock path reset alone. */
+	{ 0x0f, 400000, LK_F_VENDOR_RESET },
 };
 
 #define LK_DIAG_NVARS	(sizeof(lk_diag_variants) / sizeof(lk_diag_variants[0]))

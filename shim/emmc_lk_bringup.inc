@@ -282,9 +282,10 @@ static int emmc_lk_bringup(const struct lk_var *v)
 	 * talks to a card that is not in HS400.
 	 */
 	{
-		uint32_t vs = rd32(HC + HC_VENDOR_SPEC);
+		uint32_t vs_in = rd32(HC + HC_VENDOR_SPEC);
+		uint32_t vs = vs_in;
 
-		trail(0x0077, vs);
+		trail(0x0077, vs_in);
 		if (v->flags & LK_F_VENDOR_RESET) {
 			vs = (vs & ~CORE_HC_MCLK_SEL_MASK) |
 			     CORE_HC_MCLK_SEL_DFLT;
@@ -295,6 +296,18 @@ static int emmc_lk_bringup(const struct lk_var *v)
 			vs &= ~CORE_CLK_PWRSAVE;
 		wr32(HC + HC_VENDOR_SPEC, vs);
 		trail(0x0078, rd32(HC + HC_VENDOR_SPEC));
+		g_diag[D_WAKE_VS] = vs;
+
+		/*
+		 * In the console, because the trail cannot be read from the
+		 * recovery. This is the register that says WHICH clock path
+		 * the MCI is using, and it is the difference between "the
+		 * controller talks to the card" and "the controller talks to
+		 * nobody" (see the note on the HS400 path below).
+		 */
+		con_hex2("VSPC", "in=", vs_in, "out=", vs);
+		con_hex2("VSPC", "mclk=", (vs >> 8) & 3u, "sel=", (vs >> 19) & 7u);
+		con_hex2("VSPC", "sen=", (vs >> 18) & 1u, "pws=", vs & 1u);
 	}
 
 	STEP(32);
@@ -449,10 +462,24 @@ static int emmc_lk_bringup(const struct lk_var *v)
 		trail(0x0075, 0x0a);
 	}
 	if (!(v->flags & LK_F_NO_WAKE)) {
-		rc = emmc_cmd(CMD_SLEEP_AWAKE, LK_RCA << 16, CMD_RESP_48BUSY, &rsp);
-		trail(0x0074, (uint32_t)rc);	/* a timeout means it was awake */
-		if (!rc)
-			emmc_delay_us(10000);
+		/*
+		 * The card is asleep: the factory LK put it to sleep before
+		 * jumping to the kernel (mmc_put_card_to_sleep, mmc.c:3411).
+		 *
+		 * emmc_wake() sends CMD5 (SLEEP_AWAKE) with the sleep bit
+		 * CLEAR -- first with the BROADCAST address (0xffff0000, which
+		 * per the spec reaches every card whatever RCA it has), then
+		 * with the RCA the LK used (2) -- and then selects the card
+		 * with CMD7. It returns 0 when the card is back.
+		 *
+		 * A failed wake is NOT fatal: the card may be awake and
+		 * deselected, and the GO_IDLE below is what the LK does first
+		 * anyway. So the identification goes on and the readings of the
+		 * wake-up stay in the diagnostic slots (D_WAKE_BC, D_WAKE_RSP).
+		 */
+		rc = emmc_wake();
+		trail(0x0074, (uint32_t)rc);
+		con_hex2("WAKE", "rc=", (uint32_t)rc, "rca=", g_rca);
 	}
 
 	STEP(37);

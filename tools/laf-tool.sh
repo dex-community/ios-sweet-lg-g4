@@ -20,9 +20,18 @@ case "$CMD" in
         $PYTHON tools/lglaf/partitions.py --list
         ;;
     restore-boot)
-        IMG="${2:-kdz/extracted/boot.image}"
+        # THE VERIFIED IMAGE IS THE DEFAULT (2026-11-10).
+        #
+        # The old default preferred "kdz/extracted/boot.image", the boot
+        # image of the ORIGINAL LG firmware (sha256 2267f77c...). That is
+        # NOT the image this project works with: the phone boots the TWRP
+        # 3.7 recovery from "boot" (backup/boot-stock.img, sha256
+        # 070980b2...), and that is the image that has to come back after
+        # every test. Restoring the KDZ one leaves the phone booting the
+        # stock Android instead, with no ADB and no pstore.
+        IMG="${2:-backup/boot-stock.img}"
         if [ ! -f "$IMG" ]; then
-            IMG="backup/boot-stock.img"
+            IMG="kdz/extracted/boot.image"
         fi
         echo "[*] Restoring boot partition from $IMG..."
         $PYTHON tools/lglaf/partitions.py boot --restore "$IMG"

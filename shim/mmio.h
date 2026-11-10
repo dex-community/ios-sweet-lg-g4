@@ -125,8 +125,27 @@ static const uint32_t mmio_mem_size[MMIO_MEM_N] = {
 };
 #endif
 
-/* The READ-ONLY windows: the splash framebuffer. The XPU refuses the
- * writes, so they stay out of the write list. */
+/* The READ-ONLY windows: the splash framebuffer.
+ *
+ * The splash framebuffer: the XPU refuses the writes, so they stay out of
+ * the write list.
+ *
+ * The MDP window (0xfd900000, 0x90000) is NOT here on purpose. It was added
+ * on 2026-11-10 for the D0 display probe and it caused a hang, twice: the
+ * LK turns the display off before jumping to the kernel, so at the shim's
+ * entry the MDSS/DSI clocks are OFF, and a read of a window whose clock is
+ * off does not complete. The transaction stays on the bus, the CPU stops
+ * inside the access, and the phone is gone.
+ *
+ * That is the same mechanism as the two hangs of 2026-11-09 (one of them a
+ * READ of the TLMM). The allowlist says WHICH addresses may be touched; it
+ * does NOT say that the window is powered. A new window needs the PROOF
+ * that it is alive, and the MDP window has not got it.
+ *
+ * The display is measured from the recovery instead, where the real kernel
+ * drives the panel:
+ *   /sys/kernel/debug/mdp/ and /sys/kernel/debug/mdss_panel/dsi0/
+ */
 #define MMIO_RO_N	2
 
 static const uintptr_t mmio_ro_base[MMIO_RO_N] = {

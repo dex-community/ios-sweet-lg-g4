@@ -122,6 +122,38 @@
 #define CMD_IDX_CHECK		0x10
 #define CMD_DATA_PRESENT	0x20
 
+/*
+ * The two response types that are NOT R1.
+ *
+ * The bits [1:0] of the command register are the response type (00 none,
+ * 01 136 bits, 10 48 bits, 11 48 bits + busy); the bits above carry the
+ * CRC check, the index check and the data present. So a response type is
+ * the low two bits PLUS the flags that belong to it, and the two "special"
+ * types below are the low two bits with the high bits CLEAR:
+ *
+ *   CMD_RESP_R3      0x82  the OCR: 48 bits, NO CRC7 and NO index.
+ *   CMD_RESP_R3BUSY  0x83  the OCR and the busy wait that follows it.
+ *
+ * Why they exist (this was a bug, found on 2026-11-10 by comparing with the
+ * driver Linux that works on this phone):
+ *
+ *   - the INDEX check belongs to the 136 bit response (R2) only: the SDHCI
+ *     spec says the index field exists in the 136 bit answer, so asking the
+ *     controller to compare it on a 48 bit answer is meaningless. The
+ *     working driver (drivers/mmc/host/sdhci.c) sets SDHCI_CMD_INDEX only
+ *     for MMC_RSP_136;
+ *   - the CRC7 belongs to R1 (R2, R6), NOT to the OCR of CMD1 and CMD5:
+ *     the OCR has no CRC at all. The working driver sends CMD5 as
+ *     MMC_RSP_R1B WITHOUT MMC_RSP_CRC, that is with no CRC check, and the
+ *     OCR of CMD1 as MMC_RSP_R3, also with no CRC check.
+ *
+ * With the wrong flags the controller throws away a perfectly good answer
+ * (CRC error) or flags a bogus index error: the card looks mute even when
+ * it answered.
+ */
+#define CMD_RESP_R3		0x82
+#define CMD_RESP_R3BUSY		0x83
+
 /* Transfer mode (0x0c). Standard SDHCI: bit 4 = read, bit 2 = auto-CMD12. */
 #define MODE_READ		0x0010
 
@@ -161,15 +193,53 @@
 #define XFER_TIMEOUT_US		2000000u
 
 /*
- * Where the log goes. Both partitions are empty spares, they start low
- * enough and nothing reads them. Numbers from the phone's GPT
- * (/sys/class/block/mmcblk0pN/start) plus 256 sectors:
+ * Where the log goes, IF the card writes are enabled at all.
+ *
+ * THE GEOMETRY OF THIS CARD, measured on the phone on 2026-11-10
+ * (/proc/partitions + blockdev, the sizes in 512 byte sectors):
+ *
+ *   p1 modem        0 ..    176128      p27 fsc           316416 ..   317440
+ *   p22 misc        208896 ..  241664    p30 DDR           319488 ..   323584
+ *   p23 persist     241664 ..  307200    p35 persistent    327680 ..   331776
+ *   p24 modemst1    307200 ..  310272    p37 laf           339968 ..   438272
+ *   p26 fsg         313344 ..  316416    p38 boot          438272 ..   520192
+ *                                        p39 recovery      520192 ..   602112
+ *                                        p49 cache         9834496 .. 12357632
+ *                                        p50 userdata      12357632 .. 60985344
+ *                                        p51 grow          60985344 .. 61009886
+ *
+ * THE OLD ADDRESSES WERE WRONG (2026-11-10).
+ *
+ * The old code took the start of two "empty spare" partitions and added 256
+ * sectors:
+ *
  *   spare1  p21  start 259072  ->  log at 259328
  *   spare2  p36  start 385024  ->  log at 385280
- * "misc" is NOT used (LG keeps its hardware info there), nor "cache".
+ *
+ * but those numbers belong to a DIFFERENT layout: in the table above no
+ * partition starts at 259072 or at 385024, and the two addresses fall
+ * INSIDE two partitions that the project forbids:
+ *
+ *   259328 is in p23 = persist  (241664 .. 307200)
+ *   385280 is in p37 = laf      (339968 .. 438272)
+ *
+ * So every run of the shim, since the day those constants were written,
+ * has been overwriting the modem's persistent data and the LAF (the
+ * download mode) partition with 512 bytes of log. That is why the phone
+ * started behaving strangely after a run.
+ *
+ * There is no safe place to write on this card: the partitions follow each
+ * other with no gap, and the only free space is the tail after p51 (grow),
+ * which is exactly the space the "grow" partition takes when it grows
+ * (that would be the iOS rootfs).
+ *
+ * SO THE CARD WRITES ARE OFF BY DEFAULT (SHIM_EMMC_WRITE=0). The log goes
+ * to the ramoops console zone and to the scratch RAM at 0x50000000, which
+ * are the channels that do not touch anything. Whoever turns the writes on
+ * has to choose an address and say why it is safe.
  */
-#define LOG_LBA_SPARE1		259328UL
-#define LOG_LBA_SPARE2		385280UL
+#define LOG_LBA_SPARE1		259328UL	/* NOT SAFE: inside p23 (persist) */
+#define LOG_LBA_SPARE2		385280UL	/* NOT SAFE: inside p37 (laf)     */
 
 /* Error codes. They end up in the log sector, so they stay small. */
 #define EMMC_OK			0
@@ -315,6 +385,10 @@ enum {
 	D_DAT0,		/* 1 if the DAT0 level is visible in present state     */
 	D_CMD16_R1,	/* R1 of the first CMD16, or 0xdead0000 | error        */
 	D_RCA,		/* RCA that answered to the wake-up, 0 if not needed   */
+	D_WAKE_BC,	/* CMD5 awake with the BROADCAST address: the answer  */
+	D_WAKE_RSP,	/* CMD5 awake with the RCA: the answer                */
+	D_WAKE_INT,	/* interrupt status of the last wake-up CMD5         */
+	D_WAKE_VS,	/* the vendor spec register (the clock path)          */
 	D_SEC_COUNT,	/* EXT_CSD SEC_COUNT                                   */
 	D_EXT_MODE,	/* bus width | hs timing << 8 | part cfg << 16 | dev type << 24 */
 	D_ADDR_MODE,	/* 1 = sector addressing, 0 = byte addressing          */
@@ -548,8 +622,16 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 		return -1;
 	}
 
-	if (resp_type == CMD_RESP_48 || resp_type == CMD_RESP_48BUSY)
+	/*
+	 * The CRC check belongs to the 48 bit answer of R1 (it has a CRC7),
+	 * the index check to the 136 bit one (it has the index). The OCR
+	 * (CMD_RESP_R3 / CMD_RESP_R3BUSY) has neither and must be asked
+	 * without them, exactly like the working Linux driver does.
+	 */
+	if (resp_type == CMD_RESP_136)
 		flags |= CMD_CRC_CHECK | CMD_IDX_CHECK;
+	else if (resp_type == CMD_RESP_48 || resp_type == CMD_RESP_48BUSY)
+		flags |= CMD_CRC_CHECK;
 
 	emmc_ack();
 	wr32(HC + HC_ARGUMENT, argument);
@@ -569,7 +651,7 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 	if (rsp)
 		*rsp = rd32(HC + HC_RESPONSE);
 	wr32(HC + HC_INT_STATUS, INT_CMD_DONE);
-	if (resp_type == CMD_RESP_48BUSY)
+	if (resp_type == CMD_RESP_48BUSY || resp_type == CMD_RESP_R3BUSY)
 		emmc_wait_busy();
 	emmc_ack();
 	trail(0x0100 | index, rd32(HC + HC_RESPONSE));
@@ -764,38 +846,95 @@ static void emmc_snapshot(void)
  * bit 31, which the spec does not define). That leaves CMD16 failing after
  * the "wake", exactly the symptom seen on the phone.
  *
- * The RCA is whatever LK assigned: Qualcomm's MMC_RCA is 2. A wrong RCA
- * just times out (CMD_TIMEOUT_US), so 1 is tried as a fallback. If the CMD5
- * is not answered the card may simply be deselected and awake, so CMD7 is
- * attempted anyway.
+ * The addresses that are tried, and the reason for the broadcast one, are
+ * written in the comment of the function below.
  */
-#if !EMMC_LK_BRINGUP		/* only the legacy path uses the wake-up */
+/*
+ * The wake-up.
+ *
+ * The card is asleep when the shim starts: the factory LK puts it to sleep
+ * before jumping to the kernel (mmc_put_card_to_sleep, mmc.c:3411: CMD7
+ * deselect, then CMD5 with the sleep bit SET).
+ *
+ * The wake-up command is CMD5 (SLEEP_AWAKE) with the sleep bit CLEAR. The
+ * argument carries the RCA in the bits [31:16] and the sleep/awake bit in
+ * bit 15: that is the LK's own encoding (MMC_CARD_RCA_BIT = 16 and
+ * MMC_CARD_SLEEP = 1<<15, mmc.h:568-569) and the one of the driver Linux
+ * that works on this phone (drivers/mmc/core/mmc_ops.c, mmc_card_sleepawake):
+ *
+ *	cmd.opcode = MMC_SLEEP_AWAKE;
+ *	cmd.arg = card->rca << 16;		<-- awake: the sleep bit is clear
+ *	if (sleep)
+ *		cmd.arg |= 1 << 15;
+ *
+ * THE ADDRESSES, AND WHY THE BROADCAST ONE COMES FIRST
+ * ---------------------------------------------------
+ *   0xffff0000  the BROADCAST address: per the spec it reaches every card
+ *               on the bus, whatever RCA it has. It is the only command
+ *               that can wake a card whose RCA the host does not know, so
+ *               it is the one that tells "the card is asleep" apart from
+ *               "the card does not answer at all".
+ *
+ *               (The RCA 0 that the previous version of this code used is
+ *               NOT a broadcast address: it addresses the card whose RCA
+ *               is 0, that is a card that never left the identification
+ *               state, and such a card is not asleep either. The comment
+ *               that said "per the JEDEC spec the card answers with its
+ *               OCR whatever RCA it had" was wrong.)
+ *
+ *   0x00020000  the RCA the LK assigned (MMC_RCA = 2, mmc.h:568), that is
+ *               the address the card really has after the LK's own boot.
+ *
+ *   0x00010000  the RCA 1, as a last resort.
+ *
+ * The answer of CMD5 is an OCR (R3): 48 bits, with NO CRC7 and NO index, so
+ * it is asked with CMD_RESP_R3BUSY and not with CMD_RESP_48BUSY.
+ *
+ * The function returns 0 when the card answered and CMD7 selected it, -1
+ * when nothing answered. The answers are kept in their own diagnostic slots
+ * (D_WAKE_BC, D_WAKE_RSP, D_WAKE_INT), NOT in D_RCA: the previous version
+ * wrote the answer of the RCA 0 into D_RCA and then the loop overwrote it
+ * with the RCA that worked, so the interesting reading was lost exactly in
+ * the case that mattered.
+ */
 static int emmc_wake(void)
 {
 	static const uint16_t candidates[] = { 2, 1 };
 	uint32_t rsp = 0;
+	int rc;
 
+	/* (1) the broadcast address: every card, whatever RCA it has. */
+	STEP(STEP_WAKE_CMD5);
+	rc = emmc_cmd(CMD_SLEEP_AWAKE, 0xffff0000u, CMD_RESP_R3BUSY, &rsp);
+	g_diag[D_WAKE_BC] = rc ? (0xdead0000u | (uint32_t)rc) : rsp;
+	g_diag[D_WAKE_INT] = rd32(HC + HC_INT_STATUS);
+	trail(0x007a, g_diag[D_WAKE_BC]);
+	con_hex2("WAKE", "bc=", g_diag[D_WAKE_BC], "int=", g_diag[D_WAKE_INT]);
+	/* Give the card the time to leave the Sleep state (tAWAKE). */
+	emmc_delay_us(10000);
+
+	/* (2) the RCA the LK used, and then the historical fallback. */
 	for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
 		uint32_t rca = candidates[i];
-		int awake_rc;
 
 		STEP(STEP_WAKE_CMD5);
-		awake_rc = emmc_cmd(CMD_SLEEP_AWAKE, rca << 16,
-				     CMD_RESP_48BUSY, &rsp);
-		/* Give the card time to leave the Sleep state (tAWAKE). */
-		if (!awake_rc)
-			emmc_delay_us(10000);
+		rc = emmc_cmd(CMD_SLEEP_AWAKE, rca << 16, CMD_RESP_R3BUSY, &rsp);
+		g_diag[D_WAKE_RSP] = rc ? (0xdead0000u | (uint32_t)rc) : rsp;
+		g_diag[D_WAKE_INT] = rd32(HC + HC_INT_STATUS);
+		trail(0x007b, g_diag[D_WAKE_RSP]);
+		con_hex2("WAKE", "rca=", rca, "rsp=", g_diag[D_WAKE_RSP]);
+		emmc_delay_us(10000);
 
 		STEP(STEP_WAKE_SELECT);
 		if (!emmc_cmd(CMD_SELECT_CARD, rca << 16, CMD_RESP_48BUSY, &rsp)) {
 			g_rca = (uint16_t)rca;
-			g_diag[D_RCA] = rca | (awake_rc ? 0x10000u : 0);
+			/* bit 15 = the CMD5 answered, bits [7:0] = the RCA. */
+			g_diag[D_RCA] = rca | (rc ? 0u : 0x8000u);
 			return 0;
 		}
 	}
 	return -1;
 }
-#endif /* !EMMC_LK_BRINGUP */
 
 static uint32_t le32(const uint8_t *p)
 {
@@ -810,8 +949,51 @@ static uint32_t le32(const uint8_t *p)
  * The factory LK, the working Linux driver and this file disagree on a few
  * points. Each of them is a flag or a value here, so that the diagnostic
  * build (EMMC_DIAG_VARIANTS) can try them one at a time and find out which
- * one decides whether the card answers. The default variant is the one that
- * mimics the LK.
+ * one decides whether the card answers.
+ *
+ * THE DEFAULT VARIANT IS NOT "WHAT THE LK DOES" ANY MORE (2026-11-10).
+ * It is what the WORKING Linux driver does, and the difference is the whole
+ * point of the change.
+ *
+ * WHY: the card is an HS400 card on this phone. The dmesg of the phone's own
+ * Android kernel says it:
+ *
+ *	mmc0: BKOPS_EN bit = 1
+ *	mmc0: sdhci_msm_execute_tuning: finally setting the tuning phase to 11
+ *	mmc0: new HS400 MMC card at address 0001
+ *
+ * So the LK talks to the card in HS400 (200 MHz, DDR, with the CDC and the
+ * DLL in the HS400 path) and then puts the card to sleep and jumps to the
+ * kernel. The working driver, before it talks to a card that is NOT in
+ * HS400, puts the clock path back to the legacy one
+ * (drivers/mmc/host/sdhci-msm.c, sdhci_msm_set_clock):
+ *
+ *	 * HS400 - divided clock (free running MCLK/2)
+ *	 * All other modes - default (free running MCLK)
+ *	...
+ *	 writel_relaxed((readl_relaxed(ioaddr + CORE_VENDOR_SPEC)
+ *			  & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_HS400, ...)
+ *	 and, to enter HS400:
+ *	 | CORE_HC_SELECT_IN_HS400 | CORE_HC_SELECT_IN_EN
+ *
+ * The shim, that talks to the card at 400 kHz in legacy mode, NEVER did
+ * that: the MCI stayed on the HS400 clock path (MCLK_SEL = HS400,
+ * SELECT_IN = HS400) and the identification clock did not reach the card.
+ * The card therefore heard NOTHING: the controller sent the commands, the
+ * response register stayed at zero and the command timed out
+ * (INT_STATUS = 0x00018000 = error | command timeout, no CRC error, because
+ * nothing came back). That is the symptom of all eight variants of the
+ * 2026-11-09 sweep: NONE of them ever touched CORE_VENDOR_SPEC, so none of
+ * them ever tested this.
+ *
+ * The same register also holds CORE_CLK_PWRSAVE (bit 1), the bit that lets
+ * the controller gate the card clock by itself when there is no traffic:
+ * the working driver clears it while it talks to the card
+ * (msm_sdhci_set_clock) and puts it back afterwards. It is cleared here too.
+ *
+ * LK_F_VENDOR_RESET and LK_F_CLR_PWRSAVE are therefore ON in the default
+ * variant, and the sweep keeps the old behaviour in a variant of its own, so
+ * that the two can be compared.
  */
 #define LK_PWR_KEEP	0xffffffffu	/* do not write HC+0x29 at all      */
 #define LK_PWR_FORCE	0xfffffffeu	/* write it even if the power is on */
@@ -851,7 +1033,21 @@ struct lk_var {
  * The clock target is 400 kHz.
  */
 #if !EMMC_DIAG_VARIANTS
-static const struct lk_var lk_var_default = { 0x0f, 400000, 0 };
+/*
+ * The default bring-up.
+ *
+ * The bus power goes up at 3.3 V (0x0f), which is what the LK writes at
+ * every boot and what makes the card answer (measured: at the shim entry
+ * HC+0x29 reads 0x0b, the bus is on at 1.8 V; at 1.8 V the card stays mute).
+ * The clock target is 400 kHz.
+ *
+ * And the clock PATH is put back to the legacy one, with the card clock
+ * gating off: see the note above, that is the change of 2026-11-10 and the
+ * only one that was never tried by the eight variants of the sweep.
+ */
+static const struct lk_var lk_var_default = {
+	0x0f, 400000, LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE
+};
 #endif
 #include "emmc_diag.inc"
 #endif
@@ -1110,9 +1306,14 @@ int emmc_write_log(const char *text, unsigned len)
 {
 	uint8_t sector[512];
 	uint8_t scratch[512];
-	int rc, rc1, rc2, same = 0;
+	int rc, rc1 = 0, rc2 = 0, same = 0;
 	unsigned stage;
-	uint32_t lba_back;
+	uint32_t lba_back = 0;
+
+	(void)lba_back;
+	(void)rc1;
+	(void)rc2;
+	(void)same;
 
 	for (unsigned i = 0; i < D_COUNT; i++)
 		g_diag[i] = 0;
@@ -1145,7 +1346,15 @@ int emmc_write_log(const char *text, unsigned len)
 	emmc_build_sector(sector, text, len, stage, 0, g_rca, g_diag[D_CMD16_R1]);
 	emmc_build_diag(scratch);
 
-	/* Log + diagnostics on both spares. */
+#if SHIM_EMMC_WRITE
+	/*
+	 * Log + diagnostics on both spares.
+	 *
+	 * DANGER: the two addresses are inside the partitions 'persist' and
+	 * 'laf' (see the geometry above). They are kept for the record, but
+	 * the writes are OFF by default and this block is unreachable unless
+	 * somebody deliberately turns them on AND fixes the addresses.
+	 */
 	STEP(STEP_WRITE1);
 	rc1 = emmc_write_sector(LOG_LBA_SPARE1, sector);
 	if (!rc1)
@@ -1190,6 +1399,28 @@ int emmc_write_log(const char *text, unsigned len)
 		emmc_save_first_result();
 		return EMMC_E_VERIFY;
 	}
+#else
+	/*
+	 * No write to the card (the default, and the right thing: there is
+	 * no sector of this card that is safe to scribble on).
+	 *
+	 * The card has been identified and its EXT_CSD has been read: that is
+	 * what the shim needs from it. The log goes to the ramoops console
+	 * zone and to the scratch RAM at 0x50000000.
+	 */
+	con_str("EMMC", "the card is identified; the writes are off");
+	trail(0x00f1, 0);
+	trail(0x00f2, 0);
+	trail(0x00f3, 0);
+	trail(0x00f4, 1);
+	rc1 = 0;
+	rc2 = 0;
+	same = 1;
+	(void)rc1;
+	(void)rc2;
+	(void)same;
+#endif
+
 	emmc_last_stage = STAGE_DONE;
 	emmc_last_error = 0;
 	emmc_save_first_result();

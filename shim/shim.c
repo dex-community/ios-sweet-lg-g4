@@ -65,6 +65,12 @@ void sd_probe_before(void);
 void sd_probe_after(void);
 int sd_probe_should_run(unsigned phase);
 #endif
+
+/* The E0 (eMMC card) and D0 (MDP) probes (shim/emmc_probe.c). */
+#if SHIM_EMMC_PROBE
+void emmc_probe_e0(void);
+void emmc_probe_d0(void);
+#endif
 void emmc_model_finish(void);
 
 /*
@@ -1233,6 +1239,23 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	con_hex2("CPU", "cntfrq=", rsr("cntfrq_el0"), "mmfr0=", rsr("id_aa64mmfr0_el1"));
 	con_skip();
 
+	/*
+	 * The log of the PREVIOUS run, read out of the ramoops console zone
+	 * (2026-11-10).
+	 *
+	 * The pstore is a one shot channel: the zone holds the last writer
+	 * only, and the recovery overwrites it with its own console as soon
+	 * as it boots, so the log of the run that just finished is unreadable
+	 * by the time anybody could look at it. The shim runs before anything
+	 * else touches the zone, so it reads the record of the previous run
+	 * and prints it: every run prints the one before it, with no
+	 * external tool in between.
+	 *
+	 * This is what makes a BOOTLOOP readable: the run that loops prints
+	 * the log of the run before it, and the one before that, and so on.
+	 */
+	pstore_read_previous();
+
 	stop_watchdog();
 
 #if SHIM_MMIO_SELFTEST
@@ -1270,6 +1293,26 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * to be seen exactly as the LK left it. Reads only. */
 	if (sd_probe_should_run(0))
 		sd_probe_before();
+#endif
+#if SHIM_EMMC_PROBE
+	/*
+	 * The E0 and D0 probes (shim/emmc_probe.c), BEFORE anything touches a
+	 * controller. The order matters:
+	 *
+	 *   E0 reads the eMMC host registers exactly as the LK left them, and
+	 *      then sends ONE command (CMD5 awake, argument 0) to find out
+	 *      whether the card answers at all. The bring-up that follows
+	 *      resets the host and re-identifies the card, so the "before"
+	 *      snapshot has to be taken first.
+	 *
+	 *   D0 reads the MDP registers (VIG0/CTL0) and the frame counter of
+	 *      the timing engine. Pure reads, and the MDP window is in the
+	 *      MMIO allowlist as READ-ONLY, so even a mistake here cannot
+	 *      hang the phone on a write.
+	 */
+	PHASE(1); stage = "e0d0";
+	emmc_probe_e0();
+	emmc_probe_d0();
 #endif
 	emmc_write_log(con_log, (unsigned)con_log_len);
 #if SHIM_SD_PROBE

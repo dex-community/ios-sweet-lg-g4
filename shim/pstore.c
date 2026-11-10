@@ -325,3 +325,146 @@ void pstore_console_write(const char *text, unsigned len)
 		pstore_write_zone(RAMOOPS_BASE2, text, len);
 #endif
 }
+
+/*
+ * Read back the log of the PREVIOUS run (added 2026-11-10).
+ *
+ * WHY
+ * ---
+ * The pstore is a one shot channel: the console zone of the ramoops holds
+ * the LAST kernel that wrote there, and the recovery (or Android) writes
+ * its own console over it as soon as it boots. So the log of the run that
+ * just finished is gone by the time anybody could read it -- and it was
+ * exactly the log of the run that BOOTLOOPED that was needed.
+ *
+ * The shim itself can read the zone: it is plain DRAM, it is in the MMIO
+ * allowlist (the MEMORY windows), and the shim runs BEFORE anything else
+ * touches it. So the shim reads the record of the previous run at startup
+ * and prints it, before it writes its own log over it.
+ *
+ * That gives a chain of runs with no external tool at all: every run prints
+ * the one before it.
+ *
+ * THE FORMAT (the one pstore_write_zone writes)
+ *   "[G4SHIMPS1] len=<n> crc=<crc32>\n" <n bytes of text> "[G4SHIMPS1-END]\n"
+ *
+ * The CRC is checked: a record whose parity the kernel's ECC decoder has
+ * mangled does not have to be believed.
+ */
+#define PSTORE_MARKER		"[G4SHIMPS1] len="
+#define PSTORE_MARKER_LEN	(sizeof(PSTORE_MARKER) - 1)
+
+static inline uint8_t pstore_ring(const uint8_t *data, uint32_t start, unsigned k)
+{
+	return data[(start + k) % RAMOOPS_DATA];
+}
+
+static int pstore_hexval(uint8_t c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+void pstore_read_previous(void)
+{
+	uintptr_t base = RAMOOPS_BASE;
+	uint8_t *data = (uint8_t *)RAMOOPS_DATA_BASE(base);
+	uint32_t sig, start, size;
+	unsigned k, best = 0, pos, i, len = 0;
+	uint32_t crc = 0, want = 0;
+	int found = 0;
+	char line[160];
+
+	sig = p_rd32(base);
+	start = p_rd32((uintptr_t)base + 4);
+	size = p_rd32((uintptr_t)base + 8);
+	if (sig != RAMOOPS_SIG)
+		return;
+	if (start > RAMOOPS_DATA || size > RAMOOPS_DATA)
+		return;
+	if (size < PSTORE_MARKER_LEN + 32)
+		return;
+
+	/*
+	 * The ring: the oldest byte is at 'start', the newest at
+	 * start+size-1 (that is how the kernel reads it back,
+	 * fs/pstore/ram_core.c, persistent_ram_read). More than one record
+	 * can be in there, one per run: the LAST header is the most recent.
+	 */
+	for (k = 0; k + PSTORE_MARKER_LEN <= size; k++) {
+		int ok = 1;
+
+		for (i = 0; i < PSTORE_MARKER_LEN; i++) {
+			if (pstore_ring(data, start, k + i) !=
+			    (uint8_t)PSTORE_MARKER[i]) {
+				ok = 0;
+				break;
+			}
+		}
+		if (ok) {
+			best = k;
+			found = 1;
+		}
+	}
+	if (!found)
+		return;
+
+	/* The header of the record: "len=<n> crc=<8 hex digits>\n". */
+	pos = best + PSTORE_MARKER_LEN;
+	while (pos < size && pstore_ring(data, start, pos) >= '0' &&
+	       pstore_ring(data, start, pos) <= '9') {
+		len = len * 10 + (pstore_ring(data, start, pos) - '0');
+		pos++;
+	}
+	pos += 5;			/* " crc=" */
+	for (i = 0; i < 8; i++) {
+		int v = pstore_hexval(pstore_ring(data, start, pos + i));
+
+		if (v < 0)
+			return;
+		crc = (crc << 4) | (uint32_t)v;
+	}
+	pos += 8 + 1;			/* the eight digits and the newline */
+
+	if (len == 0 || pos + len > size)
+		return;
+
+#ifndef PSTORE_NO_CONSOLE
+	con_str("PREV", "--- the log of the previous run ---");
+#endif
+	if (crc32_buf(data + ((start + pos) % RAMOOPS_DATA), len) != crc) {
+#ifndef PSTORE_NO_CONSOLE
+		con_str("PREV", "the record is damaged (the CRC does not match)");
+#endif
+		return;
+	}
+
+	/* Print it line by line: the console takes one line at a time. */
+	{
+		const uint8_t *text = data + ((start + pos) % RAMOOPS_DATA);
+		unsigned off = 0;
+
+		while (off < len) {
+			unsigned n = 0;
+
+			while (off + n < len && text[off + n] != '\n' &&
+			       n < sizeof(line) - 1)
+				n++;
+			for (i = 0; i < n; i++)
+				line[i] = (char)text[off + i];
+			line[n] = 0;
+#ifndef PSTORE_NO_CONSOLE
+			con_str("PREV", line);
+#endif
+			off += n + 1;
+		}
+	}
+#ifndef PSTORE_NO_CONSOLE
+	con_str("PREV", "--- end of the previous run ---");
+#endif
+}
