@@ -1,0 +1,76 @@
+name: hfs-tool
+
+# The iOS rootfs on `userdata` is an HFS+ volume that is JOURNALED
+# ("HX" signature, "HFSJ" journal info block), and the Linux hfsplus driver
+# refuses to mount it ("invalid secondary volume header"). So the volume is
+# read with a userspace tool, compiled here for aarch64 and static, and run
+# on the phone over adb.
+#
+# Two tools are built:
+#
+#   fsap        (libfsap)  dumps the catalogue of a journaled HFS+ volume
+#   hfsplus     (hfsplus-tools) lists and copies files out of an HFS+ volume
+#
+# Neither writes anything on the phone: they only read the block device.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hfs-tool.yml'
+
+jobs:
+  hfs-tool:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    name: hfs-readers-for-aarch64
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Install the dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            autoconf automake libtool pkg-config zlib1g-dev
+
+      - name: Build fsap (libfsap)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          git clone -q --depth 1 https://github.com/slebnik/libfsap.git
+          cd libfsap
+          # The autotools files are not in the repository.
+          autoreconf -fi
+          ./configure --host=aarch64-linux-gnu --enable-static \
+            CC=aarch64-linux-gnu-gcc LDFLAGS="-static"
+          make -j"$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find . -type f -name 'fsap' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \;
+          find . -type f -name 'fsap-debug' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+          file "$GITHUB_WORKSPACE/out/"* || true
+
+      - name: Build hfsplus (hfsplus-tools)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          git clone -q --depth 1 https://github.com/planetbeing/hfsplus.git
+          cd hfsplus
+          autoreconf -fi
+          ./configure --host=aarch64-linux-gnu --enable-static \
+            CC=aarch64-linux-gnu-gcc LDFLAGS="-static"
+          make -j"$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find . -type f -name 'hfsplus' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+          file "$GITHUB_WORKSPACE/out/"* || true
+
+      - name: Upload the tools
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hfs-readers-aarch64
+          path: out/
+          if-no-files-found: warn
