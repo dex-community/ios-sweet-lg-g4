@@ -38,12 +38,16 @@ jobs:
           set -e
           mkdir -p "$RUNNER_TEMP/kernel"
           cd "$RUNNER_TEMP/kernel"
+          # The Titan kernel is the one that boots on this phone: the
+          # recovery image that works on it runs 3.10.108-gbc450f725, which
+          # is this tree. The other CAF tree (netheloid/nethunter_kernel_g4)
+          # is 3.10.84 and its kernel does not start here at all.
           git init -q
-          git remote add origin https://github.com/nepheloid/nethunter_kernel_g4.git
-          # The commit the working copy was verified against.
-          git fetch -q --depth 1 origin 850e70b7 || git fetch -q --depth 1 origin
+          git remote add origin https://github.com/aoleary/G4-Titan-Kernel.git
+          git fetch -q --depth 1 origin titan_bpf2
           git checkout -q FETCH_HEAD
           git log --oneline -1
+          head -5 Makefile
 
       - name: Install the build dependencies
         run: |
@@ -86,16 +90,16 @@ jobs:
           export ARCH=arm64
           # This 3.10 tree does not create the output directory by itself.
           mkdir -p build
-          make O=build stock_defconfig
-          # The variant option of this tree (VARIANT_DEFCONFIG) is dead code:
-          # scripts/kconfig/Makefile exports it but nothing reads it, so the
-          # board is selected in the config itself.
+          make O=build twrp_g4_defconfig
+          # The variant option of the other tree (VARIANT_DEFCONFIG) is dead
+          # code: scripts/kconfig/Makefile exports it but nothing reads it.
+          # Here the defconfig already selects the board
+          # (CONFIG_MACH_MSM8992_P1_GLOBAL_COM) and the four device trees.
           # scripts/config is not executable in this tree.
           bash scripts/config --file build/.config \
             -e DEVMEM \
             -e HFS_FS \
-            -e HFSPLUS_FS \
-            -e MACH_MSM8992_P1_GLOBAL_COM
+            -e HFSPLUS_FS
           make O=build olddefconfig
           grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1|MACH_MSM8992_P1_GLOBAL_COM)=' build/.config
 
