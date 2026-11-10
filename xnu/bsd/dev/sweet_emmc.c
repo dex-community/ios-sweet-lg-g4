@@ -13,11 +13,6 @@
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 
-#define __APPLE_API_PRIVATE 1
-#define MACH_KERNEL_PRIVATE 1
-#define PEXPERT_KERNEL_PRIVATE 1
-#define XNU_KERNEL_PRIVATE 1
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/buf.h>
@@ -25,7 +20,7 @@
 #include <sys/disk.h>
 #include <sys/errno.h>
 #include <sys/proc.h>
-#include <sys/uio_internal.h>
+#include <sys/uio.h>
 #include <miscfs/devfs/devfs.h>
 #include <kern/locks.h>
 #include <kern/clock.h>
@@ -36,6 +31,7 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <libkern/libkern.h>
+#include <osfmk/arm/arm_vm_util.h>
 
 /* SDHCI register offsets (from SdhciRegs.h) */
 #define HC_BASE         0xf9824900ULL
@@ -61,9 +57,6 @@
 #define HC_COMMAND      0x0c
 #define HC_RESPONSE     0x10
 #define HC_BUFFER       0x20
-
-#define wr16(addr, val) (*(volatile uint16_t *)((uintptr_t)hc_base + ((addr) - HC_BASE)) = (uint16_t)(val))
-#define rd32(addr)      (*(volatile uint32_t *)((uintptr_t)hc_base + ((addr) - HC_BASE)))
 
 /* SDHCI flags */
 #define PS_CARD_PRESENT     (1u << 16)
@@ -91,13 +84,13 @@
 #define CMD_READ_SINGLE     17
 #define CMD_SET_BLOCKLEN    16
 
-static volatile uint32_t *hc_base;
+static vm_address_t hc_base = 0;
 static uint16_t card_rca;
 static int emmc_initialized = 0;
 
 /* Buffer for reads */
 #define EMMC_BUFFER_SIZE    (1u << 20)  /* 1 MB bounce buffer */
-static void *emmc_buffer;
+static vm_address_t emmc_buffer;
 
 static inline uint32_t rd32(uintptr_t addr)
 {
@@ -119,6 +112,16 @@ static inline void wr8(uintptr_t addr, uint8_t val)
     *(volatile uint8_t *)addr = val;
 }
 
+static inline uint16_t rd16(uintptr_t addr)
+{
+    return *(volatile uint16_t *)addr;
+}
+
+static inline void wr16(uintptr_t addr, uint16_t val)
+{
+    *(volatile uint16_t *)addr = val;
+}
+
 static void emmc_delay(uint32_t us)
 {
     delay(us);
@@ -128,9 +131,10 @@ static int emmc_cmd(uint8_t cmd, uint32_t arg, uint8_t resp_type, uint32_t *resp
 {
     uint32_t reg;
     int timeout = 100000;
+    uintptr_t hc = hc_base;
     
     /* Wait for cmd inhibit */
-    while ((rd32(HC_BASE + HC_PRESENT) & PS_CMD_INHIBIT) && timeout--) {
+    while ((rd32(hc + HC_PRESENT) & PS_CMD_INHIBIT) && timeout--) {
         emmc_delay(1);
     }
     if (timeout <= 0) {
@@ -139,10 +143,10 @@ static int emmc_cmd(uint8_t cmd, uint32_t arg, uint8_t resp_type, uint32_t *resp
     }
     
     /* Clear interrupts */
-    wr32(HC_BASE + HC_INT_STATUS, 0xFFFFFFFF);
+    wr32(hc + HC_INT_STATUS, 0xFFFFFFFF);
     
     /* Set argument */
-    wr32(HC_BASE + HC_ARGUMENT, arg);
+    wr32(hc + HC_ARGUMENT, arg);
     
     /* Set command: resp type + enable */
     reg = (cmd & 0x3F) | (1u << 8);  /* Command index check enable */
@@ -158,11 +162,11 @@ static int emmc_cmd(uint8_t cmd, uint32_t arg, uint8_t resp_type, uint32_t *resp
             reg |= (1u << 6);  /* CRC check */
             break;
     }
-    wr32(HC_BASE + HC_COMMAND, reg);
+    wr32(hc + HC_COMMAND, reg);
     
     /* Wait for complete */
     timeout = 100000;
-    while (!(rd32(HC_BASE + HC_INT_STATUS) & INT_CMD_COMPLETE) && timeout--) {
+    while (!(rd32(hc + HC_INT_STATUS) & INT_CMD_COMPLETE) && timeout--) {
         emmc_delay(1);
     }
     
@@ -172,21 +176,21 @@ static int emmc_cmd(uint8_t cmd, uint32_t arg, uint8_t resp_type, uint32_t *resp
     }
     
     /* Check for error */
-    if (rd32(HC_BASE + HC_INT_STATUS) & INT_ERROR) {
-        printf("emmc: CMD%d error, status=0x%x\n", cmd, rd32(HC_BASE + HC_INT_STATUS));
+    if (rd32(hc + HC_INT_STATUS) & INT_ERROR) {
+        printf("emmc: CMD%d error, status=0x%x\n", cmd, rd32(hc + HC_INT_STATUS));
         return -1;
     }
     
     /* Clear interrupt */
-    wr32(HC_BASE + HC_INT_STATUS, INT_CMD_COMPLETE);
+    wr32(hc + HC_INT_STATUS, INT_CMD_COMPLETE);
     
     /* Read response */
     if (resp && resp_type != CMD_RESP_NONE) {
-        resp[0] = rd32(HC_BASE + HC_RESPONSE);
+        resp[0] = rd32(hc + HC_RESPONSE);
         if (resp_type == CMD_RESP_R2) {
-            resp[1] = rd32(HC_BASE + HC_RESPONSE + 4);
-            resp[2] = rd32(HC_BASE + HC_RESPONSE + 8);
-            resp[3] = rd32(HC_BASE + HC_RESPONSE + 12);
+            resp[1] = rd32(hc + HC_RESPONSE + 4);
+            resp[2] = rd32(hc + HC_RESPONSE + 8);
+            resp[3] = rd32(hc + HC_RESPONSE + 12);
         }
     }
     
@@ -198,19 +202,20 @@ static int emmc_init(void)
     uint32_t resp[4];
     uint32_t ocr;
     int i;
+    kern_return_t kr;
     
     printf("emmc: initializing...\n");
     
-    /* Map registers */
-    hc_base = (volatile uint32_t *)ml_io_map(HC_BASE, HC_SIZE);
+    /* Map registers - use pmap_map instead of ml_io_map */
+    hc_base = pmap_map(HC_BASE, HC_BASE + HC_SIZE, VM_PROT_READ | VM_PROT_WRITE, VM_WIMG_IO);
     if (!hc_base) {
         printf("emmc: failed to map HC registers\n");
         return -1;
     }
     
-    /* Allocate bounce buffer */
-    emmc_buffer = (void *)kmem_alloc(kernel_map, EMMC_BUFFER_SIZE);
-    if (!emmc_buffer) {
+    /* Allocate bounce buffer - use kernel_memory_allocate */
+    kr = kernel_memory_allocate(kernel_map, &emmc_buffer, EMMC_BUFFER_SIZE, 0, KMA_KOBJECT | KMA_ZERO);
+    if (kr != KERN_SUCCESS) {
         printf("emmc: failed to allocate buffer\n");
         return -1;
     }
@@ -275,19 +280,20 @@ static int emmc_read_block(uint32_t lba, void *buf)
     uint32_t resp[4];
     uint32_t reg;
     int timeout;
+    uintptr_t hc = hc_base;
     
     /* Set block count */
-    wr16(HC_BASE + HC_BLOCK_COUNT, 1);
+    wr16(hc + HC_BLOCK_COUNT, 1);
     
     /* Set block size */
-    wr16(HC_BASE + HC_BLOCK_SIZE, 512);
+    wr16(hc + HC_BLOCK_SIZE, 512);
     
     /* Set argument (single block read) */
-    wr32(HC_BASE + HC_ARGUMENT, lba);
+    wr32(hc + HC_ARGUMENT, lba);
     
     /* Wait for data inhibit */
     timeout = 100000;
-    while ((rd32(HC_BASE + HC_PRESENT) & PS_DAT_INHIBIT) && timeout--) {
+    while ((rd32(hc + HC_PRESENT) & PS_DAT_INHIBIT) && timeout--) {
         emmc_delay(1);
     }
     if (timeout <= 0) {
@@ -296,32 +302,32 @@ static int emmc_read_block(uint32_t lba, void *buf)
     }
     
     /* Clear interrupts */
-    wr32(HC_BASE + HC_INT_STATUS, 0xFFFFFFFF);
+    wr32(hc + HC_INT_STATUS, 0xFFFFFFFF);
     
     /* Send CMD17: READ_SINGLE_BLOCK */
     reg = CMD_READ_SINGLE | (1u << 8);  /* Enable */
-    wr32(HC_BASE + HC_COMMAND, reg);
+    wr32(hc + HC_COMMAND, reg);
     
     /* Wait for data complete */
     timeout = 100000;
-    while (!(rd32(HC_BASE + HC_INT_STATUS) & (INT_DATA_COMPLETE | INT_ERROR)) && timeout--) {
+    while (!(rd32(hc + HC_INT_STATUS) & (INT_DATA_COMPLETE | INT_ERROR)) && timeout--) {
         emmc_delay(1);
     }
     
-    if (timeout <= 0 || (rd32(HC_BASE + HC_INT_STATUS) & INT_ERROR)) {
-        printf("emmc: read timeout/error, status=0x%x\n", rd32(HC_BASE + HC_INT_STATUS));
+    if (timeout <= 0 || (rd32(hc + HC_INT_STATUS) & INT_ERROR)) {
+        printf("emmc: read timeout/error, status=0x%x\n", rd32(hc + HC_INT_STATUS));
         return -1;
     }
     
     /* Read data from buffer port - 512 bytes */
-    volatile uint32_t *buf32 = (volatile uint32_t *)HC_BASE + (HC_BUFFER / 4);
+    volatile uint32_t *buf32 = (volatile uint32_t *)(hc + HC_BUFFER);
     uint32_t *dst = (uint32_t *)buf;
     for (int i = 0; i < 128; i++) {  /* 512 bytes / 4 */
         dst[i] = buf32[i];
     }
     
     /* Clear interrupt */
-    wr32(HC_BASE + HC_INT_STATUS, INT_DATA_COMPLETE);
+    wr32(hc + HC_INT_STATUS, INT_DATA_COMPLETE);
     
     return 0;
 }
@@ -358,16 +364,16 @@ static int emmc_read(dev_t dev, struct uio *uio, int ioflag)
         int blocks = chunk / 512;
         
         if (blocks == 1) {
-            error = emmc_read_block(lba, emmc_buffer);
+            error = emmc_read_block(lba, (void *)emmc_buffer);
         } else {
             /* Multiple blocks - read one at a time for simplicity */
             for (int i = 0; i < blocks && !error; i++) {
-                error = emmc_read_block(lba + i, emmc_buffer + i * 512);
+                error = emmc_read_block(lba + i, (void *)(emmc_buffer + i * 512));
             }
         }
         
         if (!error) {
-            error = uiomove(emmc_buffer, chunk, uio);
+            error = uiomove((void *)emmc_buffer, chunk, uio);
         }
         
         offset += chunk;
@@ -388,13 +394,13 @@ static struct cdevsw emmc_cdevsw = {
     .d_close = emmc_close,
     .d_read = emmc_read,
     .d_write = emmc_write,
-    .d_ioctl = enoioctl,
-    .d_stop = eno_stop,
-    .d_reset = eno_reset,
+    .d_ioctl = noioctl,
+    .d_stop = nostop,
+    .d_reset = noreset,
     .d_ttys = NULL,
-    .d_select = eno_select,
-    .d_mmap = eno_mmap,
-    .d_strategy = eno_strat,
+    .d_select = noselect,
+    .d_mmap = nommap,
+    .d_strategy = nostrategy,
     .d_awake = NULL,
     .d_bcount = 0,
     .d_type = 0
