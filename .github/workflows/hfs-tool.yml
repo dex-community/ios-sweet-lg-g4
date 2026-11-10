@@ -6,12 +6,16 @@ name: hfs-tool
 # read with a userspace tool, compiled here for aarch64 and static, and run
 # on the phone over adb.
 #
-# Two tools are built:
+# The tool is `hfsplus` from planetbeing/libdmg-hfsplus:
 #
-#   fsap        (libfsap)  dumps the catalogue of a journaled HFS+ volume
-#   hfsplus     (hfsplus-tools) lists and copies files out of an HFS+ volume
+#   hfsplus /dev/block/sda34 ls /
+#   hfsplus /dev/block/sda34 cat /System/Library/CoreServices/SystemVersion.plist
+#   hfsplus /dev/block/sda34 extract /private/etc/fstab /tmp/fstab
 #
-# Neither writes anything on the phone: they only read the block device.
+# It only reads unless an explicit write command is given, so the workflow
+# uploads a reader. (The earlier fsap step pointed at slebnik/libfsap, which
+# no longer exists, and the hfsplus step at planetbeing/hfsplus, which never
+# was the repository name: both made git prompt for credentials.)
 
 on:
   workflow_dispatch:
@@ -33,39 +37,43 @@ jobs:
       - name: Install the dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential \
-            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
-            autoconf automake libtool pkg-config zlib1g-dev
+          sudo apt-get install -y -qq build-essential cmake \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
-      - name: Build fsap (libfsap)
+      - name: Build a static zlib for aarch64
         run: |
           set -e
           cd "$RUNNER_TEMP"
-          git clone -q --depth 1 https://github.com/slebnik/libfsap.git
-          cd libfsap
-          # The autotools files are not in the repository.
-          autoreconf -fi
-          ./configure --host=aarch64-linux-gnu --enable-static \
-            CC=aarch64-linux-gnu-gcc LDFLAGS="-static"
+          curl -sSL -o zlib.tar.gz https://zlib.net/zlib-1.3.1.tar.gz
+          tar xzf zlib.tar.gz
+          cd zlib-1.3.1
+          CC=aarch64-linux-gnu-gcc ./configure --static --prefix="$RUNNER_TEMP/arm64"
           make -j"$(nproc)"
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          find . -type f -name 'fsap' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \;
-          find . -type f -name 'fsap-debug' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
-          file "$GITHUB_WORKSPACE/out/"* || true
+          make install
+          ls -la "$RUNNER_TEMP/arm64/lib/libz.a"
 
-      - name: Build hfsplus (hfsplus-tools)
+      - name: Build hfsplus (libdmg-hfsplus) for aarch64
         run: |
           set -e
           cd "$RUNNER_TEMP"
-          git clone -q --depth 1 https://github.com/planetbeing/hfsplus.git
-          cd hfsplus
-          autoreconf -fi
-          ./configure --host=aarch64-linux-gnu --enable-static \
-            CC=aarch64-linux-gnu-gcc LDFLAGS="-static"
-          make -j"$(nproc)"
+          git clone -q --depth 1 https://github.com/planetbeing/libdmg-hfsplus.git
+          cd libdmg-hfsplus
+          cat > tc-aarch64.cmake <<EOF
+          set(CMAKE_SYSTEM_NAME Linux)
+          set(CMAKE_SYSTEM_PROCESSOR aarch64)
+          set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+          set(CMAKE_FIND_ROOT_PATH "$RUNNER_TEMP/arm64")
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          EOF
+          cmake -S . -B build-aarch64 \
+            -DCMAKE_TOOLCHAIN_FILE=tc-aarch64.cmake \
+            -DCMAKE_EXE_LINKER_FLAGS="-static"
+          cmake --build build-aarch64 --target hfsplus -j"$(nproc)"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find . -type f -name 'hfsplus' -perm -u+x -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
-          file "$GITHUB_WORKSPACE/out/"* || true
+          cp build-aarch64/hfs/hfsplus "$GITHUB_WORKSPACE/out/"
+          file "$GITHUB_WORKSPACE/out/hfsplus"
 
       - name: Upload the tools
         if: always()
