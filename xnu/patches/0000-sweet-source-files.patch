@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..53ef344
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,433 @@
 +/*
 + * SWEET eMMC root device (read-only).
 + *
@@ -30,13 +30,13 @@ index 0000000..53ef344
 +#include <miscfs/devfs/devfs.h>
 +#include <kern/locks.h>
 +#include <kern/clock.h>
-+#include <machine/machine_routines.h>
 +#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
 +#include <libkern/libkern.h>
++#include <arm/machine_routines.h>
 +
 +/* SDHCI register offsets (from SdhciRegs.h) */
 +#define HC_BASE         0xf9824900ULL
@@ -356,7 +356,7 @@ index 0000000..53ef344
 +static int emmc_read(dev_t dev, struct uio *uio, int ioflag)
 +{
 +    uint64_t offset = uio->uio_offset;
-+    user_ssize_t n = uio_resid_64(uio);
++    user_ssize_t n = uio->uio_resid_64;
 +    int error = 0;
 +    
 +    if (!emmc_initialized)
@@ -406,9 +406,6 @@ index 0000000..53ef344
 +    .d_select = eno_select,
 +    .d_mmap = eno_mmap,
 +    .d_strategy = eno_strat,
-+    .d_awake = NULL,
-+    .d_bcount = 0,
-+    .d_type = 0
 +};
 +
 +static int emmc_console = 0;
@@ -438,6 +435,8 @@ index 0000000..53ef344
 +    *dev = makedev(12, 0);
 +    return 0;
 +}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 +
