@@ -192,11 +192,18 @@ Dettagli: `docs/DEVICE-TEST.md`.
 3. **Leggere il rootfs iOS** (ls/cat di `/iosroot`, dimensioni, verificare
    che sia il rootfs dell'iPhone X). NON scrivere MAI su `userdata`.
 4. **Display** (secondo track): il pannello è pilotato dalla pipe **RGB2
-   su INTF2** (MDP3), NON da VIG0 (misurato via debugfs: `mdp/stat` →
-   `intf2 play 0x24 vsync 0x112 underrun 0`, `RGB2 0x24`). Le misure si
-   fanno dalla recovery con `/sys/kernel/debug/mdp/` e
-   `/sys/kernel/debug/mdss_panel/dsi0/`, MAI con una sonda nello shim
-   (l'MDSS è senza clock all'handover e una lettura MMIO hanga il bus).
+   (offset `0x19000`) su INTF2** (MDP3), non VIG0. Misurato 2026-11-10:
+   RGB2 SRC0_ADDR = `0x00E30000` **IOVA** (stride 5760, RGBA8888,
+   1440×2560). Novità: il fetch passa per l'**MDP SMMU** (`mdp_iommu`
+   @ 0xFD9B4000, ctx `mdp_0` @ 0xFD9BC000, SID 0); la strada "RAM fisica,
+   niente SMMU" del piano vale solo se l'SMMU resta bypassato come l'LK lo
+   lascia. Misure: `docs/display-2026-11-10.txt`,
+   `docs/DISPLAY-FINDINGS.md`, NOTES FACT 21. Le misure si fanno dalla
+   recovery con `/sys/kernel/debug/mdp/` e `/sys/kernel/debug/mdss_panel/dsi0/`,
+   MAI con una sonda nello shim (l'MDSS è senza clock all'handover e una
+   lettura MMIO hanga il bus). Prossimo: accendere i clock MDSS/DSI nello
+   shim (fase D1) e ripuntare RGB2 (D3), oppure tenere l'SMMU bypassato e
+   usare indirizzi fisici (strada più semplice).
 5. **XNU con driver eMMC**: il riferimento è il driver di UniXNU-lumia950xl;
    `docs/g4-hardware/EMMC-REFERENCE.md` spiega cosa cambiare per il G4.
 

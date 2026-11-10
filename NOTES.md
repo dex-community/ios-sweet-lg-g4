@@ -3251,3 +3251,47 @@ tools/device-test.sh --collect docs/collect.txt      # su un kernel gia' avviato
   dell'artifact. (Run 42873352434 non li ha: `no /proc/config.gz`.)
 
 Dettagli e tabella dei controlli: `docs/DEVICE-TEST.md`.
+
+### FATTO 21 — il display si muove dalla pipe RGB2, ma passa per l'SMMU
+
+Misura del 2026-11-10, dalla recovery (kernel TWRP che pilota il pannello,
+quindi l'MDP e' clockato), con `tools/read-mdp-registers.sh` (read-only,
+debugfs: scrive "off cnt" in `<block>_off` e legge `<block>_reg`). Evidenze
+in `docs/display-2026-11-10.txt`, analisi in `docs/DISPLAY-FINDINGS.md`.
+
+- **Pipe attiva confermata**: `RGB2` (indice 5, base `0xfd919000`) su
+  `INTF2` (base `0xfd96c000`). `stat`: RGB2 = play count (27), VIG0/1/2
+  a zero, RGB0/RGB1 a 2 (overlay una tantum). `dump` lo dice esplicitamente:
+  `SSPP #5 type=RGB ndx=20`, formato RGBA_8888, 1440x2560.
+- **Registri RGB2 misurati**: SRC_SIZE `0x0a0005a0` (1440x2560),
+  SRC0_ADDR `0x00e30000`, SRC_YSTRIDE0 `0x1680` (5760), SRC_FORMAT
+  `0x000236ff`, UNPACK `0x03010002`, op_mode 0 (no BWC), fetch config
+  `0x87`. Nessuno scaling (OUT_SIZE = SRC_SIZE).
+- **Il fetch va per l'SMMU, non in fisico.** `mdss_fb` alloca da ION system
+  heap (`/d/ion/clients/mdss_fb_iclient-0`, 0x1c20000 byte) e chiama
+  `ion_map_iommu`; senza dominio IOMMU il driver fallisce la registrazione
+  del fb. Quindi `SRC0_ADDR = 0x00e30000` e' una **IOVA** sul
+  `mdp_iommu` (device `0xfd9b4000`, context bank `mdp_0` a `0xfd9bc000`,
+  SID 0), non un indirizzo fisico. L'ipotesi del piano ("il G4 può usare
+  RAM fisica sotto i 4 GiB, gia' usata dal fbcon") vale **solo** se
+  l'SMMU resta bypassato, cioe' nello stato in cui l'LK lascia il
+  pannello. In TWRP il driver lo attacca.
+- **INTF2 in command mode**: TIMING_ENGINE_EN = 0, PANEL_FORMAT =
+  `0x0000213f`, FRAME_LINE_COUNT_EN = `0x0000213f`, link id DSI0
+  `0x10007e57` / DSI1 `0x10009d57` (dual link), clock 910 MHz, 60 fps,
+  porchi come da DT (168/88/4, 9/10). MDP clock 265 MHz, bandwidth 1.21
+  GB/s, zero underrun.
+- **CTL0**: CTL_TOP `0x01008000` / `0x00020020`, CTL_FLUSH `0x40000018`
+  (write-strobe: i bit si accumulano in software, BIT(17) per CTL e
+  BIT(pipe->num) per le pipe RGB/VIG 0-2, cioe' BIT(5) per RGB2, poi
+  scritti una volta per commit). Il valore `0x20001` di ios-topaz non va
+  copiato cosi': va ricalcolato per questo HW.
+- **Conseguenza per il porting XNU**: due strade. (a) tenere l'SMMU
+  bypassato (come l'LK) e usare indirizzi fisici (piu' semplice, coerente
+  con la cont_splash); (b) programmare il context bank 0 dell'MDP SMMU con
+  una mappa identita' per il framebuffer. Prima tentativo: (a).
+- **Ancora da fare**: sequenza DCS del pannello (reset/init/sleep-out/
+  display-on) dal DTSI `dsi-panel-jdi-nt36850-dualmipi0-qhd-cmd.dtsi`;
+  sequenza clock MMSSCC + DSI PLL disassemblata dal binario dell'LK;
+  il display non si muove finche' i clock non sono accesi (tentativo
+  precedente nello shim senza clock ha dato hang, anche in sola lettura).
