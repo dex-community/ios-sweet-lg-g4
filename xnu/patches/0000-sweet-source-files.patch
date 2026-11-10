@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..53ef344
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,426 @@
 +/*
 + * SWEET eMMC root device (read-only).
 + *
@@ -18,11 +18,6 @@ index 0000000..53ef344
 + * Reads only - writes are refused.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
-+
-+#define __APPLE_API_PRIVATE 1
-+#define MACH_KERNEL_PRIVATE 1
-+#define PEXPERT_KERNEL_PRIVATE 1
-+#define XNU_KERNEL_PRIVATE 1
 +
 +#include <sys/param.h>
 +#include <sys/systm.h>
@@ -427,6 +422,14 @@ index 0000000..53ef344
 +    
 +    if (!emmc_console) {
 +        emmc_cdevsw_init();
++        emmc_console = 1;
++    }
++    
++    *dev = makedev(12, 0);
++    return 0;
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
 +        emmc_console = 1;
 +    }
 +    
