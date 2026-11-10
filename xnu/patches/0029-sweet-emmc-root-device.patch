@@ -2,20 +2,17 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 1234567..abcdefg 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -106,4 +106,5 @@ bsd/dev/memdev.c			standard
- bsd/dev/memdev.c			standard
-+bsd/dev/sweet_emmc.c			standard
+@@ -107,2 +107,3 @@ bsd/dev/mem.c				standard
  bsd/dev/mem.c				standard
++bsd/dev/sweet_emmc.c			standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
- bsd/dev/unix_startup.c			standard
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 index abc1234..def5678 100644
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -766,5 +766,24 @@
- 		}
- 	}
-+
+@@ -785,5 +785,23 @@ bsd/dev/mem.c				standard
+ #endif
+ 
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +//
 +//	SWEET: root on eMMC (bsd/dev/sweet_emmc.c)
@@ -34,7 +31,6 @@ index abc1234..def5678 100644
 +	}
 +#endif
 +
- 
  //
  //	Now check if we are trying to root on a memory device
  //
