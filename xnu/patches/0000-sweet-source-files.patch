@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..53ef344
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,436 @@
 +/*
 + * SWEET eMMC root device (read-only).
 + *
@@ -37,6 +37,9 @@ index 0000000..53ef344
 +#include <pexpert/device_tree.h>
 +#include <libkern/libkern.h>
 +#include <arm/machine_routines.h>
++
++/* Forward declarations for ARM-specific functions */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +/* SDHCI register offsets (from SdhciRegs.h) */
 +#define HC_BASE         0xf9824900ULL
@@ -437,7 +440,6 @@ index 0000000..53ef344
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
-+
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
