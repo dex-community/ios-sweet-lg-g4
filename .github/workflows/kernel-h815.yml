@@ -84,7 +84,8 @@ jobs:
           # The variant option of this tree (VARIANT_DEFCONFIG) is dead code:
           # scripts/kconfig/Makefile exports it but nothing reads it, so the
           # board is selected in the config itself.
-          ./scripts/config --file build/.config \
+          # scripts/config is not executable in this tree.
+          bash scripts/config --file build/.config \
             -e DEVMEM \
             -e HFS_FS \
             -e HFSPLUS_FS
