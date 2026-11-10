@@ -1,0 +1,74 @@
+# Test kernel H815 HFS+, 2026-11-10 (on the phone)
+
+Kernel: CI run `42873352434`, `kernel-h815-hfsplus-devmem`, Image 22.155.336
+byte sha256 `b090ee5f...c6835`, gzip `9.234.443`, + TWRP ramdisk
+`backup/nh-parts/ramdisk.bin` + `backup/nh-parts/dt.img` -> boot image
+24.281.088 byte sha256 `e3342349...d5bf`.
+
+Started with `fastboot boot` (nothing written). ADB up 9 s after boot.
+
+## The patch works: the volume mounts read-only
+
+TWRP's init mounts userdata by itself; the kernel log says:
+
+```
+hfsplus: hfsplus: no backup volume header (signature 0x0000), the primary one (0x4858) is used alone
+hfsplus: write access to a journaled filesystem is not supported, use the force option at your own risk, mounting read-only.
+SELinux: initialized (dev mmcblk0p50, type hfsplus), not configured for labeling
+```
+
+```
+/dev/block/mmcblk0p50 on /data type hfsplus (ro,relatime,umask=0,uid=0,gid=0,nls=utf8)
+```
+
+No manual mount was needed. `df`: 17.1G size, 11.2G used, 5.9G free.
+
+## The rootfs is the iPhone X 16.7.16
+
+```
+# cat /data/System/Library/CoreServices/SystemVersion.plist
+ProductBuildVersion = 20H392
+ProductName         = iPhone OS
+ProductVersion      = 16.7.16
+```
+
+`ls /data`: Applications, Developer, Library, System, bin, cores, dev,
+private, sbin, usr, etc -> private/etc, tmp -> private/var/tmp,
+var -> private/var, plus `.journal` (8 MiB), `.journal_info_block`,
+`.HFS+ Private Directory Data?`, `.ba`, `.mb`.
+
+## Reads are correct through both paths
+
+`/usr/lib/dyld` (922.912 byte), read through the kernel mount and through
+the userspace `hfsplus` on the raw block device:
+
+```
+5806834564fe6462ae981d0915d612b1eb2f6f168822b5d278bee56254933757  /data/usr/lib/dyld
+5806834564fe6462ae981d0915d612b1eb2f6f168822b5d278bee56254933757  (hfsplus cat)
+```
+
+SystemVersion.plist likewise: `526de9e2...1962` both ways (574 byte).
+
+## The userspace tool: list/cat OK, sizes overflow
+
+`hfsplus /dev/block/mmcblk0p50 ls /` lists the root correctly, but ends
+with `Total filesystem size: -888385536` (18.35 GB does not fit a signed
+32-bit; the volume is >2 GiB). File content is correct, so use it for
+extraction, not for size accounting.
+
+## The shim log is in RAM at the same time
+
+A single boot of this kernel reads both the HFS+ volume and the shim's
+scratch log (`dd if=/dev/mem bs=4096 skip=327680 count=48`):
+
+```
+SHIM LG G4 (H815) bring-up shim
+EMMC start
+C2TRY v=00000009 rd=00000000
+C2OK v=00000009 rsp=48B72E52
+EMMC sec=03A3E000 sector_mode=00000001
+EMMC the card is identified; the writes are off
+```
+
+So the two-boot cycle "shim -> wait recovery -> boot kernel" only needs
+one boot of the kernel afterwards; no second diagnostic boot.

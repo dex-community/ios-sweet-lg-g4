@@ -3189,3 +3189,37 @@ for (i = 0; i < 1000; i++) {
 **SHA shim**: `fec279c0436e3b4332ea42237396c90a4ac21b15bca9e966bffa62c6b391f3ef`
 
 **Prossimo passo**: testare la patch HFS+ per montare il rootfs iOS in sola lettura dalla recovery.
+
+### FATTO 19 — il rootfs iOS si monta: la patch hfsplus funziona sul telefono
+
+Misura del 2026-11-10 sera, kernel CI `42873352434` (Image sha256
+`b090ee5f...c6835`) impacchettato con ramdisk TWRP + dt.img (`24.281.088`
+byte) e avviato con `fastboot boot`. Dettagli e output in
+`docs/test-2026-11-10-hfs-mount.txt`.
+
+- **TWRP monta `userdata` da solo**, read-only: `dmesg` dice
+  `hfsplus: no backup volume header (signature 0x0000), the primary one
+  (0x4858) is used alone` e `write access to a journaled filesystem is
+  not supported ... mounting read-only`. `mount`:
+  `/dev/block/mmcblk0p50 on /data type hfsplus (ro,...)`. La patch
+  `kernel/patches/0001-...` e' la cura: senza, `invalid secondary volume
+  header` (FATTO 13).
+- **E' il rootfs giusto**: `SystemVersion.plist` = iPhone OS 16.7.16
+  (20H392); `ls /data` mostra Applications/Library/System/private/usr...
+  `df`: 17.1G totali, 11.2G usati, 5.9G liberi.
+- **Letture corrette su due vie indipendenti**: `/usr/lib/dyld` (922.912
+  byte) ha lo stesso sha256 letto dal mount e dal tool userspace
+  `hfsplus` sul device raw (`58068345...3757`); 574 byte di
+  SystemVersion.plist idem (`526de9e2...1962`).
+- **Il tool userspace arrotonda male le dimensioni**: `hfsplus ... ls /`
+  elenca bene ma stampa `Total filesystem size: -888385536` (volume
+  18.35 GB > 2^31, intero signed a 32 bit). Usarlo per estrarre, non per
+  i conti.
+- **Un solo boot basta per tutto**: lo stesso kernel legge anche il log
+  dello shim in RAM (`dd if=/dev/mem bs=4096 skip=327680 count=48`) e
+  conferma `C2OK v=00000009 rsp=48B72E52`,
+  `EMMC sec=03A3E000`, `card is identified; writes are off`. Non serve
+  un secondo boot diagnostico dopo lo shim.
+
+Prossimo: leggere il rootfs (gia' fatto per due file), poi il track
+display; per XNU serve il driver eMMC, non questo kernel Linux.
