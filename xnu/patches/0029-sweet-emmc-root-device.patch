@@ -2,11 +2,11 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 1234567..abcdefg 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -106,2 +106,3 @@ bsd/dev/memdev.c			standard
+@@ -106,4 +106,5 @@ bsd/dev/memdev.c			standard
  bsd/dev/memdev.c			standard
 +bsd/dev/sweet_emmc.c			standard
  bsd/dev/mem.c				standard
- bsd/dev/munge.go 			standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 index abc1234..def5678 100644
