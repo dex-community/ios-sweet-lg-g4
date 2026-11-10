@@ -44,7 +44,8 @@ jobs:
         run: |
           set -e
           cd "$RUNNER_TEMP"
-          curl -sSL -o zlib.tar.gz https://zlib.net/zlib-1.3.1.tar.gz
+          curl -sSL -o zlib.tar.gz \
+            https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
           tar xzf zlib.tar.gz
           cd zlib-1.3.1
           CC=aarch64-linux-gnu-gcc ./configure --static --prefix="$RUNNER_TEMP/arm64"

@@ -119,6 +119,19 @@ jobs:
           sed -i 's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
           grep -n 'yylloc' scripts/dtc/dtc-lexer.l | head -3
 
+      - name: Apply the patches
+        run: |
+          set -e
+          cd "$RUNNER_TEMP/kernel"
+          # kernel/patches/*.patch, in order. The first one lets the driver
+          # mount an HFS+ volume that has no backup volume header, which is
+          # what the iOS rootfs on `userdata` is.
+          for p in "$GITHUB_WORKSPACE"/kernel/patches/*.patch; do
+            echo "applying $(basename "$p")"
+            git apply --verbose "$p"
+          done
+          git diff --stat
+
       - name: Build
         run: |
           set -e

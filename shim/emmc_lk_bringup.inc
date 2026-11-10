@@ -483,35 +483,119 @@ static int emmc_lk_bringup(const struct lk_var *v)
 	}
 
 	STEP(37);
-	if (emmc_cmd(0, 0, CMD_RESP_NONE, 0))
-		return emmc_ident_fail(0);
 	STEP(38);
 	ocr = (v->flags & LK_F_LK_OCR) ? LK_OCR_FIRST : LK_OCR;
-	{
-		int i;
 
-		for (i = 0; i < 1000; i++) {
-			if (emmc_cmd(1, ocr, CMD_RESP_R3, &rsp))
+	/*
+	 * THE IDENTIFICATION, AS A SWEEP.
+	 *
+	 * What is KNOWN (the run of 2026-11-10, the log is in
+	 * docs/shim-log-2026-11-10.txt):
+	 *
+	 *   - the card answers CMD1 (SEND_OP_COND) with its OCR, and the OCR
+	 *     says the power-up is complete (bit 30) ALREADY on the first
+	 *     answer;
+	 *   - CMD2 (SEND_ARG) is the only command that fails: the answer
+	 *     comes back with an interrupt error (0x00088000) and the
+	 *     controller is still holding the command line;
+	 *   - the working Linux driver programs CMD2 as a 136 bit answer with
+	 *     the CRC7 check and WITHOUT the index check (MMC_RSP_R2 is
+	 *     PRESENT|136|CRC), while the shim programmed it with the index
+	 *     check as well (see the CMD_RESP_* block in emmc.c).
+	 *
+	 * What is NOT known: which of the two the card wants, and how many
+	 * CMD1 it needs before CMD2 is legal. So both are swept, one
+	 * combination at a time, and every combination is written to the
+	 * log. The first combination that goes through wins and the log says
+	 * which one it was.
+	 *
+	 * The round 0 sends ONE CMD1 (what the eMMC spec asks for: the host
+	 * sends CMD1 until the card's OCR has the power-up bit set), the
+	 * round 1 sends TWO, in case the card wants the "power-up complete"
+	 * handshake of the spec (the card says it is ready, the host
+	 * acknowledges it with a second CMD1).
+	 */
+	{
+		static const uint8_t cmd2_flags[] = {
+			CMD_RESP_136_CRC,	/* what the working driver does */
+			CMD_RESP_136_CRC_IDX,	/* what the shim did until now */
+			CMD_RESP_48_CRC,
+			CMD_RESP_48_NOCRC,
+		};
+		int round, vi, done = 0;
+
+		for (round = 0; round < 2 && !done; round++) {
+			int ncmd1 = round ? 2 : 1;
+
+			/* CMD0: the card goes back to the idle state. */
+			if (emmc_cmd(0, 0, CMD_RESP_NONE, 0))
 				return emmc_ident_fail(0);
-			emmc_lk_stage = 1;	/* the card answered */
-			if (rsp & 0x80000000u)
-				break;
-			emmc_delay_us(1000);
+			/* CMD1: the card powers up and answers with its OCR. */
+			for (int i = 0; i < ncmd1; i++) {
+				if (emmc_cmd(1, ocr, CMD_RESP_R3, &rsp))
+					return emmc_ident_fail(0);
+				emmc_lk_stage = 1;	/* the card answered */
+				emmc_delay_us(1000);
+			}
+			trail(0x0075, (uint32_t)ncmd1);
+			trail(0x0076, rsp);
+			/*
+			 * Bit 30 of the OCR is the power-up status (bit 30 is
+			 * also the high capacity flag of the ARGUMENT, and an
+			 * eMMC is always high capacity).
+			 */
+			g_sector_mode = (rsp & 0x40000000u) != 0;
+			emmc_lk_stage = 2;	/* ready, not identified yet */
+
+			for (vi = 0; vi < 4 && !done; vi++) {
+				uint32_t r = 0;
+
+				con_hex2("C2TRY", "v=", cmd2_flags[vi],
+					 "rd=", (uint32_t)round);
+				if (emmc_cmd_flags(2, 0, cmd2_flags[vi], &r))
+					continue;
+				con_hex2("C2OK", "v=", cmd2_flags[vi], "rsp=", r);
+				rsp = r;
+				done = 1;
+			}
 		}
-		trail(0x0075, (uint32_t)i);
-		trail(0x0076, rsp);
-		if (i == 1000)
+		if (!done)
 			return emmc_ident_fail(1);
-		g_sector_mode = (rsp & 0x40000000u) != 0;
 	}
+
 	STEP(39);
-	emmc_lk_stage = 2;		/* the card is ready, not identified yet */
-	if (emmc_cmd(2, 0, CMD_RESP_136, &rsp))
+	/*
+	 * The relative card address. The Linux driver takes it from the
+	 * answer of CMD2: the upper half of the first word for a 48 bit
+	 * answer, the last word shifted by 8 for a 136 bit one (it walks the
+	 * response block backwards). Both are read here and the one that
+	 * looks like an address wins; if neither does, the address the LK
+	 * used (2) is kept, because that is what the card answered with at
+	 * every LK boot.
+	 */
+	{
+		uint32_t a = rd32(HC + HC_RESP0) >> 16;
+		uint32_t b = rd32(HC + HC_RESP3) >> 8;
+
+		if (a && a != 0xffffu)
+			g_rca = (uint16_t)a;
+		else if (b && b != 0xffffu)
+			g_rca = (uint16_t)b;
+		else
+			g_rca = (uint16_t)LK_RCA;
+	}
+	con_hex2("RCA", "rca=", g_rca, "rsp=", rsp);
+	/*
+	 * CMD3 (SET_RELATIVE_ADDR): the host gives the card its address.
+	 * The working driver asks for the R1 answer, that is 48 bit with the
+	 * CRC7 and the index check.
+	 */
+	if (emmc_cmd_flags(CMD_SEND_RELATIVE_ADDR, (uint32_t)g_rca << 16,
+			   CMD_RESP_48_CRC_IDX, &rsp))
 		return emmc_ident_fail(1);
-	if (emmc_cmd(CMD_SEND_RELATIVE_ADDR, LK_RCA << 16, CMD_RESP_48, &rsp))
-		return emmc_ident_fail(1);
-	g_rca = (uint16_t)LK_RCA;
-	if (emmc_cmd(CMD_SELECT_CARD, LK_RCA << 16, CMD_RESP_48BUSY, &rsp))
+	/* CMD7 (SELECT_CARD): the card is selected and goes to the transfer state. */
+	if (emmc_cmd(CMD_SELECT_CARD, (uint32_t)g_rca << 16, CMD_RESP_48BUSY,
+		     &rsp))
 		return emmc_ident_fail(1);
 	emmc_lk_stage = 3;
 	return EMMC_OK;

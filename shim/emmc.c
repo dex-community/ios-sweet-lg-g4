@@ -83,6 +83,19 @@
 #define HC_TRANSFER	0x0c	/* 16 bit */
 #define HC_COMMAND	0x0e	/* 16 bit */
 #define HC_RESPONSE	0x10	/* 32 bit x 4 */
+/*
+ * The response register block. The SDHCI map has it at 0x0c (Response),
+ * 0x10 (Response2), 0x14 (Response3), 0x18 (Response4). The shim has always
+ * read the OCR from 0x10; the working Linux driver reads the OCR from 0x0c
+ * (SDHCI_RESPONSE) and, for a 136 bit answer, from 0x18 (it walks the block
+ * backwards and shifts by 8). All four are printed by emmc_cmd_log(),
+ * because the two cannot both be right and the run of 2026-11-10 does not
+ * say which one the controller fills.
+ */
+#define HC_RESP0		0x0c	/* Response  */
+#define HC_RESP1		0x10	/* Response2 */
+#define HC_RESP2		0x14	/* Response3 */
+#define HC_RESP3		0x18	/* Response4 */
 #define HC_BUF_PORT	0x20	/* 32 bit */
 #define HC_PRESENT	0x24	/* 32 bit */
 #define HC_CTRL1	0x28	/* 32 bit view: ctrl1 | power | blkgap | wakeup */
@@ -153,6 +166,39 @@
  */
 #define CMD_RESP_R3		0x82
 #define CMD_RESP_R3BUSY		0x83
+
+/*
+ * THE RESPONSE TYPES AS WHOLE FLAG SETS
+ * -------------------------------------
+ * The low two bits of the command register are the LENGTH the controller has
+ * to expect, the bits above are the CHECKS it has to do. The names below are
+ * the length plus the checks, because that is what a command really needs.
+ *
+ * The reference is the driver Linux that works on this phone
+ * (drivers/mmc/host/sdhci.c + include/uapi/linux/mmc/core.h):
+ *
+ *   MMC_RSP_R1 = PRESENT|CRC|OPCODE  -> 48 bit + CRC7 + index
+ *   MMC_RSP_R2 = PRESENT|136|CRC     -> 136 bit + CRC7      (no index!)
+ *   MMC_RSP_R3 = PRESENT             -> 48 bit, no CRC7, no index
+ *
+ * and the core uses MMC_RSP_R2 for CMD2 (SEND_ARG) and MMC_RSP_R1 for CMD3
+ * (SET_RELATIVE_ADDR). The names R1/R2/R3 are NOT used below on purpose: in
+ * the MMC world "R2" is the 48 bit answer of CMD2, but the Linux core calls
+ * that same answer MMC_RSP_R2 and programs it as a 136 bit answer. The LENGTH
+ * is what the controller acts on, so the length is what the name says.
+ *
+ * The run of 2026-11-10 sent CMD2 with CMD_RESP_136, that is 136 bit + CRC7
+ * + INDEX, and CMD2 is the only command that failed: the answer came back
+ * with an interrupt error (0x00088000) while every other command was fine.
+ * The index check is the one thing the working driver does NOT do for CMD2,
+ * so it is the first suspect. The sweep in emmc_lk_bringup.inc tries the
+ * four combinations and says which one the card accepts.
+ */
+#define CMD_RESP_48_NOCRC	0x82	/* 48 bit, no CRC7, no index (OCR) */
+#define CMD_RESP_48_CRC		0x0a	/* 48 bit + CRC7 */
+#define CMD_RESP_48_CRC_IDX	0x1a	/* 48 bit + CRC7 + index */
+#define CMD_RESP_136_CRC	0x09	/* 136 bit + CRC7 */
+#define CMD_RESP_136_CRC_IDX	0x19	/* 136 bit + CRC7 + index */
 
 /* Transfer mode (0x0c). Standard SDHCI: bit 4 = read, bit 2 = auto-CMD12. */
 #define MODE_READ		0x0010
@@ -600,18 +646,28 @@ static void emmc_cmd_log(uint8_t index, uint32_t argument, uint32_t rc)
 	con_hex2("CMD", "n=", index, "rc=", rc);
 	con_hex2("CMD", "int=", rd32(HC + HC_INT_STATUS),
 		 "pres=", rd32(HC + HC_PRESENT));
+	/*
+	 * The four words of the answer. Which one carries what depends on
+	 * the length the controller was told to expect, so all four go into
+	 * the log: the run of 2026-11-10 read only the second one and could
+	 * not tell a real OCR from the leftovers of an older answer.
+	 */
+	con_hex2("CMD", "r0=", rd32(HC + HC_RESP0),
+		 "r1=", rd32(HC + HC_RESP1));
+	con_hex2("CMD", "r2=", rd32(HC + HC_RESP2),
+		 "r3=", rd32(HC + HC_RESP3));
 	con_hex2("CMD", "rsp=", rd32(HC + HC_RESPONSE), "arg=", argument);
 }
 
 /*
- * One command without a data phase. Returns 0 on success; on failure the
- * raw error is also in emmc_last_cmd_error. resp_type is CMD_RESP_*; CRC
- * and index checks are added for the 48 bit responses.
+ * One command without a data phase, with the flags of the command register
+ * given as they are (the low byte: the length in the low two bits plus the
+ * checks). Returns 0 on success; on failure the raw error is also in
+ * emmc_last_cmd_error.
  */
-static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
-		    uint32_t *rsp)
+static int emmc_cmd_flags(uint8_t index, uint32_t argument, uint8_t flags,
+			   uint32_t *rsp)
 {
-	uint32_t flags = resp_type & 0x03u;
 	uint32_t status;
 
 	emmc_last_cmd_error = 0;
@@ -621,17 +677,6 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 		emmc_cmd_log(index, argument, (uint32_t)emmc_last_cmd_error);
 		return -1;
 	}
-
-	/*
-	 * The CRC check belongs to the 48 bit answer of R1 (it has a CRC7),
-	 * the index check to the 136 bit one (it has the index). The OCR
-	 * (CMD_RESP_R3 / CMD_RESP_R3BUSY) has neither and must be asked
-	 * without them, exactly like the working Linux driver does.
-	 */
-	if (resp_type == CMD_RESP_136)
-		flags |= CMD_CRC_CHECK | CMD_IDX_CHECK;
-	else if (resp_type == CMD_RESP_48 || resp_type == CMD_RESP_48BUSY)
-		flags |= CMD_CRC_CHECK;
 
 	emmc_ack();
 	wr32(HC + HC_ARGUMENT, argument);
@@ -651,7 +696,13 @@ static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
 	if (rsp)
 		*rsp = rd32(HC + HC_RESPONSE);
 	wr32(HC + HC_INT_STATUS, INT_CMD_DONE);
-	if (resp_type == CMD_RESP_48BUSY || resp_type == CMD_RESP_R3BUSY)
+	/*
+	 * The length 11b in the command register means "48 bit answer, check
+	 * the busy line after it" (CMD7, CMD5 awake). The check is on the
+	 * length, not on the whole flag set: CMD_RESP_R3BUSY (0x83) has the
+	 * same length as CMD_RESP_48BUSY (0x03) with a different CRC check.
+	 */
+	if ((flags & 0x03u) == CMD_RESP_48BUSY)
 		emmc_wait_busy();
 	emmc_ack();
 	trail(0x0100 | index, rd32(HC + HC_RESPONSE));
@@ -665,6 +716,30 @@ fail:
 		trail(0x0300 | index, g_diag[D_FAIL_INT]);
 	emmc_reset_lines();
 	return emmc_last_cmd_error;
+}
+
+/*
+ * One command without a data phase. Returns 0 on success; on failure the
+ * raw error is also in emmc_last_cmd_error. resp_type is CMD_RESP_*; CRC
+ * and index checks are added for the 48 bit responses.
+ */
+static int emmc_cmd(uint8_t index, uint32_t argument, uint8_t resp_type,
+		    uint32_t *rsp)
+{
+	uint32_t flags = resp_type & 0x03u;
+
+	/*
+	 * The CRC check belongs to the 48 bit answer of R1 (it has a CRC7),
+	 * the index check to the 136 bit one (it has the index). The OCR
+	 * (CMD_RESP_R3 / CMD_RESP_R3BUSY) has neither and must be asked
+	 * without them, exactly like the working Linux driver does.
+	 */
+	if (resp_type == CMD_RESP_136)
+		flags |= CMD_CRC_CHECK | CMD_IDX_CHECK;
+	else if (resp_type == CMD_RESP_48 || resp_type == CMD_RESP_48BUSY)
+		flags |= CMD_CRC_CHECK;
+
+	return emmc_cmd_flags(index, argument, (uint8_t)flags, rsp);
 }
 
 /*
