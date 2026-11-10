@@ -3223,3 +3223,31 @@ byte) e avviato con `fastboot boot`. Dettagli e output in
 
 Prossimo: leggere il rootfs (gia' fatto per due file), poi il track
 display; per XNU serve il driver eMMC, non questo kernel Linux.
+
+### FATTO 20 — un boot, un file: `tools/device-test.sh` e la config a runtime
+
+La procedura di test era fatta a mano (pack, boot, ~15 comandi `adb`).
+Ora e' un comando solo, e ogni risposta finisce in un file di evidenze:
+
+```bash
+HFSPLUS=/path/to/hfsplus tools/device-test.sh /tmp/kci/Image docs/test-$(date +%F).txt
+tools/device-test.sh --collect docs/collect.txt      # su un kernel gia' avviato
+```
+
+- Se il telefono e' gia' in fastboot non tenta `adb reboot bootloader`
+  (prima lo faceva a vuoto e aspettava 60 s).
+- Se il file passato e' gia' una boot image (`ANDROID!`) non la
+  reimpacchetta; altrimenti `gzip -9` + `tools/pack-twrp-kernel.sh`.
+- In un solo boot salva: `uname`, `/proc/cmdline`, `zcat /proc/config.gz`,
+  `/proc/filesystems`, `/dev/mem`, `mount`/`dmesg`/`df`/`ls` del volume
+  HFS+, `SystemVersion.plist`, sha256 di `/usr/lib/dyld` via mount e via
+  `hfsplus` userspace (due letture indipendenti), e il log shim da
+  `0x50000000`. Chiude con `HFS+ rootfs: OK` / `FAIL` ed exit code.
+- `tools/boot-test-kernel.sh` resta come wrapper: fa `exec` su
+  `device-test.sh`, cosi' i comandi vecchi nelle note continuano a valere.
+- La CI `kernel-h815` ora compila anche `CONFIG_IKCONFIG` +
+  `CONFIG_IKCONFIG_PROC`, quindi `zcat /proc/config.gz` dimostra
+  DEVMEM/HFS/HFSPLUS **sul kernel che sta girando**, senza fidarsi
+  dell'artifact. (Run 42873352434 non li ha: `no /proc/config.gz`.)
+
+Dettagli e tabella dei controlli: `docs/DEVICE-TEST.md`.

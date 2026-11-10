@@ -100,13 +100,15 @@ jobs:
             -e DEVMEM \
             -e HFS_FS \
             -e HFSPLUS_FS \
+            -e IKCONFIG \
+            -e IKCONFIG_PROC \
             -e SYNC_DEBUG \
             -d ECRYPT_FS \
             -d CGROUP_BFQIO \
             -d IOSCHED_BFQ \
             -d INCREMENTAL_FS
           make O=build olddefconfig
-          grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|MACH_LGE|MACH_MSM8992_P1|MACH_MSM8992_P1_GLOBAL_COM)=' build/.config
+          grep -E '^CONFIG_(DEVMEM|HFS_FS|HFSPLUS_FS|IKCONFIG|IKCONFIG_PROC|MACH_LGE|MACH_MSM8992_P1|MACH_MSM8992_P1_GLOBAL_COM)=' build/.config
 
       - name: Patch the old dtc for bison 3
         run: |

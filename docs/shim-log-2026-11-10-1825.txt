@@ -1,0 +1,262 @@
+G4SHIMLGFB cont_splash_mem
+FB at=03400000 size=00C00000
+FB w=000005A0 h=00000A00
+SHIM LG G4 (H815) bring-up shim
+DTB at=02000000 magic=D00DFEED
+DTBC x0=02000000 x1=00000000
+DTBD x2=00000000 fdt0=00000001
+CPU cntfrq=0124F800 mmfr0=00001122
+WDT armed bark_ms=0000EA60 bark=00116520
+E0 begin 
+E0 core_pow  
+ 0000000000000041
+E0 core_mciver  
+ 000000001000003E
+E0 core_hcmode  
+ 0000000000000000
+E0 core_10c  
+ 0000000000000000
+E0 hc_vendor  
+ 0000000000340B1C
+E0 pres  
+ 0000000001F80000
+E0 ctrl1  
+ 0000000000000B30
+E0 pwrctrl  
+ 000000000000000B
+E0 clkctl  
+ 00000000000F0007
+E0 intstat  
+ 0000000000000000
+E0 inten  
+ 00000000FFFF800B
+E0 ctrl2  
+ 0000000000030000
+E0 caps1  
+ 00000000342DC8B2
+E0 caps2  
+ 0000000000008007
+E0 end 
+D0 begin 
+D0 skip MDP not read in the shim: the clock is off at
+D0 skip handover and a read would hang the bus.
+D0 skip Use the recovery: /sys/kernel/debug/mdp/
+D0 skip and /sys/kernel/debug/mdss_panel/dsi0/
+D0 end 
+EMMC start
+PV0 dc=00000002 e0=0000000F
+PV0 e4=00000000 e8=00000005
+PV0 hc29=0000000B step=0000001E
+PV0 pres=01F80000 clk=000F0007
+VSPC in=00340B1C out=00000A1C
+VSPC mclk=00000002 sel=00000000
+VSPC sen=00000000 pws=00000000
+PV0 dc=00000000 e0=0000000F
+PV0 e4=00000000 e8=00000000
+PV0 hc29=0000000E step=00000021
+PV0 pres=01F80000 clk=000F0003
+PV0 dc=00000002 e0=0000000F
+PV0 e4=00000000 e8=00000000
+PV0 hc29=0000000F step=00000022
+PV0 pres=01F80000 clk=000F0003
+PV0 dc=00000000 e0=0000000F
+PV0 e4=00000000 e8=00000001
+PV0 hc29=0000000F step=00000023
+PV0 pres=01F80000 clk=000F0003
+CMD n=00000005 rc=FFFFFFFD
+CMD int=00018000 pres=01F80007
+CMD r0=05030000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=FFFF0000
+WAKE bc=FFFFFFFD int=00000000
+CMD n=00000005 rc=00000000
+CMD int=00000002 pres=01F80000
+CMD r0=05030000 r1=00001400
+CMD r2=00000000 r3=00000000
+CMD rsp=00001400 arg=00020000
+WAKE rca=00000002 rsp=00001400
+CMD n=00000007 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=070B0000 r1=00000700
+CMD r2=00000000 r3=00000000
+CMD rsp=00000700 arg=00020000
+WAKE rc=00000000 rca=00000002
+CMD n=00000000 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=00000000 r1=00000700
+CMD r2=00000000 r3=00000000
+CMD rsp=00000700 arg=00000000
+CMD n=00000001 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=01020000 r1=40FF8080
+CMD r2=00000000 r3=00000000
+CMD rsp=40FF8080 arg=40FF8000
+C2TRY v=00000009 rd=00000000
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02090000 r1=00000000
+CMD r2=00000000 r3=80000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=00000019 rd=00000000
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02190000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=0000000A rd=00000000
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=020A0000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=00000082 rd=00000000
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02820000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+CMD n=00000000 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=00000000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+CMD n=00000001 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=01020000 r1=00FF8080
+CMD r2=00000000 r3=00000000
+CMD rsp=00FF8080 arg=40FF8000
+CMD n=00000001 rc=00000000
+CMD int=00000000 pres=01F80000
+CMD r0=01020000 r1=00FF8080
+CMD r2=00000000 r3=00000000
+CMD rsp=00FF8080 arg=40FF8000
+C2TRY v=00000009 rd=00000001
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02090000 r1=00000000
+CMD r2=00000000 r3=80000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=00000019 rd=00000001
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02190000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=0000000A rd=00000001
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=020A0000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+C2TRY v=00000082 rd=00000001
+CMD n=00000002 rc=FFFFFFFD
+CMD int=00018000 pres=01F80001
+CMD r0=02820000 r1=00000000
+CMD r2=00000000 r3=00000000
+CMD rsp=00000000 arg=00000000
+PV0 dc=00000000 e0=0000000F
+PV0 e4=00000000 e8=00000001
+PV0 hc29=0000000F step=0000005A
+PV0 pres=01F80000 clk=000FFA07
+EMMC prepare=FFFFFFF4 stage=0000000A
+PSTORE hdr=0FF80000 sig=43474244
+PSTORE start=00000000 size=00000000
+PSTORE wrote=000010FF start=000010FF
+PSTORE check=000010FF sig=43474244
+PSTORE hdr=0FF00000 sig=43474244
+PSTORE start=00000000 size=00000000
+PSTORE wrote=000010FF start=000010FF
+PSTORE check=000010FF sig=43474244
+WDT disarmed
+INITRD lo=02200000 hi=02200063
+LOADER no SWEETXNU payload
+SHIM diagnostics
+IMAGE lo=00080000 hi=000E0000
+MMU rc=FFFFFFFE l3=FFFFFFFF
+TTBR0 00000000000BC000
+SCTLR0 0000000000C00800
+SCTLR1 0000000000000000
+TCR 0000000000000000
+PARANGE tg0=00000002 tg1=00000000
+GRANULE 16k=00000000 tg1=00000000
+PAR img 0000000000082B00
+PAR fb 0000000020001B00
+PAR gic 00000000F9000B00
+FILL us off=00000001 on=00000000
+MEM us off=0000D5B8 on=00000000
+PSCI not available on this device (no psci node)
+GIC no GICv3 sysreg iface (GICv2 SoC), skip
+FDT /chosen:
+/chosen   00 00 00 00 00 02 1C 14 
+/chosen   00 25 4D 5C 
+/chosen   00 02 00 00 
+/chosen   0F FC 00 00 
+/chosen   02 20 00 63 
+/chosen   02 20 00 00 
+/chosen   73 63 68 65 64 5F 65 6E 61 62 6C 65 ..
+FDT /memory + carve-outs:
+/memory   6D 65 6D 6F 72 79 00 
+/memory   00 00 00 00 00 00 00 00 00 00 00 00 ..
+/memory   00 00 00 02 
+/memory   00 00 00 02 
+/memory/secure_region@0   
+/memory/secure_region@0   00 00 00 00 00 00 00 00 00 00 00 00 ..
+/memory/secure_region@0   73 65 63 75 72 65 5F 6D 65 6D 00 
+/memory/secure_region@0   00 00 01 35 
+/memory/secure_region@0   00 00 01 35 
+/memory/qsecom_region@0   
+/memory/qsecom_region@0   00 00 00 00 00 00 00 00 00 00 00 00 ..
+/memory/qsecom_region@0   71 73 65 65 63 6F 6D 5F 6D 65 6D 00 
+/memory/qsecom_region@0   00 00 01 67 
+/memory/qsecom_region@0   00 00 01 67 
+/memory/audio_region@0   
+/memory/audio_region@0   
+/memory/audio_region@0   00 00 00 00 00 00 00 00 00 00 00 00 ..
+/memory/audio_region@0   61 75 64 69 6F 5F 6D 65 6D 00 
+/memory/audio_region@0   00 00 01 55 
+/memory/audio_region@0   00 00 01 55 
+/memory/removed_regions@0   
+/memory/removed_regions@0   
+/memory/removed_regions@0   
+/memory/removed_regions@0   00 00 00 00 06 40 00 00 00 00 00 00 ..
+/memory/removed_regions@0   6D 65 6D 6F 72 79 5F 68 6F 6C 65 00 
+/memory/dfps_data_mem@0   
+/memory/dfps_data_mem@0   
+/memory/dfps_data_mem@0   00 00 00 00 03 40 00 00 00 00 00 00 ..
+/memory/dfps_data_mem@0   64 66 70 73 5F 64 61 74 61 5F 6D 65 ..
+/memory/dfps_data_mem@0   64 69 73 61 62 6C 65 64 00 
+/memory/dfps_data_mem@0   00 00 00 24 
+/memory/dfps_data_mem@0   00 00 00 24 
+/memory/cont_splash_mem@0   
+/memory/cont_splash_mem@0   
+/memory/cont_splash_mem@0   00 00 00 00 03 40 00 00 00 00 00 00 ..
+/memory/cont_splash_mem@0   63 6F 6E 74 5F 73 70 6C 61 73 68 5F ..
+/memory/cont_splash_mem@0   00 00 00 25 
+/memory/cont_splash_mem@0   00 00 00 25 
+/memory/peripheral_region@0   
+/memory/peripheral_region@0   
+/memory/peripheral_region@0   
+/memory/peripheral_region@0   00 00 00 00 07 40 00 00 00 00 00 00 ..
+/memory/peripheral_region@0   70 65 72 69 70 68 65 72 61 6C 5F 6D ..
+/memory/peripheral_region@0   00 00 01 37 
+/memory/peripheral_region@0   00 00 01 37 
+/memory/modem_region@0   
+/memory/modem_region@0   
+/memory/modem_region@0   
+/memory/modem_region@0   00 00 00 00 09 00 00 00 00 00 00 00 ..
+/memory/modem_region@0   6D 6F 64 65 6D 5F 6D 65 6D 00 
+/memory/modem_region@0   00 00 01 3C 
+/memory/modem_region@0   00 00 01 3C 
+/memory/ramoops_region@0   
+/memory/ramoops_region@0   
+/memory/ramoops_region@0   00 00 00 00 0F F0 00 00 00 00 00 00 ..
+/memory/ramoops_region@0   
+/memory/ramoops_region@0   72 61 6D 6F 6F 70 73 5F 6D 65 6D 00 
+/memory/ramoops_region@0   00 00 01 9A 
+/memory/ramoops_region@0   00 00 01 9A 
+/memory/crash_fb_mem@4000000   
+/memory/crash_fb_mem@4000000   
+/memory/crash_fb_mem@4000000   00 00 00 00 04 00 00 00 00 00 00 00 ..
+/memory/crash_fb_mem@4000000   63 72 61 73 68 5F 66 62 5F 6D 65 6D ..
+INITRD 0000000002200000
+
