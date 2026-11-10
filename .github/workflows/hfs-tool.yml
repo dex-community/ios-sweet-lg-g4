@@ -70,7 +70,7 @@ jobs:
           EOF
           cmake -S . -B build-aarch64 \
             -DCMAKE_TOOLCHAIN_FILE=tc-aarch64.cmake \
-            -DCMAKE_EXE_LINKER_FLAGS="-static"
+            -DCMAKE_EXE_LINKER_FLAGS="-static -L$RUNNER_TEMP/arm64/lib"
           cmake --build build-aarch64 --target hfsplus -j"$(nproc)"
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp build-aarch64/hfs/hfsplus "$GITHUB_WORKSPACE/out/"
