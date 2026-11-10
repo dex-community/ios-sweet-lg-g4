@@ -3248,7 +3248,10 @@ tools/device-test.sh --collect docs/collect.txt      # su un kernel gia' avviato
 - La CI `kernel-h815` ora compila anche `CONFIG_IKCONFIG` +
   `CONFIG_IKCONFIG_PROC`, quindi `zcat /proc/config.gz` dimostra
   DEVMEM/HFS/HFSPLUS **sul kernel che sta girando**, senza fidarsi
-  dell'artifact. (Run 42873352434 non li ha: `no /proc/config.gz`.)
+  dell'artifact. (Run 42873352434 non li ha: `no /proc/config.gz`.) Verificato a runtime
+con il run 42877233521: `zcat /proc/config.gz` risponde
+`CONFIG_IKCONFIG=y`, `CONFIG_DEVMEM=y`, `CONFIG_HFS_FS=y`,
+`CONFIG_HFSPLUS_FS=y` (il grep del CI stampa anche `CONFIG_IKCONFIG_PROC=y`).
 
 Dettagli e tabella dei controlli: `docs/DEVICE-TEST.md`.
 

@@ -53,7 +53,7 @@ if [ "$COLLECT" = 0 ]; then
 		BOOTIMG=$IMAGE
 	else
 		say "=== packing (gzip kernel + TWRP ramdisk + dt.img) ==="
-		GZ=$(mktemp /tmp/kernel-XXXXXX.gz)
+		GZ=/tmp/kernel-pack-$$.gz
 		gzip -9 -c "$IMAGE" > "$GZ" || { say "gzip failed"; exit 1; }
 		"$ROOT/tools/pack-twrp-kernel.sh" "$GZ" "$BOOTIMG" 2>&1 | tee -a "$OUT" \
 			| grep -E 'sha256|FAIL|bytes:' || true
