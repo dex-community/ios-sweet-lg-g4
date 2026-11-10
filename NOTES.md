@@ -2880,3 +2880,24 @@ Non e' un danno e non e' stato fatto in questa sessione (qui si e' sempre
 usato `fastboot boot`, che non scrive nulla). Per ripristinare il backup
 c'e' `tools/lglaf/partitions.py boot --restore backup/boot-stock.img`, gia'
 collaudato; la partizione `boot` non e' comunque necessaria per i test.
+
+### FATTO 10 — cosa non compila nel tree Titan 3.10.108 (e come si e' aggirato)
+
+Il branch `titan_bpf2` del kernel Titan non compila cosi' com'e': tre
+driver sono rimasti indietro rispetto al resto del tree.
+
+| errore | file | rimedio |
+|---|---|---|
+| `too few arguments to function 'vfs_rename'` | `fs/ecryptfs/inode.c` | `CONFIG_ECRYPT_FS=n` |
+| `'CGRP_REMOVED' undeclared`, `struct cgroup has no member named 'parent'` | `block/bfq-cgroup.c` | `CONFIG_CGROUP_BFQIO=n` e `CONFIG_IOSCHED_BFQ=n` |
+| `implicit declaration of 'LZ4_decompress_safe'` | `fs/incfs/data_mgmt.c` | `CONFIG_INCREMENTAL_FS=n` |
+| `'struct sync_fence' has no member named 'name'` | `drivers/staging/android/trace/sync.h` | `CONFIG_SYNC_DEBUG=y` (il campo `name` esiste solo con quel simbolo) |
+
+Nessuno di questi serve per leggere il rootfs iOS: la CI li disattiva (o
+abilita) in `scripts/config` prima di `olddefconfig`.
+
+Nota: il kernel che funziona sul telefono e' `3.10.108-gbc450f725`, un
+commit che **non** e' nel repository `aoleary/G4-Titan-Kernel` (nessun
+branch e nessun fetch per SHA lo restituisce): e' un commit di un fork o di
+una copia locale. Per la CI si usa il branch `titan_bpf2` (`acc9bfa9`),
+che e' la stessa base 3.10.108 "TOSSUG Baby Fish".
