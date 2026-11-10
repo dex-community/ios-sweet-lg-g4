@@ -13,6 +13,11 @@
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 
+#define __APPLE_API_PRIVATE 1
+#define MACH_KERNEL_PRIVATE 1
+#define PEXPERT_KERNEL_PRIVATE 1
+#define XNU_KERNEL_PRIVATE 1
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/buf.h>
@@ -20,7 +25,7 @@
 #include <sys/disk.h>
 #include <sys/errno.h>
 #include <sys/proc.h>
-#include <sys/uio.h>
+#include <sys/uio_internal.h>
 #include <miscfs/devfs/devfs.h>
 #include <kern/locks.h>
 #include <kern/clock.h>
@@ -56,6 +61,9 @@
 #define HC_COMMAND      0x0c
 #define HC_RESPONSE     0x10
 #define HC_BUFFER       0x20
+
+#define wr16(addr, val) (*(volatile uint16_t *)((uintptr_t)hc_base + ((addr) - HC_BASE)) = (uint16_t)(val))
+#define rd32(addr)      (*(volatile uint32_t *)((uintptr_t)hc_base + ((addr) - HC_BASE)))
 
 /* SDHCI flags */
 #define PS_CARD_PRESENT     (1u << 16)
@@ -380,13 +388,13 @@ static struct cdevsw emmc_cdevsw = {
     .d_close = emmc_close,
     .d_read = emmc_read,
     .d_write = emmc_write,
-    .d_ioctl = noioctl,
-    .d_stop = nostop,
-    .d_reset = noreset,
+    .d_ioctl = enoioctl,
+    .d_stop = eno_stop,
+    .d_reset = eno_reset,
     .d_ttys = NULL,
-    .d_select = noselect,
-    .d_mmap = nommap,
-    .d_strategy = nostrategy,
+    .d_select = eno_select,
+    .d_mmap = eno_mmap,
+    .d_strategy = eno_strat,
     .d_awake = NULL,
     .d_bcount = 0,
     .d_type = 0
