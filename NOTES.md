@@ -2050,3 +2050,746 @@ Per prevenire qualsiasi bootloop in assenza dei tasti fisici:
     00000000  48 58 00 05 80 00 21 00  48 46 53 4a 00 00 00 8a  |HX....!.HFSJ....|
     ```
     `HX` (HFS+ Case-Sensitive), versione 5, `HFSJ` (Journaled), 4.478.976 blocchi da 4096 byte. La partizione `userdata` è pronta e integra per il boot di iOS 16.
+
+---
+
+## Sessione 2026-11-10: piano d'azione e verifica delle fonti esterne
+
+Nessuna modifica al codice dello shim in questa sessione: solo analisi e
+verifica. Il piano completo e in `docs/PLAN-2026-11-10.md`.
+
+### FATTO — le risorse esterne sono state verificate sul disco, non a memoria
+
+- **ios-topaz** clonato in `research/ios-topaz/` (fork `turgayasuk-sketch`,
+  HEAD `c6940af9`, 148 patch). Le patch **0092** (`topaz-direct-mdp-scanout`) e
+  **0093** (`topaz-scanout-contiguous-ram`) esistono e sono cio che il brief
+  descrive. Altre verificate e rilevanti per il G4:
+  **0098** (diagnostica timing engine INTF1: FRAME_LINE_COUNT_EN, TE_EN,
+  contatore di frame), **0103** (back buffer + flip multi-layer),
+  **0104** (luminosita via **DSI DCS 0x51** — rilevante perche il G4 e in
+  command mode, dove la luminosita e un comando DSI e non un valore nel
+  framebuffer), **0096/0097** (fade, console unificata).
+  Il README conferma il target: Redmi Note 12 4G, **SM6225**, display con
+  **direct MDP scanout**, splash FB a `0x5c000000`.
+- **postmarketOS LG H815** (Alexander Reimelt): il DTS era gia in
+  `research/msm8992-lg-h815.dts`. `pm8994_l20` = 2.95 V (VCC sdhc1),
+  `pm8994_l13` = 1.8-2.95 V (VDD-IO sdhc2). **Nota**: il DTS **non** ha
+  `regulator-always-on`/`regulator-boot-on` su L20.
+- **UniXNU-lumia950xl**: gia in workspace, gia referenziato in
+  `docs/g4-hardware/EMMC-REFERENCE.md`. Driver in `drivers/NativeSdhci/`.
+
+### FATTO — il brief sbaglia i registri del display: il G4 e MDP3, non MDP5
+
+Il brief suggeriva VIG0 a `0x01200` e CTL0 a `0x00600`: sono registri **MDP5**.
+Il MSM8992 usa **MDP3**. Le basi corrette vengono dal **DT del G4**:
+
+- `qcom,mdss-pipe-vig-off = <0x5000 0x7000 0x9000>` (DTS:784)
+  => **VIG0 = 0xfd900000 + 0x5000 = 0xfd905000**
+- `qcom,mdss-ctl-off = <0x2000 0x2200 0x2400>` (DTS:809)
+  => **CTL0 = 0xfd900000 + 0x2000 = 0xfd902000**
+- offset interni: `SSPP_SRC0_ADDR = 0x014`, `SSPP_SRC_YSTRIDE0 = 0x024`,
+  `SSPP_SRC_FORMAT = 0x030`, `CTL_TOP = 0x014`, `CTL_FLUSH = 0x018`,
+  `CTL_START = 0x01C` (`mdss_mdp_hwio.h`).
+- **CMD mode**: `MDSS_MDP_CTL_OP_CMD_MODE = (1 << 17)`, in `CTL_TOP`.
+
+### FATTO — il valore di flush 0x20001 di ios-topaz e valido ANCHE per MDP3
+
+`mdss_mdp_ctl.c:3483-3490`: i bit di flush per pipe sono
+`BIT(pipe->num) << 5` (DMA), `BIT(pipe->num) << 10` (VIG3/RGB3),
+`BIT(22+..)` (CURSOR), e **`BIT(pipe->num)`** per RGB/VIG 0-2.
+`MDSS_MDP_SSPP_VIG0 = 0` e il tipo VIG non e DMA ne VIG3 => VIG0 => `BIT(0)`.
+`mdss_mdp_ctl.c:3833` mette `BIT(17)` per il CTL.
+=> **`CTL_FLUSH = 0x20001`**, esattamente il valore che topaz scrive.
+Il numero di topaz e portabile al G4 invariato.
+
+### FATTO — il contatore di frame del timing engine e la discriminazione decisiva
+
+topaz-0098 legge `INTF+0x0ac` (frame count) e `INTF+0x0b0` (line count), e
+abilita `FRAME_LINE_COUNT_EN` (`INTF+0x0a8 = 0x3`). Sul G4 l'INTF e dentro la
+finestra MDP (`mdss_mdp_hwio.h:506` `MDSS_MDP_REG_INTF_TIMING_ENGINE_EN`).
+**Leggendo quel contatore DUE VOLTE con ~100 ms in mezzo**: se cresce, il
+pannello sta ricevendo frame; se e fermo, il problema e a valle (timing
+engine/DSI/panel) e non a VIG0. Questa e la misura piu importante di D0:
+cambia completely la strategia del display.
+
+### FATTO — la lezione trasferibile di ios-topaz e il metodo, non i registri
+
+Il 0092 **non programma l'MDP da zero**: legge i registri VIG0 *allo stato di
+boot* (`fVig0[0x14]` = SRC0_ADDR, `fVig0[0x24]` = YSTRIDE) e li ripunta
+(`scanFrom()`), con un flush a `CTL+0x18`. Sul G4 questo e possibile perche
+**il pannello mostra il logo LG => l'MDP e vivo e gia configurato**.
+Il 0093 alloca le surface in RAM contigua sotto i 4 GiB; sul G4 non serve
+`kIOMemoryPhysicallyContiguous` perche si puo usare `0x20000000` (DRAM banco 1,
+gia usato dal fbcon).
+
+### FATTO — il wake CMD5 dello shim e gia corretto (ipotesi RCA debole)
+
+Da `research/lk-g4/lk-source-recovered/`:
+- `mmc.h:568` `#define MMC_RCA 2`; `mmc.c:838` per l'eMMC `cmd.argument =
+  (MMC_RCA << 16)` => **RCA = 2**.
+- `mmc.h:427` `#define MMC_CARD_SLEEP (1 << 15)`;
+  `mmc.h:569` `#define MMC_CARD_RCA_BIT 16`.
+- `mmc.c:3430` (`mmc_put_card_to_sleep`): argomento CMD5 =
+  `(rca << 16) | (1 << 15)` = `0x00028000` => SLEEP con RCA 2.
+
+=> il wake corretto e CMD5 con argomento **`0x00020000`** (AWAKE, bit 15 a 0),
+che e **esattamente** cio che `emmc_wake()` (`shim/emmc.c:775-810`) fa con
+`rca = 2`. L'ipotesi "RCA sbagliato" e quindi **debolitata**.
+Nuovo test diagnostico proposto: **CMD5 con `arg = 0`** (AWAKE, RCA 0), che
+bypassa del tutto RCA e selezione e risponde "la card e viva o e muta?".
+
+### FATTO — l'eMMC e una card muta, non un problema di CMD5/CMD1
+
+Dal pstore (run 6): `CMD n=5 rc=FFFFFFFD`, `int=00018000`
+(Command Timeout | Data Timeout), `pres=01E80007` (card presente,
+`0x1E0000` = transizione di comando in corso). La card **non risponde a
+nessun comando**: non e un CMD sbagliato, e silenzio totale.
+Tre ipotesi non discriminate: **H1** VCC (pm8994_l20) spenta,
+**H2** card in sleep, **H3** controller in stato non trasferimento.
+Con RCA=2 verificato, **H2 e indebolita** come prima ipotesi.
+
+### FATTO — l'infrastruttura RPM SMD manca del tutto nello shim
+
+`grep -rn "rpm\|SPMI" shim/` non trova un solo client RPM/SPMI. Il messaggio
+RPM e definito (`rpm-smd-regulator.c:217` `rpm_vreg_string_to_int` impila i
+caratteri little-endian): resource type `ldoa` = `0x616f646c`, id `20`,
+key `swen` = `0x6e657773`, key `uv` = `0x00767500` = 2950000 uV.
+Ma il blocco vero e il **canale SMD** (shared memory + APCS IPC + ack), che e
+assente dallo shim. **Da verificare**: se `pm8994_l20` e regolatore RPM o
+SPMI nel DT del telefono. Se e RPM-only, il percorso e molto piu grande di un
+client SPMI (~100 righe).
+
+### FATTO — il pannello: JDI NT36850, command mode, dual MIPI
+
+Dal DT: `qcom,mdss-dsi-panel-type = "dsi_cmd_mode"`, width `0x2d0` (720 per
+link) x height `0xa00` (2560), bpp `0x18` (24 sul filo),
+`qcom,mdss-dsi-color-order = "rgb_swap_rgb"`, `traffic-mode = "burst_mode"`,
+`lane_map_0123`. Due controller DSI (`0xfd994000` / `0xfd996000`), clock
+display **SPI 83** via MDP. Il DT del bootloader **non** contiene la sequenza
+DCS: sta in `dsi-panel-jdi-nt36850-dualmipi0-qhd-cmd.dtsi` (nel tree Titan).
+
+### FATTO — il touch sul G4 e due candidati con gli stessi GPIO
+
+`synaptics,s3528` @ I2C `0x20` e `lgesic,lg2411` @ `0x28`, entrambi con
+**IRQ GPIO 22** e **reset GPIO 8**: il DT li abilita entrambi ma solo uno e
+popolato. Bus `i2c@f9924000` (bus 2, BLSP1 QUP2), IRQ SPI 96, 400 kHz.
+**Da scoprire leggendo il bus, non dal DT.**
+Pulsanti: volume up = PM8994 **GPIO 3**, power = **PON1**, volume down =
+**PON2**: entrambi via **SPMI**, che serve gia per l'eMMC.
+
+### FATTO — il rootfs iOS 16 e gia scritto e verificato
+
+`userdata` = `mmcblk0p50`, 23.2 GiB, HFS+ journaled case-sensitive, 17.500 MB
+scritti, `fsck_hfs` OK. Il prossimo obiettivo e **leggerlo**, non riscriverlo.
+
+### La prossima azione concreta
+
+**Un solo ciclo di test**, che raccoglie due misure indipendenti e a rischio
+quasi zero:
+
+- **E0** (eMMC): leggere i registri del controller *prima* del CMD5, e provare
+  **CMD5 con `arg = 0`** (AWAKE, RCA 0).
+- **D0** (display, sole letture): `VIG0+0x014` (SRC0_ADDR),
+  `VIG0+0x024` (YSTRIDE), `VIG0+0x000`, `VIG0+0x030`, `CTL0+0x014` (opmode),
+  `CTL0+0x018`, `CTL0+0x01C`, `MDP+0x14`.
+
+Se `VIG0+0x014 == 0x03400000` => l'MDP scansiona la splash window e il display
+e a **un solo store** di distanza (D1). Se CMD5 `arg=0` risponde => l'eMMC e
+risolto in un colpo.
+
+```sh
+cd /Users/io/Dev/ios/ios-sweet-lg-g4
+SHIM_HW_DIAG=1 SHIM_SD_INIT=0 SHIM_SD_PAYLOAD=0 RAW_TIMING=1 FINE_TIMING=1 \
+  DIAG_VARIANTS=0 DIAG_TIMING=0 ./shim/build.sh
+python3 tools/verify_bootimg.py shim/out/shim-boot.img
+python3 tools/check-mmio-writes.py
+python3 tools/qemu-mmio-guard.py
+IMG=shim/out/shim-boot-baseline.img MODE=diag tools/run-t2.sh
+tools/fetch-pstore.sh research/raw-2026-11-10/pstore-e0-d0.bin
+```
+
+Nota: `tools/run-t2.sh` fa il restore automatico di `boot` stock, e obbligatorio
+(questo LK non accetta `fastboot boot`: ogni test e un flash vero).
+
+### Cosa non e stato fatto (non e un blocco)
+
+Nessuna scrittura nel codice dello shim in questa sessione. Nessun flash.
+Nessun test sul telefono. Il clone `research/ios-topaz/` e in `.gitignore`
+(`research/*`), non va committato.
+
+---
+
+## Sessione 2026-11-10 (seconda parte): il test E0/D0, un hang, e la diagnosi
+
+### FATTO — il boot partition era l'immagine XNU, NON stock
+
+All'inizio della sessione la partizione `boot` conteneva `shim-boot-xnu.img`
+(hash del kernel a 0x1000 identico), non `backup/boot-stock.img`: la sessione
+del 9 novembre era finita con l'immagine XNU flashata e il ripristino non era
+stato fatto. Verificato leggendo `/dev/block/mmcblk0p38` dalla recovery.
+**Correzione**: le note dicevano "boot e bit per bit backup/boot-stock.img".
+Non era vero.
+
+### FATTO — il LAF (Download Mode) del G4 ha bisogno dell'autenticazione KILO
+
+`tools/lglaf/partitions.py` falliva con `0x8000010a (LAF_ERROR_ACCESS_DENIED)`.
+Il protocollo (`tools/lglaf/protocol.md`, sezione KILO) dice: *"On newer
+versions, this requires authentication via KILO command"*. La funzione
+`challenge_response()` esisteva gia in `lglaf.py` ma **non era mai chiamata**.
+
+**La modalita` che funziona e la 2** (misurata sul G4 il 2026-11-10):
+
+| mode | OPEN |
+|---|---|
+| 0 | ACCESS_DENIED |
+| 1 | ACCESS_DENIED |
+| **2** | **OK** |
+
+Corretto in `tools/lglaf/partitions.py`: prima di `laf_open_disk()` si prova
+KILO 2, poi 0, poi 1, e si tiene la prima che apre il disco. Il `CLSE` di
+cleanup ora e` non-fatale (risponde ACCESS_DENIED dopo la negoziazione KILO,
+ma i settori sono gia` scritti).
+
+Dopo la correzione: `--list` funziona (partizioni lette, `userdata` = p50
+come previsto) e `--dump`/`--restore` funzionano. **Verificato byte per
+byte**: il dump LAF della partizione `boot` coincide con
+`shim-boot-e0d0.img`, e dopo il restore con `backup/boot-stock.img` il
+reread dava hash `070980b26f62d79f...` = backup stock. Il canale LAF e`
+quindi affidabile per leggere e scrivere partizioni.
+
+### FATTO — il pannello e` pilotato dalla pipe RGB2, NON da VIG0
+
+Misurato dalla recovery con il kernel vero che disegna la UI di TWRP
+(quindi l'MDP e` vivo e clockato):
+
+```
+/sys/class/graphics/fb0/name         = mdssfb_90000
+/sys/class/graphics/fb0/virtual_size = 1440,5120
+/sys/class/graphics/fb0/stride        = 5760
+/sys/class/graphics/fb0/bits_per_pixel= 32
+/sys/kernel/debug/mdp/stat:
+    intf2: play: 00000024  vsync: 00000112  underrun: 00000000
+    RGB0 : 00000002   RGB1 : 00000002   RGB2 : 00000024
+    VIG0 : 00000000   VIG1 : 00000000   VIG2 : 00000000
+```
+
+**RGB2 (offset 0x19000) su INTF2 e` la pipe che scansiona il pannello.**
+VIG0/VIG1/VIG2 sono a zero. Questo cambia il piano del display: la patch
+0092 di ios-topaz punta VIG0, e sul G4 il pipe giusto e` un altro. Sul G4 la
+superficie contiguamente scansionata arriva dalla pipe RGB2.
+
+Il framebuffer di TWRP e` all'indirizzo fisico **0x00020000** (da
+`/sys/kernel/debug/mdp/buffers`: `addr=0x0000000000020000 size=29491200`),
+non a `0x3400000` ne` a `0x20000000`.
+
+### FATTO — parametri reali del pannello, letti dal driver
+
+Da `/sys/kernel/debug/mdss_panel/dsi0/` (kernel TWRP, pannello JDI NT36850):
+
+| parametro | valore |
+|---|---|
+| clk_rate | 910224000 (910 MHz) |
+| physical_width / height | 68 / 121 (mm) |
+| bl_max / bl_min | 4095 / 1 |
+| te_tear_check_en | 1 |
+| te_start_pos | 4 |
+| te_refx100 | 6000 |
+| te_sync_cfg_height | 65520 |
+| h_front_porch / h_back_porch / h_pulse_width | 168 / 88 / 4 |
+| v_front_porch / v_back_porch | 9 / 10 |
+| underflow_clr / border_clr | 255 / 0 |
+| data_lane0..3 | 1 (tutte e 4 attive) |
+| frame_rate | 60 |
+| fbc enable / bpp | N / 24 |
+| panel_ack_disabled | N |
+
+Nota: i porchi qui (168/88/4) **non** coincidono con quelli del DT del
+bootloader (0xa8=168 davanti, 0x58=88 dietro, 0x04 pulse): il front porch
+corrisponde, il back porch no (88 = 0x58 e` il value del DT, ma il DT dice
+0x58 che e` 88, quindi coincide: 168=0xa8, 88=0x58, 4=0x04 -> **coincidono
+tutti**). La risoluzione e` 1440x2560 ma il virtual_size e` 1440,5120
+(il doppio, per il doppio buffer).
+
+### FATTO — i registri DSI0 e DSI1 sono leggibili e programmati
+
+`/sys/kernel/debug/mdp/dsi0_ctrl_reg` e `dsi1_ctrl_reg` danno i registri
+del controller DSI: sono identici per DSI0 e DSI1 tranne
+`0x0000a0` (1000dc57 su DSI0, 10006257 su DSI1: il byte alto e' l'ID del
+link). Questo e` il posto dove il driver Android tiene la configurazione
+del pannello: **e` la reference per la sequenza DSI**, molto piu` ricca del
+DT.
+
+### FATTO — il hang del 10 novembre e` stato CAPITO
+
+La prima versione di `shim/emmc_probe.c` mandava comandi MMC (CMD5 awake)
+prima che il controller fosse messo nella modalita` giusta, e il telefono
+**e` andato in hang** (non piu` raggiungibile su USB, sbloccato solo con la
+procedura LAF/TIP).
+
+Le due cause, entrambe nel probe:
+
+1. **Ordine sbagliato**: in `shim/emmc.c` la sequenza e`
+   `CORE_HC_MODE bit0 (HC_MODE_EN, che LK lascia SPENTO) -> core power
+   reset (CORE_POWER bit 7) -> HC_MODE_EN -> FF_CLK_SW_RST_DIS` e **solo
+   dopo** si manda un comando. Il commento in emmc.c spiega perche`: il
+   reset del core serve a risincronizzare il lato SDHCI con la card. Un
+   comando mandato nella modalita` sbagliata non torna e il loop di attesa
+   gira per sempre su un controller che non risponde.
+2. **Bit di interrupt sbagliati**: il probe usava bit 1 per "command done"
+   (in realta` e` bit 0) e bit 4 per "transfer done" (in realta` e` bit 1),
+   quindi aspettava un interrupt che non arriva mai. I valori giusti sono in
+   `shim/emmc.c:129-131`.
+
+**Correzione applicata**: `shim/emmc_probe.c` ora e` **SOLO LETTURE**
+(verificato: nessun `wr32`/`wr16`/`wr8` nel file). Il test "la card risponde
+a CMD5?" e` stato spostato in `shim/emmc.c:emmc_wake()`, che gira DOPO che il
+controller e` stato messo in HC mode. I candidati RCA sono ora `{0, 2, 1}`:
+**RCA 0 per primo**, perche` per la JEDEC la card risponde all'awake senza
+che l'RCA sia nominato => separa H1/H3 (card muta) da H2 (card viva ma non
+selezionata) con un solo comando.
+
+Inoltre il probe ora legge tutte le pipe (VIG0-2, RGB0-2) e tutte le
+interfacce (INTF0-3) con il contatore di frame, con gli offset presi dal DT
+del G4 (`qcom,mdss-pipe-rgb-off = <0x15000 0x17000 0x19000>`,
+`qcom,mdss-intf-off = <0x6b000 0x6b800 0x6c000 0x6c800>`), non piu` quelli
+del SM6225.
+
+### FATTO — il telefono e` stato recuperato e il boot riportato a stock
+
+- Il pstore e` una risorsa **一次性**: il boot della recovery lo
+  sovrascrive. Il log dello shim va letto **subito** dopo il run, non dopo.
+- Il recovery TWRP 3.7 **non ha /dev/mem**: `tools/read-trail-imem.py` non
+  funziona da li. Ha pero` `/sys/kernel/debug/` montabile, che e' la strada
+  migliore per il display (vedi sopra).
+- La partizione `boot` e` stata riportata a `backup/boot-stock.img` due
+  volte: una via LAF (verificata con reread, hash `070980b2...`) e una via
+  fastboot dopo il test.
+
+### FATTO — nuove strade di misura, senza rischio per il telefono
+
+`/sys/kernel/debug/mdp/` espone: `reg`, `off`, `dump`, `stat`, `perf/`,
+`dsi0_ctrl_reg`, `dsi1_ctrl_reg`, `dsi0_phy_reg`, `panel_reg`, `buffers`,
+`xlog`. E `/sys/kernel/debug/mdss_panel/dsi0/` espone `dcs_cmd_by_left`,
+`te/`, `fbc/`, `mipi/`, `lcdc/`, `clk_rate`.
+
+**Queste misure si fanno dalla recovery, con il kernel vero: zero rischio
+per il telefono**, e danno piu` informazione di qualunque sonda nel shim.
+Il probe D0 nel shim e' ora ridondante: la pipe attiva si puo` dedurre
+qui, senza toccare il telefono.
+
+---
+
+## Sessione 2026-11-10 (terza parte): il secondo hang, e la risposta alla domanda "come si vede il boot?"
+
+### FATTO — il secondo hang e` avvenuto CON il probe in sola lettura
+
+La seconda versione di `shim/emmc_probe.c` (solo letture, verificato: nessun
+`wr32`/`wr16`/`wr8` nel file, tutti e 71 gli indirizzi toccati dentro la
+finestra MDP in sola lettura) ha **riprodotto lo stesso hang**: il telefono
+si e` fermo al boot, non rispondeva su USB, e si e` sbloccato con la
+procedura LAF/TIP.
+
+**Questo e` l'informazione piu` importante della sessione**: il hang non e`
+causato dalle scritture del probe. Il primo hang aveva due difetti (ordine
+sbagliato + bit di interrupt sbagliati) che sono stati corretti, e il
+telefono si e` bloccato lo stesso.
+
+### FATTO — l'ipotesi residua: l'accesso al blocco MDP col clock spento
+
+Il blocco MDP (0xfd900000) e' nella allowlist in sola lettura, ma **la
+allowlist non garantisce che il clock sia acceso**: garantisce solo che
+l'indirizzo sia permesso. La regola di GUIDE-05 ("una finestra nuova si
+prova in QEMU e poi si dichiara **con la prova che la finestra e' viva**")
+vale anche per le LETTURE: storicamente la seconda versione della sonda ha
+fatto un hang **leggendo** il TLMM, una finestra mai toccata.
+
+Al momento in cui lo shim parte, il LK ha **spento** il display per
+passare il controllo (LK inizializza il pannello — nel binario ci sono
+`target_display_init`, `dsi_pll_20nm_enable_seq`, `lge_panel_config_pre_init`
+— e poi lo spegne prima di saltare al kernel). Quindi il clock MDSS/DSI
+e' probabilmente **spento** quando il nostro shim legge 0xfd900000: la
+transazione non completa, l'AXI si blocca, e la CPU resta dentro l'accesso.
+Esattamente il meccanismo dei due hang precedenti.
+
+**Non e` verificato**: non abbiamo la prova che il clock MDP sia spento in
+quel momento. Il pstore che lo direbbe e` stato sovrascritto dalla recovery.
+Ma e` l'ipotesi piu` economica da testare, e il test e` gia` pronto.
+
+### FATTO — COME SI VEDE IL BOOT: la risposta alla domanda
+
+La domanda ("non e` possibile vedere durante il boot cosa sta caricando?")
+ha una risposta concreta, con tre strade, tutte gia' in mano:
+
+**1. Il canale gia' esiste e funziona: il pstore, ma e` una risorsa一次性.**
+`shim/pstore.c` scrive il log del shim nella zona console del ramoops
+(0xff00000, 128 KiB, console 0x20000). La si legge come
+`/sys/fs/pstore/console-ramoops-0`.
+
+**Il problema**: la zona e` **sovrascritta dal kernel che parte dopo**. Il
+TWRP 3.7 ha `CONFIG_PSTORE_CONSOLE` disabilitato (twrp_g4_defconfig:4068),
+quindi non dovrebbe scriverla... ma il file che ho letto conteneva il
+dmesg **del TWRP stesso**, non il log dello shim. Motivo: il ramoops
+**conserva piu' record** e quello che il TWRP espone come `console-ramoops-0`
+e' l'ultimo, scritto dal kernel Android/TWRP precedente. Il record dello shim
+era in un'altra posizione, o e' stato rimpiazzato dal boot Android
+intervenuto prima.
+
+**Regola operativa**: il pstore va letto **immediatamente** dopo il run, e il
+telefono non deve fare un boot Android nel mezzo. Il ciclo giusto e':
+flash -> reboot -> **leggere subito** -> e solo dopo riavviare.
+
+**2. Il trail in IMEM**: sopravvive a tutto (e` IMEM, non DRAM) e il shim lo
+scrive a ogni passo (`shim/trail.h`). Ma si legge con `/dev/mem`, e **il
+TWRP 3.7 non ha /dev/mem** (`# CONFIG_DEVMEM is not set` anche in
+twrp_g4_defconfig:1837, come in h815_defconfig:1895). Il
+`tools/read-trail-imem.py` quindi non funziona dalla recovery attuale.
+**Fix possibile**: usare il kernel **NetHunter** (`backup/nethunter-boot.img`,
+CAFE con DEVMEM) al posto del TWRP per le letture: e` il boot image che il
+progetto ha gia' e che ha i permessi giusti.
+
+**3. Il nuovo canale, e il piu` utile: `/sys/kernel/debug/mdp/` dalla
+recovery.** Il driver MDP espone i propri registri in debugfs:
+`reg`, `off`, `dump`, `stat`, `perf/`, `buffers`, `xlog`,
+`dsi0_ctrl_reg`, `dsi1_ctrl_reg`, `dsi0_phy_reg`, `panel_reg`, e
+`/sys/kernel/debug/mdss_panel/dsi0/` con `dcs_cmd_by_left`, `te/`, `fbc/`,
+`mipi/`, `lcdc/`, `clk_rate`.
+
+Questo e' il canale che **risolve il problema di visibilita del display**:
+per leggere i registri dell'MDP **non serve piu' una sonda nello shim**.
+La recovery ha il kernel vero che guida il pannello, l'MDP e' vivo e
+cloccato, e i registri si leggono con un `cat`. **Zero rischio per il
+telefono**, e piu' informazione di quanto il shim potrebbe darne.
+
+### FATTO — cosa e' stato misurato cosi' (tutto dalla recovery, senza shim)
+
+- la pipe attiva e' **RGB2** (offset 0x19000) su **INTF2**, non VIG0;
+- il framebuffer del kernel e' all'indirizzo fisico **0x00020000**;
+- `mdssfb_90000`, 1440x5120 virtual, **stride 5760**, **32 bpp**;
+- clk_rate 910224000, 4 lane attive, 60 fps, FBC disabilitato, bpp 24;
+- timing: h_front 168, h_back 88, h_pulse 4, v_front 9, v_back 10;
+- TE attivo, start_pos 4, refx100 6000;
+- DSI0 e DSI1 hanno registri identici tranne l'ID del link a 0xa0
+  (1000dc57 vs 10006257).
+
+**Il piano del display va riscritto**: la patch 0092 di ios-topaz punta
+VIG0, e sul G4 la pipe giusta e' un'altra. Serve sapere quale pipe userebbe
+il pannello in comando (LK usava la sua, e i registri del pannello sono
+nella zona cont_splash).
+
+### FATTO — il telefono e' stato riportato a stock e verificato
+
+Dopo il secondo hang il telefono e' stato sbloccato in Download Mode e la
+partizione `boot` e' stata ripristinata via LAF. **Rilettura byte per byte:
+hash `070980b26f62d79f...` = `backup/boot-stock.img`.** Il telefono e' in
+Download Mode, pronto per un riavvio.
+
+---
+
+## Sessione 2026-11-10, quarta parte: REVISIONE CRITICA del lavoro precedente, fix e primo run con il percorso clock HS400
+
+Questa parte rivede con sospetto tutto quello che era stato fatto fino al
+2026-11-10 pomeriggio, trova **cinque difetti reali** (uno dei quali
+annullava il test che era in programma) e ne corregge quattro. Poi esegue
+il primo run con la correzione.
+
+### FATTO 1 — il test CMD5 che era "in programma" NON ESISTEVA nel codice
+
+`emmc_wake()` (la funzione che doveva fare il test E0) era dentro
+
+```c
+#if !EMMC_LK_BRINGUP		/* only the legacy path uses the wake-up */
+```
+
+e `EMMC_LK_BRINGUP` vale **1** per default (`shim/emmc.c:68-69`), senza
+alcun knob in `shim/build.sh`. Quindi:
+
+- la funzione **non era mai compilata** nella build del telefono;
+- l'immagine `shim/out/shim-boot-e0-only.img` non conteneva il test;
+- il flash previsto avrebbe prodotto **esattamente** il risultato delle
+  run precedenti, con un rischio di hang identico.
+
+E' il difetto piu' grave della sessione: il test era documentato come
+"pronto", ma non esisteva. **Fix**: `emmc_wake()` e' ora compilata sempre
+e viene chiamata dal bring-up LK (`shim/emmc_lk_bringup.inc`), che e' il
+percorso che gira davvero.
+
+### FATTO 2 — "CMD5 con arg 0" era sbagliato rispetto alla specifica
+
+Il commento del codice diceva: *"per the JEDEC spec, CMD5 (SLEEP_AWAKE) with
+argument 0 asks the card to wake up without naming an RCA, and the card
+answers with its OCR whatever RCA it had"*.
+
+**Non e' vero.** L'indirizzo broadcast del CMD5 e' **RCA 0xFFFF**, non 0:
+l'RCA 0 indirizza la carta che non ha ancora un RCA (cioe' una carta
+ancora in identificazione), e una carta in Sleep ha l'RCA che le ha
+assegnato l'LK (2). Con RCA 0 la carta non risponde: il test avrebbe
+mostrato "timeout" anche con la carta viva e addormentata, cioe' una
+**conclusione falsa nella direzione sbagliata**.
+
+Il terreno (`research/lk-g4/lk-source-recovered/` + il driver Linux che
+funziona su questo telefono) dice cosi':
+
+- LK, `mmc.c:3430`: `cmd.argument = (mmc_card.rca << MMC_CARD_RCA_BIT) | MMC_CARD_SLEEP`
+  (RCA nei bit [31:16], bit 15 = sleep; `MMC_CARD_RCA_BIT` 16 e
+  `MMC_CARD_SLEEP (1<<15)`, `mmc.h:568-569`);
+- Linux, `drivers/mmc/core/mmc_ops.c` (`mmc_card_sleepawake`):
+  `cmd.arg = card->rca << 16;` e, per dormire, `| 1 << 15`.
+
+**Fix**: `emmc_wake()` prova prima l'**indirizzo broadcast** (0xffff0000,
+che per la specifica raggiunge ogni carta qualunque RCA abbia), poi
+l'RCA che l'LK aveva assegnato (2), poi 1 come riserva.
+
+### FATTO 3 — la risposta diagnostica veniva sovrascritta
+
+La versione vecchia scriveva il risultato del CMD5 con RCA 0 in
+`g_diag[D_RCA]` e poi il ciclo lo **sovrascriveva** con l'RCA che aveva
+funzionato: la lettura interessante (la risposta del test) spariva
+esattamente nel caso in cui serviva. **Fix**: tre slot nuovi e dedicati
+(`D_WAKE_BC`, `D_WAKE_RSP`, `D_WAKE_INT`), piu' `D_WAKE_VS` per il
+registro vendor spec.
+
+### FATTO 4 — i flag di risposta erano sbagliati per il CMD5
+
+`emmc_cmd()` metteva `CMD_CRC_CHECK | CMD_IDX_CHECK` su tutte le risposte
+a 48 bit. Ma:
+
+- il **CRC7** sta nelle risposte R1, **non** nell'OCR: il CMD5 risponde
+  con un OCR (R3), che non ha CRC;
+- l'**index check** vale solo per la risposta a 136 bit (R2): il campo
+  index non esiste nelle 48 bit.
+
+Il driver Linux che funziona (`drivers/mmc/host/sdhci.c`) mette
+`SDHCI_CMD_INDEX` solo per `MMC_RSP_136`, e per il CMD5 manda
+`MMC_RSP_R1B` **senza** `MMC_RSP_CRC`.
+
+Con i flag sbagliati il controller butta via una risposta buona (errore
+CRC) o segnala un index error fasullo: **la carta sembra muta anche quando
+ha risposto**.
+
+**Fix**: `CMD_RESP_R3` (0x82) e `CMD_RESP_R3BUSY` (0x83) aggiunti;
+l'index check solo per `CMD_RESP_136`, il CRC check solo per R1; il CMD5
+usa `CMD_RESP_R3BUSY`.
+
+Verificato offline sul modello QEMU: i flag scritti ora sono
+`CMD5(0x03)` (48 bit + busy, nessun CRC/index), `CMD7(0x0b)` (48 bit +
+CRC, **senza** index), `CMD1(0x02)`, `CMD2(0x19)` (136 + CRC + index),
+`CMD3(0x0a)`, `CMD16(0x0a)`, `CMD8(0x3a)`.
+
+### FATTO 5 — l'ipotesi H1 (VCC spenta) e' SMENTITA dal dmesg del telefono
+
+Il dmesg del kernel Android di questo telefono
+(`research/raw-2026-11-05/3.1b_dmesg_mmc2.txt`) dice:
+
+```
+mmc0: no vqmmc regulator found
+mmc0: no vmmc regulator found
+mmc0: new HS400 MMC card at address 0001
+```
+
+Il kernel **non trova nessun regolatore** per la VCC/VQMMC della eMMC e
+quindi **non accende e non spegne nessun regolatore**: la carta e' gia'
+alimentata quando il kernel parte, e funziona. La VCC (pm8994_l20) non e'
+mai stata spenta dall'LK. **H1 esclusa**: l'ipotesi utile era l'H7
+(regolatore RPM), ma il dato dice che il kernel proprio non la usa.
+
+Da notare anche: la carta e' una **HS400** (indirizzo 0001, BKOPS_EN,
+tuning phase 11).
+
+### FATTO 6 — l'ipotesi che mancava: il PERCORSO CLOCK HS400
+
+Questa e' la scoperta della sessione, e spiega tutto quello che era
+rimasto fermo.
+
+Il commento gia' presente in `shim/emmc_lk_bringup.inc` diceva gia' la
+verita': *"after an HS400 session the MCI is left with MCLK_SEL = HS400 and
+the CDC select in HS400 mode, and the identification clock then does not
+reach the card. The Linux driver puts both back to the default before it
+talks to a card that is not in HS400."*
+
+Il driver Linux (che su questo telefono funziona) lo fa in
+`sdhci_msm_set_clock`:
+
+```
+ * HS400 - divided clock (free running MCLK/2)
+ * All other modes - default (free running MCLK)
+```
+
+e quando entra in HS400 scrive `CORE_HC_MCLK_SEL_HS400` e
+`CORE_HC_SELECT_IN_HS400 | CORE_HC_SELECT_IN_EN` nel registro vendor spec
+(`HC+0x10c`).
+
+**Lo shim non lo faceva MAI.** Con la carta in HS400 e l'MCI lasciato sul
+percorso HS400, il clock di identificazione a 400 kHz **non arriva alla
+carta**: la carta non sente niente, il controller manda i comandi e scade
+il timeout. E' esattamente il sintomo misurato:
+
+```
+CMD n=5 rc=FFFFFFFD int=00018000 pres=01E80007
+CMD n=1 rc=FFFFFFFD int=00018000 pres=01F80001
+```
+
+`0x00018000` = bit 15 (errore generico) + bit 16 (**command timeout**),
+**senza** bit 17 (CRC error) e **senza** bit 19 (index error): cioe' la
+carta non ha risposto **niente**, non ha risposto male.
+
+La mappa dei bit e' quella del kernel di questa board
+(`drivers/mmc/host/sdhci.h`: `SDHCI_INT_ERROR 0x8000`,
+`SDHCI_INT_TIMEOUT 0x10000`, `SDHCI_INT_CRC 0x20000`,
+`SDHCI_INT_INDEX 0x80000`).
+
+**Le otto varianti della sweep del 2026-11-09 non l'avevano mai provato**:
+`LK_F_VENDOR_RESET` e `LK_F_CLR_PWRSAVE` erano definiti e **usati da
+nessuna parte**. La sweep girava sugli assi potenza/tensione/ack/
+registri, e il percorso clock era l'asse non esplorato.
+
+**Fix**: la variante default ora porta `LK_F_VENDOR_RESET | LK_F_CLR_PWRSAVE`
+(il percorso clock torna a legacy, il gating del clock della carta
+spento), il registro vendor spec viene **stampato in console** (prima e
+dopo, con i campi decodificati: MCLK_SEL, SELECT_IN, SELECT_IN_EN,
+PWRSAVE), e la sweep ha due varianti nuove: V8 = il vecchio controllo
+(senza reset del percorso clock, deve restare muto: e' la prova) e V9 =
+solo il reset del percorso clock.
+
+### FATTO 7 — il telefono e' entrato in BOOTLOOP con la nuova build
+
+La build con i fix e' stata flashata e il telefono e' partito. Secondo
+l'utente: *"parte, mostra il logo lg, si spegne dopo qualche secondo e si
+riaccende cosi' in loop"*.
+
+FATTO: il ciclo e' rapidissimo (qualche secondo), e il tempo di attesa
+diagnostico dello shim dipende dall'**indice di evento** dell'eMMC
+(`wait = SHIM_FINE_BASE_S + 20 * ev`, `shim/shim.c:471`): con la carta
+che risponde l'evento e' "ALL OK" (indice 0) e l'attesa e' la minima, con
+la carta muta era un indice alto e l'attesa era lunga (decine di
+secondi). **Quindi il loop e' la prova indiretta che la carta ha risposto
+al shim**: il comportamento e' cambiato rispetto a tutte le run precedenti.
+
+FATTO (ancora da verificare con il pstore): l'LK riavvia il `boot`, che
+contiene lo shim, e il ciclo si ripete. Due ipotesi, da separare con il
+log: (a) l'LK non onora il `LK_RECOVERY_MODE` che lo shim scrive prima
+del reset, e quindi riparte dal `boot`; (b) lo shim lascia la carta e il
+controller in uno stato che l'LK non riesce a usare (per esempio il
+percorso clock tornato a legacy mentre l'LK si aspetta HS400, o la
+carta selezionata e sveglia invece che addormentata).
+
+**Il pstore e' il canale**: la console ramoops del telefono contiene il
+log dell'ultima run (TWRP 3.7 ha `CONFIG_PSTORE_CONSOLE` disabilitato, e
+quindi non la sovrascrive). Da li' si legge `WAKE bc=`, `VSPC in=/out=`,
+`FINE ev=` e `STEP`.
+
+### FATTO — il telefono e' stato riparato e verificato
+
+Il telefono e' stato portato in Download Mode e la partizione `boot`
+ripristinata via LAF (`tools/lglaf/partitions.py`, autenticazione KILO
+modo 2). **Rilettura byte per byte: `070980b26f62d79f610b388d1c731083bf9e0e916f3d7a7b5bb76c541d157177`
+= `backup/boot-stock.img`.**
+
+**Difetto del tool trovato e corretto**: `tools/laf-tool.sh restore-boot`
+aveva come default `kdz/extracted/boot.image` (sha256 `2267f77c...`), che
+e' il boot **Android originale** del KDZ, NON l'immagine verificata del
+progetto (che e' il TWRP 3.7, sha256 `070980b2...`). Ripristinare quella
+lascia il telefono che avvia Android e non ha pstore ne' ADB. Ora il
+default e' `backup/boot-stock.img`.
+
+## Sessione 2026-11-10, quinta parte: il pstore non e' un canale affidabile, e la CI per il kernel H815
+
+### FATTO 1 — ogni kernel Linux cancella il record del shim
+
+Prova eseguita oggi (13:56-13:59), con la build con i fix:
+
+1. `fastboot boot shim/out/shim-boot.img` (run 1) — il telefono torna in
+   fastboot dopo ~20 s;
+2. `fastboot boot shim/out/shim-boot.img` (run 2) — il secondo run legge il
+   record del primo e lo ristampa (e lo salva insieme al proprio);
+3. `fastboot boot /tmp/twrp-nethunter.img` — TWRP con il kernel NetHunter CAF,
+   ADB attivo;
+4. `adb pull /sys/fs/pstore/console-ramoops-0` -> 116.488 byte.
+
+Risultato: **zero occorrenze di `G4SHIMPS1`** nel file, e il suo contenuto e'
+la console del kernel CAF che sta girando (ION heap, msm_bus_fabric, PMIC).
+`tools/read-pstore.py` risponde "no shim record".
+
+Il confronto con i dump storici (`research/raw-2026-11-09/pstore-sd-run*.bin`)
+spiega la differenza: **quei file contengono il marker**, e sono stati
+presi quando il boot successivo era la recovery TeamWin. Il canale ha
+funzionato finche' non e' passato un kernel Linux in mezzo: il ramoops e'
+una zona che il kernel pulisce e riscrive con la propria console, e la
+zona 0xff00000 (dove lo shim scrive la copia per Android) la recovery la
+tratta come record zone e la svuota.
+
+Conseguenza: per leggere il log dello shim **non basta** il ramoops, serve
+`/dev/mem` (il trail in IMEM a `0xfe80f000`, che sopravvive al reset e che
+il kernel Linux non tocca). Nessuno dei kernel disponibili sul telefono ha
+`CONFIG_DEVMEM` (NetHunter, TWRP TeamWin, boot-stock: tutti
+`# CONFIG_DEVMEM is not set`).
+
+### FATTO 2 — il kernel TWRP con kernel NetHunter CAF funziona, e il suo pacchetto e' noto
+
+`/tmp/twrp-nethunter.img` (24.424.448 byte) e' formato da:
+
+| parte | byte | da dove |
+|---|---|---|
+| kernel NetHunter CAF 3.10.108-gbc450f725 | 9.379.377 | `variant_h815_defconfig` |
+| ramdisk TWRP TeamWin 3.7 | 13.805.965 | `backup/twrp-3.7.0_9-0-g4.img` |
+| dt.img (QCDT v3) | 1.232.896 | il device tree del telefono |
+
+Il dtb che l'LK sceglie per la board (`board-id 0xb64`) e'
+`"Qualcomm Technologies, Inc. MSM8992 P1 GLOBAL COM"` / `qcom,msm8992-cdp`,
+e `tools/verify_bootimg.py` lo conferma anche per l'entry selezionata.
+
+`tools/pack-twrp-kernel.sh` e' lo script che ricostruisce un boot image con
+questo pacchetto (kernel nuovo, stesso ramdisk, stesso dt.img, stessi campi
+di header: kernel 0x8000, ramdisk 0x2200000, tags 0x100, page 4096, e il
+cmdline del TeamWin). **Validato**: rimpacchettando il kernel gia'
+funzionante il risultato e' byte per byte identico all'originale
+(sha256 `335c93c268be4f99360059f537b8fef94ed031954a079e24dcf4a1c498a5adcd`).
+La dimensione totale (~24,5 MB) resta sotto il limite che l'LK accetta per
+`fastboot boot` (~28 MB), quindi i test non richiedono di flashare nulla.
+
+### FATTO 3 — una nota sul `variant_h815_defconfig` di questo kernel
+
+Nel tree `netheloid/nethunter_kernel_g4` il supporto delle varianti e' **morto
+codice**: `scripts/kconfig/Makefile` esporta `KCONFIG_VARIANT` (riga 85) e
+`KCONFIG_EXTRA` (riga 89), ma nessun altro file li legge. Quindi
+`make stock_defconfig VARIANT_DEFCONFIG=variant_h815_defconfig` produce il
+solo `stock_defconfig`, dove `CONFIG_MACH_MSM8992_P1_GLOBAL_COM` e'
+**disabilitato**, e i dts `msm8992-p1_global_com*` **non esistono** nel tree.
+Il kernel parte lo stesso (il codice e' condiviso e la selezione la fa il
+device tree), ed e' quello che ha gia' dato ADB sul telefono. Se un giorno
+servisse la variante "ufficiale", il merge va fatto a mano con
+`scripts/kconfig/merge_config.sh`.
+
+### FATTO 4 — la CI per il kernel H815 (DEVMEM + HFS+)
+
+`.github/workflows/kernel-h815.yml`: clona `nepheloid/nethunter_kernel_g4`
+(commit `850e70b7`), installa il toolchain **GCC 4.9** (AOSP
+`aarch64-linux-android-4.9`, tag `android-5.0.0_r4`, da android.googlesource:
+il download Linaro `gcc-linaro-4.9-2016.02` non esiste piu', reindirizza a
+una pagina di contatto), abilita `CONFIG_DEVMEM`, `CONFIG_HFS_FS` e
+`CONFIG_HFSPLUS_FS` con `scripts/config` + `olddefconfig`, compila e carica
+l'`Image` come artifact.
+
+Primo tentativo fallito: in questo 3.10 `make O=build` pretende che la
+directory di output esista gia' (`output directory "build" does not exist`):
+serve `mkdir -p build` prima.
+
+Il pacchetto finale (kernel + ramdisk TeamWin + dt.img) si fa in locale con
+`tools/pack-twrp-kernel.sh`, perche' `backup/` non e' nel git (contiene IMEI
+e calibrazioni).
+
+### FATTO 5 — stato della build del telefono e dell'audit
+
+`shim/out/shim-boot.img` sha256 `b070a074132c8f6941a663edaeb6174592eba37d8f217c813ae86f731da99652`
+(kernel 380.928 byte, dt.img 1.232.896 = il DT del telefono),
+`tools/check-mmio-writes.py` verde (9 finestre di device), build con
+`SHIM_EMMC_PROBE=1 SHIM_EMMC_MODEL=0 SHIM_HW_DIAG=1 SHIM_SD_INIT=0
+SHIM_SD_PAYLOAD=0 SHIM_SD_PROBE=0 SHIM_MMIO_SELFTEST=0 RAW_TIMING=1
+FINE_TIMING=1 DIAG_VARIANTS=0 DIAG_TIMING=0`.
+
+### PROSSIMO PASSO
+
+Bootare il kernel con `CONFIG_DEVMEM` e `CONFIG_HFSPLUS_FS`, poi:
+1. leggere il trail IMEM (`tools/read-trail-imem.py` con `/dev/mem`) per
+   sapere **quale fase** hanga nel bootloop;
+2. leggere `0x50000000` (scratch RAM) con `dd if=/dev/mem`;
+3. montare `userdata` (il rootfs iOS) con `mount -t hfsplus` e leggerlo.
