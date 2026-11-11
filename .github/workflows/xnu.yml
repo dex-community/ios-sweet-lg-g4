@@ -54,11 +54,27 @@ jobs:
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
           # the arm64 slice must not use LSE atomics (casa/ldadd/...): they trap
           # SIGILL on the Cortex-A53/A57 of msm8992. Downgrade the firehose build
-          # to plain armv8-a like the kernel itself (patch 0004).
-          XC=libdispatch/xcodeconfig/libfirehose_kernel.xcconfig
-          echo 'OTHER_CFLAGS = $(inherited) -march=armv8-a+crypto -mno-outline-atomics' >> dxb/$XC
-          echo 'OTHER_CPLUSPLUSFLAGS = $(inherited) -march=armv8-a+crypto -mno-outline-atomics' >> dxb/$XC
-          tail -2 dxb/$XC
+          # to plain armv8-a like the kernel itself (patch 0004). The xcconfig
+          # only exists once build.sh has cloned libdispatch, so the injection
+          # goes into build.sh itself, next to its own sed calls.
+          python3 - <<'PY'
+          import re
+          p = "dxb/build.sh"
+          s = open(p).read()
+          anchor = "sed -i '' 's|$(SDKROOT)/usr/local/include|$(FAKEROOT_DIR)/usr/local/include|g' \"${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig\""
+          assert anchor in s, "firehose xcconfig anchor not found"
+          extra = (
+              anchor + "\n"
+              "    printf 'OTHER_CFLAGS[arch=arm64] = $(inherited) -march=armv8-a+crypto -mno-outline-atomics\\n' "
+              ">> \"${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig\"\n"
+              "    printf 'OTHER_CPLUSPLUSFLAGS[arch=arm64] = $(inherited) -march=armv8-a+crypto -mno-outline-atomics\\n' "
+              ">> \"${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig\""
+          )
+          s = s.replace(anchor, extra, 1)
+          open(p, "w").write(s)
+          print("injected firehose march flags")
+          PY
+          grep -n "march=armv8-a+crypto" dxb/build.sh
           ls dxb/patches
 
       - name: Deps
