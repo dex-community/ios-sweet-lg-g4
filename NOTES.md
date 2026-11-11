@@ -3786,3 +3786,53 @@ marcatori, cioe' molto presto.
 ### Documentazione
 - `docs/LSE-PAN-FIX-2026-11-11.md`: raccolta completa (problema, patch,
   pre-test locale, procedura step-by-step, check 4, stato).
+
+## 2026-11-11 (notte) — due difetti "scrivere oltre la mappa" (FACT 30-32)
+
+### FACT 30 — Il repro QEMU-A53 è un artefatto, non l'ADT G4
+- Test: payload **SWEET** (ADT noto buono) + CPU `cortex-a53` in QEMU →
+  **stesso identico abort** a `common_start+0xcc`
+  (`Prefetch Abort, ESR 0x21/0x86000005, FAR 0xb14aa3cc, ELR 0xb14aa3cc`).
+- Con `--cpu cortex-a76` lo stesso payload parte e arriva a userspace.
+- Quindi il crash a `common_start+0xcc` è il **modello CPU cortex-a53 di QEMU**
+  (non implementa il granulo 16K che XNU usa: `ARM_PGBYTES` 16K, `ARM_TT_L2_SHIFT` 25).
+- Sul telefono il Cortex-A53 vero supporta 16K → non è la causa.
+- **QEMU-A53 non è un banco di prova valido per il G4**: usare `cortex-a76`.
+
+### FACT 31 — Il fbcon dell'ADT G4 dichiarava una finestra troppo piccola (REAL)
+- Nodo `sweet-fbcon`: `reg = <0x20000000 0xc00000>` (12 MiB) ma la geometria
+  è 1440×2560 con stride 5760 = **14,7 MiB**.
+- `fbcon_init` (patch 0003) pulisce **tutte** le righe dichiarate → scrive
+  fino a offset 0xe10000, cioè **2,1 MiB oltre la fine della mappa** →
+  data abort con `FAR = fbcon_base + 0xc00000` = **fine esatta dei 12 MiB**.
+- Lo shim lo sa e lo corregge (`shim/shim.c:1175`: "Never draw outside the
+  window the device tree reserved"); XNU no.
+- **Fix**: `tools/mkadt.py` clampa l'altezza (`fb_h = fb_size // fb_stride`,
+  2560 → 2184) prima di generare il nodo.
+
+### FACT 32 — Il G4 ha un GICv2, XNU scriveva il block SGI/PPI GICv3 (REAL)
+- Il G4: `interrupt-controller@f9000000 { compatible = "qcom,msm-qgic2";
+  reg = <0xf9000000 0x1000 0xf9002000 0x1000>; }` → GICv2, **finestra GICR
+  di 4 KiB**, nessun redistributor frame.
+- La patch 0004 (scritta per lo Xiaomi SWEET, GICv3) scrive
+  `GICR_IGROUPR0` (+0x10080), `GICR_ISENABLER0` (+0x10100),
+  `GICR_IPRIORITYR0` (+0x10400) → **fuori dalla mappa** → data abort.
+- Il crash appare come `FAR = GICR_mapping + 0x10080`, cioè 0x10080 oltre
+  la fine dei 4 KiB dichiarati: **stessa firma del bug fbcon**.
+- **Fix**: `xnu/patches/0017b-sweet-g4-gicv2-no-redistributor.patch`
+  - salta il block SGI/PPI se `gicr_size < GICR_SGI_PPI_END` (0x10104);
+  - non tocca `GICR_WAKER` (è nel frame redistributor);
+  - `find_gicr_pe_base()` **non entra in panic** se non c'è un frame.
+  - 0017b (non 0005c) perché 0017 tocca lo stesso file.
+
+### Metodo: QEMU come banco di prova
+- Con il profilo G4 in QEMU (`--device g4 --qemu`): GIC alle addr QEMU,
+  finestra GICR 1 MiB (il frame redistributor), fbcon clampato.
+- Con le fix: **il kernel non faulta più** su fbcon né GIC, prende IRQ del
+  timer normalmente (2004 interrupt, ESR 0x3890000) → è vivo.
+- Il profilo SWEET con `--ramdisk` arriva a **userspace**: `BSD root: md0`,
+  `load_init_program: ... /sbin/launchd` — con kernel e buildtree diversi.
+- `tools/qemu-sweet.py --g4` decodifica il pannello G4 (1440×2560 a
+  0x20000000) invece di quello SWEET.
+- `tools/read-xnu-ram.py` legge dalla RAM del telefono il panic region
+  (magic "DEED") e il buffer fbcon dopo un crash.
