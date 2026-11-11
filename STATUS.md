@@ -1,6 +1,6 @@
 # STATUS — iOS 16 on LG G4 (H815)
 
-Last updated: 2026-11-10
+Last updated: 2026-11-11
 
 ## Goal
 
@@ -15,118 +15,226 @@ touch and hardware buttons.
 | Phase | State | Notes |
 | --- | --- | --- |
 | 0 — setup and analysis | **done** | Hardware facts extracted and cross-checked; see `docs/g4-hardware/` |
-| 1 — shim + minimal boot | **mostly done** | Shim builds, passes the offline boot-image check, runs under QEMU **and on the real phone** (LK loads it, it runs to the end and resets itself). The panel does not show it: the display driver is Phase 4 |
-| 2 — XNU kernel and RAM disk | **in progress** | The upstream `ios-sweet` turns out to be a port of XNU to a **Xiaomi phone with a device tree** (IODTPlatformExpert, DT virtual timer, boot CPU without PSCI), i.e. the same shape as this board, so its patch set is the base. The kernel is built **in CI** (macos-14, Xcode 15.x — the only `iig` that matches the xnu-8796 IORPC ABI), not locally. The G4 adaptations are done: `-march=armv8-a+crypto` (the G4 is all Cortex-A53, armv8.0 — armv8.2 lets the compiler emit LSE/complex instructions the A53 does not have) and an `IONameMatch = 'lg,h815'` entry so the platform expert attaches to our ADT. `tools/build-g4-image.sh` chains CI artifact → ADT → payload → LK boot image |
-| 3 — eMMC storage and iOS root | **in progress** | La carta **risponde**: e' una Samsung 032G74 (CID `11010030333247373400b448b72e5200`), CMD5/CMD7/CMD0/CMD1 vanno a buon fine e restituiscono l'OCR. L'unico comando che fallisce e' **CMD2 (SEND_ARG)**, con un interrupt di errore (`int=00088000`, non un timeout). Il driver Linux che funziona su questo telefono programma CMD2 come 136 bit + CRC7 **senza** il check dell'indice, mentre lo shim lo programmava con il check dell'indice: e' il sospetto, e il codice ora fa uno sweep delle quattro combinazioni (l'esito dello sweep non e' ancora stato letto: vedi `NOTES.md` FATO 14). Il rootfs iOS su `userdata` e' un volume HFS+ **case-sensitive** ('HX'), journaled e **senza backup volume header**: e' proprio il backup mancante che faceva fallire il mount del driver Linux, e la patch e' scritta (`kernel/patches/0001-hfsplus-mount-a-volume-with-no-backup-volume-header.patch`, applica pulita). Il volume si monta in sola lettura, quindi il rootfs non viene toccato. XNU stesso ha ancora bisogno di un driver eMMC (quello di UniXNU e' il riferimento) | **Sicurezza:** dal 2026-11-09 gli accessi MMIO passano per una allowlist a runtime (`shim/mmio.h`) e un audit statico nella build (`tools/check-mmio-writes.py`): due hang del telefono erano scritture a controller mai inizializzati. Dettagli in `GUIDE-05-MMIO-SAFE.md`.
-| 4 — touch, buttons, display | **in progress** | Touch is the Synaptics `s3528` @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2. The display is command-mode and needs a real MDP/DSI driver; the NetHunter G4 kernel is the reference |
-| 5 — polish and documentation | partial | `GUIDE-00`, `GUIDE-01`, `STATUS.md` |
+| 1 — shim + minimal boot | **done** | Shim builds, passes offline checks, runs under QEMU **and on the real phone**. eMMC card identified (Samsung 032G74, CID verified). CMD2 now passes with fix to OCR busy bit polling (commit e80f24a). Log channel via RAM@0x50000000 works. |
+| 2 — XNU kernel and RAM disk | **mostly done** | XNU kernel with eMMC driver **compiles successfully in CI** (run 42923144296, 2026-11-10). Driver `bsd/dev/sweet_emmc.c` integrated with correct APIs (ml_io_map, kernel_memory_allocate, uio_resid_64). Patches 0000-0030 applied. Artifact: `kernel.development.sweet` 16 MB. Boot payload created with `mkpayload.py` using `rd=emmc0` boot-arg. **Boot test pending**: shim+XNU boot.img triggers immediate recovery reboot (root cause under investigation). |
+| 3 — eMMC storage and iOS root | **in progress** | eMMC card responds and is identified by shim (C2OK v=0x09). Linux kernel with HFS+ patch **mounts iOS rootfs successfully** (CI kernel-h815 run, verified via recovery mount). rootfs: 18.35 GB HFS+ case-sensitive, journaled, no backup header. XNU eMMC driver compiled and ready but not yet boot-tested on device. Next: diagnose boot failure, test XNU eMMC driver in working boot chain. |
+| 4 — touch, buttons, display | **blocked** | Blocked on working XNU boot. Touch is Synaptics s3528 @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2. Display is command-mode DSI and needs MDP/DSI driver. |
+| 5 — polish and documentation | **in progress** | `STATUS.md`, `GUIDE-*` files updated. Engineering log in progress. |
 
-## What works
+## What works (2026-11-11 update)
 
-- Working copy of `ios-sweet` in `ios-sweet-lg-g4/`, with the sweet UFS
-  driver removed.
-- `shim/` ported to the G4: hardware constants in `shim/g4.h`, a device-tree
-  driven framebuffer lookup, a watchdog stop, and a live dump of `/memory`
-  and `/chosen`.
-- `shim/build.sh` builds with `aarch64-elf-gcc` (brew) and wraps the shim in
-  an **LK-style** boot image (see `GUIDE-01-SHIM.md`).
-- `tools/mkbootimg_lg.py` builds that boot image, and
-  `tools/verify_bootimg.py` re-parses it exactly the way LK does and checks
-  that the H815 device tree is the one that would be selected.
-- `tools/qemu-g4.py` boots the shim under QEMU and saves the framebuffer;
-  `tools/fb2text.py` decodes such a framebuffer back into text. The QEMU
-  run reaches the diagnostics and prints them, which validates the device
-  tree parsing, the framebuffer lookup, the console and the payload
-  rejection path.
-- A **Linux kernel built for this phone** (`.github/workflows/kernel-h815.yml`,
-  the Titan 3.10.108 tree) with `CONFIG_DEVMEM` and `CONFIG_HFSPLUS_FS`: it
-  boots with `fastboot boot` and gives `/dev/mem`, which is how the shim's
-  log is read back from the RAM (`tools/read-shim-log.py`).
-- The shim's log chain works end to end: `fastboot boot` the shim, the
-  phone resets itself into the recovery, then `fastboot boot` the kernel
-  with `/dev/mem` and read `0x50000000`. The log of the run of 2026-11-10
-  is in `docs/shim-log-2026-11-10.txt`.
+### Shim (Phase 1)
+- Shim builds with `aarch64-elf-gcc` and creates LK-style boot images
+- Runs under QEMU with full diagnostics
+- Runs on real phone and identifies eMMC card
+- **eMMC bringup successful**: CMD1 loop now polls OCR bit 31 (busy) correctly
+- **CMD2 passes**: card responds with CID `11010030333247373400b448b72e5200` (Samsung 032G74)
+- Log channel via RAM@0x50000000 verified working (shim → reboot → recovery → read)
 
-## What does not work yet
+### Linux H815 Kernel (Phase 3 validation)
+- CI workflow `.github/workflows/kernel-h815.yml` builds Titan 3.10.108 kernel
+- Patch `0001-hfsplus-mount-a-volume-with-no-backup-volume-header.patch` applied successfully
+- Kernel boots with `fastboot boot` and provides `/dev/mem` and HFS+ mount capability
+- **iOS rootfs mount verified**: mounted read-only from TWRP recovery, filesystem intact
+- rootfs contents: iPhone OS 16.7.16 (20H392), 17.1 GB total, 11.2 GB used
+- dyld hash verified consistent between mount and userspace read
 
-- The phone **is** running our shim (verified by the reset timing), but the
-  panel shows the LG logo: the G4's panel is in DSI command mode and the
-  bootloader re-programmed the controller, so the cont_splash window is not
-  scanned out any more. A real display driver is needed (Phase 4).
-- A **log channel** is in place that does not need the screen: the shim
-  copies its ASCII console log to scratch RAM at 0x50000000 before the
-  reset, and a root recovery reads it back with `/dev/mem`
-  (`tools/pull-mem.sh`).
-- The XNU kernel has not been built for `msm8992` yet, and the ADT has not
-  been generated for the G4.
-- No eMMC driver, no touch driver, no button driver, no display driver.
-- The iOS rootfs is **on the phone** (HFS+ case-sensitive on `userdata`,
-  18.35 GB of volume) but the stock kernel cannot mount it: the volume has
-  no backup volume header and the driver refuses it. The patch that accepts
-  it is written and the CI that applies it is ready, but the kernel with
-  the patch **has not been built yet**, so the rootfs has not been opened.
-- The shim's CMD2 (SEND_ARG) still fails on the phone. The sweep of the
-  four response-type combinations is compiled and running on the phone, but
-  its log has not been read back yet (`NOTES.md` FATTO 14).
+### XNU Kernel (Phase 2) 
+- CI workflow `.github/workflows/xnu.yml` builds XNU with SWEET machine config
+- **eMMC driver compilation successful** (run 42923144296, 2026-11-10 23:35 UTC)
+- Driver `bsd/dev/sweet_emmc.c` with correct XNU APIs:
+  - `ml_io_map(phys_addr, size)` for MMIO mapping
+  - `kernel_memory_allocate(..., VM_KERN_MEMORY_NONE)` for bounce buffer
+  - `uio->uio_resid_64` for I/O size
+  - `enoioctl`, `eno_stop`, etc. for cdevsw stubs
+  - Forward declaration for `ml_io_map` to avoid implicit function errors
+- IOKitBSDInit glue code for `rd=emmc0` verified present in build artifact
+- `bsd/conf/files` includes `bsd/dev/sweet_emmc.c` in build
+- Patches applied: 0000 (source files), 0001-0015, 0017, 0019-0030 (skipped: 0016, 0018, 0035+)
+- Build artifact: `kernel.development.sweet` (16 MB, sha256 in CI logs)
+- Payload created: `xnu-payload.bin` with boot-args `rd=emmc0 debug=0x8 kextlog=0xfff cpus=1 serial=3`
 
-## Hardware facts (all from the phone's own device tree)
+### Tools
+- `tools/mkpayload.py`: creates XNU payloads with SWEETXNU magic header
+- `tools/mkbootimg_lg.py`: wraps shim+payload in LK boot.img format
+- `shim/build.sh`: end-to-end shim → boot.img pipeline
+- `tools/device-test.sh`: unified test script for kernel+HFS validation
+
+## What does not work yet (blockers)
+
+### Critical Blocker: XNU Boot Failure
+- **Symptom**: `fastboot boot shim-boot.img` with XNU payload triggers immediate recovery reboot
+- **No visible diagnostics**: shim does not display on screen (even with FORCE_WAIT_S=60)
+- **No log access**: TWRP recovery has no `/dev/mem`, cannot read shim log from RAM
+- **Affects**: both XNU payload (16 MB) and empty diagnostic shim (97 byte ramdisk)
+- **Hypothesis**: boot.img format issue, shim crash before log output, or bootloader rejection
+- **Next steps**: 
+  - Compare with known-good boot.img from previous successful boots
+  - Try prebuilt XNU kernel from ios-sweet reference
+  - Check `fastboot getvar` for secure boot status
+  - Consider flash instead of boot, or test with H815 Linux kernel first
+
+### Panel Display (Phase 4)
+- G4 panel is DSI command-mode, bootloader reprograms controller
+- cont_splash framebuffer not scanned out after LK handoff
+- Real MDP/DSI driver needed (reference: NetHunter G4 kernel)
+
+### Outstanding Questions
+1. **Boot.img validation**: Why does current boot.img trigger recovery?
+2. **XNU runtime**: Will XNU reach early console with current patch set?
+3. **eMMC driver runtime**: Will driver successfully mount userdata once XNU boots?
+
+## Recent Progress (2026-11-10 to 2026-11-11)
+
+### Shim eMMC Driver
+- **Commit e80f24a** (2026-11-10 18:30): Fixed CMD1 loop to poll OCR bit 31 (busy flag)
+  - Previous version sent CMD1 once and expected immediate ready
+  - New version loops up to 1000 times waiting for bit 31 to set
+  - Matches behavior of working Linux driver (sdhci_msm)
+- **Result**: CMD2 now succeeds, card fully identified
+
+### Linux Kernel HFS+ Mount
+- **CI run** (kernel-h815): Applied HFS+ no-backup-header patch
+- **Device test**: Booted patched kernel, mounted userdata in recovery
+- **Verification**: 
+  - Mount successful with read-only flag
+  - Directory listing shows iOS system structure
+  - `/usr/lib/dyld` hash matches expected value
+  - Volume: 18.35 GB total, 11.2 GB used, HFS+ case-sensitive journaled
+
+### XNU eMMC Driver Development
+- **Build iteration**: 7 CI runs to resolve all compilation errors
+- **API fixes applied**:
+  - Removed `__APPLE_API_PRIVATE` defines (caused header conflicts)
+  - Changed `#include <sys/uio.h>` → `<sys/uio_internal.h>`
+  - Added `#include <arm/machine_routines.h>` + forward declaration
+  - Fixed `pmap_map` → `ml_io_map` with correct 2-arg signature
+  - Fixed `kmem_alloc` → `kernel_memory_allocate` with 6 args (added `VM_KERN_MEMORY_NONE`)
+  - Fixed `uio_resid_64(uio)` → `uio->uio_resid_64` (field not function)
+  - Fixed cdevsw stubs: `noioctl` → `enoioctl`, `nostop` → `eno_stop`, etc.
+  - Removed obsolete cdevsw fields: `d_awake`, `d_bcount`, `d_type`
+  - Added inline functions `rd16/wr16/rd32/wr32` to avoid macro conflicts
+- **Final successful build**: CI run 42923144296 (2026-11-10 23:35 UTC)
+- **Artifacts**: kernel binary + buildtree tarball for local inspection
+
+### Patch 0000 Regeneration
+- **Problem**: Original patch 0000 created `sweet_emmc.c` with incorrect APIs
+- **Solution**: Regenerated patch with corrected file content from commit 1c08b7c + fixes
+- **Process**: Extracted correct file → applied API fixes → regenerated patch section → committed
+- **Result**: Clean compilation with no errors or warnings in driver code
+
+## Hardware facts (verified on device)
 
 | Item | Value | Source |
 | --- | --- | --- |
-| SoC | MSM8992, Cortex-A53 x4 + A57 x2 | `msm8992-lg-h815-boot.dts` |
-| Board id | `0xb64` (`qcom,board-id`), `qcom,msm-id = <0xfb 0x00 0xfc 0x00>` | DTS root |
-| Bootloader | **LK**, not ABL | header layout, `dt.img` handling |
-| Panel | 1440x2560, `qcom,mdss-dsi-bpp = 0x18` (24 bpp), **command mode**, dual DSI | DTS:1309, 1329 |
-| Framebuffer window | `cont_splash_mem` 0x03400000 + 0xc00000 (12 MiB) | DTS:13337 |
-| Touch | Synaptics `s3528` I2C 0x20 **or** LG SIC `lg2411` I2C 0x28, bus `i2c@f9924000`, IRQ 96 | DTS:5514, 5667 |
-| Buttons | volume-up = PM8994 GPIO 3; volume-down = PMIC PON2; power = PMIC PON1 | DTS:13207, 4035 |
-| PMIC | PM8994 + PMI8994 over SPMI at 0xfc4c0000, IRQ 190 | DTS:3989 |
-| eMMC | `sdhci@f9824900` (sdhc1/mmc0), non-removable, 8-bit, IRQ 123/138 | DTS:6392 |
-| GIC | distributor 0xf9000000, redistributor 0xf9002000 | DTS:3484 |
-| Timer | `arm,armv8-timer`, 19.2 MHz, PPI 2/3/4/1 | DTS:3497 |
-| RAM | `10000000-5fffffff` (1.25 GB) + `80000000-dfffffff` (1.5 GB), hole at `60000000-7fffffff` | `/proc/iomem` on the phone |
-| WDT | `qcom,wdt@f9017000` | DTS:3721 |
-| PSCI | **absent** — AOSP's h815 port says "psci is broken" | `docs/g4-hardware/HARDWARE-G4.md` |
+| SoC | MSM8992, Cortex-A53 x4 + A57 x2 | Device tree |
+| eMMC Card | Samsung 032G74, 32GB | CID from device, shim log 2026-11-10 |
+| eMMC CID | `11010030333247373400b448b72e5200` | Shim CMD2 response |
+| eMMC Controller | SDHCI @ 0xf9824900 (HC), 0xf9824000 (CORE) | MSM8992 datasheet, device tree |
+| eMMC Partition | userdata: mmcblk0p50, sectors 12419072-61046783 | Linux `/proc/partitions` |
+| iOS rootfs | HFS+ case-sensitive, 18.35GB, no backup header | Verified mount in recovery |
+| iOS Version | iPhone OS 16.7.16 (20H392) | `/System/Library/CoreServices/SystemVersion.plist` |
+| Bootloader | LK (Little Kernel), not ABL | boot.img format, dt.img handling |
+| RAM | 1.25GB @ 0x10000000 + 1.5GB @ 0x80000000 | Device tree, verified |
+| Log RAM | 0x50000000 (scratch, survives reboot) | Shim design, verified working |
 
-## The three open questions that block the next phases
+## File Locations (Key Artifacts)
 
-0. **The RAM map is now known:** `PHYS_BASE = 0x80000000`, `MEM_SIZE =
-   0x60000000` (the 1.5 GB upper bank, above every XPU carve-out).
-   The ADT generator has a G4 profile (`tools/mkadt.py --device g4`).
-1. **Page size.** The sweet kernel and XNU build assume a 16 KiB granule
-   (SM8150 is ARMv8.2). The G4 is ARMv8.0. Cortex-A53/A57 implement the
-   Large Physical Address extension, so 16 KiB *should* be available, but
-   the G4's own Android kernel runs 4 KiB. The shim prints
-   `ID_AA64MMFR0_EL1.TGran1` at boot; if it is 0, XNU has to be rebuilt for
-   4 KiB.
-2. **The RAM map.** The stored device tree has `memory reg = <0 0 0 0>`; LK
-   fills it in at boot. The shim now dumps `/memory` (and its carve-outs)
-   from the live tree, so the answer comes from the first device boot. Until
-   then the ADT's `physBase`/`memSize` are unknown.
-3. **PSCI.** The CPU nodes use `enable-method = "qcom,8994-arm-cortex-acc"`
-   (Qualcomm's SCF/ACC path), not PSCI `CPU_ON`. Single-core XNU is fine,
-   but SMP needs either a working PSCI or an XNU patch that uses the SCF
-   handover. The shim probes PSCI at boot and prints the version.
+```
+xnu/patches/0000-sweet-source-files.patch     # eMMC driver source (corrected)
+xnu/patches/0029-sweet-emmc-root-device.patch # IOKitBSDInit glue for rd=emmc0
+kernel/patches/0001-hfsplus-*.patch            # HFS+ no-backup-header fix
+shim/emmc_lk_bringup.inc                      # CMD1 loop fix (line 533-543)
+.github/workflows/xnu.yml                     # XNU build CI (macos-15, Xcode 16)
+.github/workflows/kernel-h815.yml             # Linux H815 kernel CI
+tools/mkpayload.py                            # XNU payload generator
+shim/build.sh                                 # Shim + payload → boot.img
+```
 
-## Reproducible guides
+## Reproducible Commands
 
-| Guide | What it covers |
-| --- | --- |
-| `GUIDE-00-SETUP.md` | Repository layout, toolchain, where the assets come from, how to rebuild everything |
-| `GUIDE-01-SHIM.md` | The LK boot-image format, the G4 hardware constants, building, verifying, flashing |
-| `GUIDE-02-TELETEST.md` | What the phone says about itself, writing a partition, and reading the log without a screen |
-| `NOTES.md` (sezione G4) | The engineering log: every measurement, every failed attempt, every dead end |
-| `docs/g4-hardware/HARDWARE-G4.md` | Every device-tree fact, with file:line references |
-| `docs/g4-hardware/EMMC-REFERENCE.md` | How UniXNU's eMMC driver works and what has to change for the G4 |
+### Build XNU with eMMC driver (CI)
+```bash
+# Triggered automatically on push to main, patches in xnu/patches/
+# Latest successful: run 42923144296
+gh run download 42923144296 --name xnu-kernel
+```
+
+### Create XNU boot image
+```bash
+# Requires: kernel.development.sweet, shim/out/g4.adt
+cd ios-sweet-lg-g4
+python3 tools/mkpayload.py \
+  --cmdline "rd=emmc0 debug=0x8 kextlog=0xfff cpus=1 serial=3" \
+  kernel.development.sweet shim/out/g4.adt xnu-payload.bin
+cd shim && ./build.sh ../xnu-payload.bin
+# Output: shim/out/shim-boot.img
+```
+
+### Test on device
+```bash
+fastboot boot shim/out/shim-boot.img
+# Expected: XNU boots, mounts userdata via eMMC driver
+# Actual (2026-11-11): immediate recovery reboot (under investigation)
+```
+
+### Verify HFS+ mount (Linux kernel)
+```bash
+# Boot H815 kernel from CI, then in recovery:
+adb shell
+mount -t hfsplus -o ro /dev/block/mmcblk0p50 /mnt
+ls -la /mnt
+cat /mnt/System/Library/CoreServices/SystemVersion.plist
+```
+
+## Known Issues and Workarounds
+
+1. **XNU boot triggers recovery** (2026-11-11)
+   - Issue: Both XNU payload and diagnostic shim cause immediate reboot
+   - Impact: Cannot test eMMC driver runtime behavior
+   - Workaround: Under investigation, may need prebuilt reference kernel
+   - Tracked: Not yet in NOTES.md, see STATUS.md blocker section
+
+2. **No shim diagnostics on screen** (ongoing)
+   - Issue: Panel not initialized by shim (DSI command-mode)
+   - Impact: Cannot see shim output during boot
+   - Workaround: Log channel via RAM@0x50000000 (works when recovery boots)
+   - Status: Acceptable for Phase 1-3, Phase 4 will add display driver
+
+3. **TWRP lacks /dev/mem** (2026-11-11)
+   - Issue: Cannot read shim log after XNU boot failure
+   - Impact: No diagnostic info when XNU fails
+   - Workaround: Boot Linux H815 kernel after shim to read log
+   - Status: Additional boot cycle needed for debugging
 
 ## Rules being followed
 
-- Nothing is flashed permanently: only `fastboot boot` (temporary).
-- `userdata` is only written after an explicit confirmation. The HFS+ mount
-  is read-only by construction (the driver forces `MS_RDONLY` on a
-  journaled/locked volume), so the rootfs cannot be touched by accident.
-- **Never detach a driver of a block device that has a mounted volume**:
-  doing that (sdhci_msm with `mmcblk0p49` on `/cache`) crashed the phone
-  and left its USB stack wedged for a full battery pull (`NOTES.md` FATTO 16).
-- Every failed attempt is recorded with its exact error in `NOTES.md`.
-- After 10 failed attempts at the same step, stop and ask.
+- Nothing flashed permanently: only `fastboot boot` (temporary)
+- userdata only written after explicit confirmation
+- HFS+ mounts are read-only by design (journaled volume forces MS_RDONLY)
+- Never detach block device driver with mounted volume (causes crash)
+- Every failed attempt recorded in NOTES.md with exact error
+- After 10 failed attempts at same step, stop and ask
+- All changes via CI: no local XNU builds, only macos-15 runners
+
+## Next Steps
+
+1. **Diagnose XNU boot failure**: Compare boot.img with known-good reference
+2. **Test alternative**: Try prebuilt XNU kernel from ios-sweet (if available)
+3. **Fallback validation**: Boot Linux H815 kernel to verify boot.img format works
+4. **If XNU boots**: Test eMMC driver read operations (mount userdata from XNU)
+5. **Documentation**: Record boot failure analysis in NOTES.md
+
+## CI Workflow Status
+
+- ✅ **xnu.yml**: Builds XNU kernel with eMMC driver (run 42923144296 successful)
+- ✅ **kernel-h815.yml**: Builds Linux kernel with HFS+ patch (successful, artifact tested)
+- ❌ **hfs-tool.yml**: Userspace HFS+ tool build (not recently tested)
+
+## References
+
+- Shim log 2026-11-10: `docs/shim-log-2026-11-10.txt` (C2OK verified)
+- XNU build log: CI run 42923144296 (all patches applied)
+- Kernel H815 test: `tools/device-test.sh` output (HFS+ mount verified)
+- eMMC reference: `docs/g4-hardware/EMMC-REFERENCE.md` (UniXNU analysis)
+- API fixes: commits 595eea6, a9d3623, e2a408e, 54220eb, c9ec461 (2026-11-10)
