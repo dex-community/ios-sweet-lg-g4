@@ -3625,3 +3625,60 @@ marcatori, cioe' molto presto.
 
 **Indirizzo fisico di un simbolo del kernel**: `pa = va - virt_base + phys_base`
 (header del payload a 0x10 e 0x38), la stessa mappatura di `phystokv()`.
+
+---
+
+## Check del 2026-11-11 — Verifica ipotesi crash immediato XNU
+
+### CHECK 1 — Entry point (INCONCLUSIVO per l'ultimo g4.bin)
+- Kernel corrente (`out-42942530869`): `_start` VA `0xfffffe0007490488`, PA calcolata `0x81490488`
+- Il log `JUMP 0x8147b488` era da un boot **precedente** con kernel `out-42012839180`
+- Il `g4.bin` corrente usa il kernel `out-42940105016`/`out-42942530869` (entry match)
+- **INCONCLUSIVO**: il log citato era obsoleto; il g4.bin corrente non è mai stato bootato su hardware
+
+### CHECK 2 — virt_base/phys_base nel payload (OK)
+- `g4.bin`: `virt_base=0xfffffe0006000000`, `phys_base=0x80000000`, `entry_va=0xfffffe0007490488`
+- Coerente con i kernel recenti; `entry_pa = 0x81490488` (atteso per il prossimo boot)
+- **IPOTESI A: SMENTITA** — i valori sono corretti
+
+### CHECK 3 — Board config (OK)
+- Il GIC è letto dal device tree ADT (non hardcoded)
+- `mkadt.py --device g4` usa `G4_GICD=0xf9000000`, `G4_GICR=0xf9002000`
+- Nessuna patch usa `0x17a00000` (sweet GIC) nel codice
+- **IPOTESI B: SMENTITA** — la board config del G4 è corretta
+
+### CHECK 4 — Patch PSCI/0065 (CONFERMATA nel kernel, ma non è la causa del crash)
+- La patch `0065-sweet-smp-psci.patch` è presente e applicata
+- Il kernel contiene `SweetCPU::startCPU` con `smc #0` (PSCI_CPU_ON)
+- **MA**: il cmdline ha `cpus=1`, quindi `startCPU` non viene mai chiamato
+- **IPOTESI D: PARZIALMENTE CONFERMATA** — la 0065 è nel kernel ma non causa il crash immediato con `cpus=1`
+- La 0065 va esclusa comunque in un commit futuro (il G4 non ha PSCI)
+
+### CHECK 5 — Istruzioni LSE (CONFERMATA — CAUSA PRINCIPALE DEL CRASH) ✅
+- **610 istruzioni LSE** nel kernel (`ldadd`, `cas`, `swp`)
+- Root cause: `clang` su Apple Silicon emette `ldadd` anche con `-march=armv8-a+crypto` (default platform features)
+- Il Cortex-A53 (MSM8992, ARMv8.0) **non ha** LSE (ARMv8.1) → `Undefined Instruction` exception al primo atomic
+- Call chain del crash: `arm_init` → `cpu_bootstrap` → `processor_up` → `ml_cpu_up_update_counts` → `ldadd` → FAULT
+- **FIX applicato**: aggiunto `-mno-outline-atomics` a `MACHINE_FLAGS_ARM64_SWEET` in `xnu/patches/0004-sweet-machine-config.patch`
+- Verifica locale: `-march=armv8-a+crypto -mno-outline-atomics` → 0 LSE ✅
+
+### CHECK 6 — Shim loader (OK)
+- Lo shim scrive il log prima del salto: `pstore_console_write` → `g4_wdt_arm` → `((xnu_entry_t)entry_pa)(ba_pa)`
+- Funzionamento confermato dai log storici
+
+### CHECK 8 — Patch 0010 early console (OK, ma obsoleta per G4)
+- `_sweet_early_mark` è nel kernel (VA `0xfffffe0007489948`)
+- La patch 0010 aggiornata usa un **buffer nel BSS** (non `0x9c000000`)
+- I marcatori non appaiono in RAM perché XNU crasha PRIMA di `arm_init` (a causa delle LSE)
+
+### CHECK 11 — Board config G4 specifica (OK)
+- Nessuna board config separata `G4` necessaria
+- Il device tree `g4.adt` ha già i valori corretti per H815
+- **IPOTESI B: SMENTITA**
+
+### Prossimo passo
+1. Push del commit con `-mno-outline-atomics` → trigger CI → nuova build kernel
+2. Ricostruire `g4.bin` con il nuovo kernel: `python3 tools/mkpayload.py ...`
+3. Ricostruire `shim-boot-g4.img`: `cd shim && ./build.sh out/g4.bin`
+4. Boot hardware con `fastboot boot shim-boot-g4.img`
+5. Verifica log: i marcatori `SWEET EARLY 1-5` devono apparire in RAM
