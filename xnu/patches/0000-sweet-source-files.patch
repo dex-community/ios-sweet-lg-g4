@@ -1,6 +1,6 @@
 diff --git a/bsd/dev/sweet_emmc.c b/bsd/dev/sweet_emmc.c
 new file mode 100644
-index 0000000..bff62a8bc53217a9f17838f4db08b84441963102
+index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
 @@ -0,0 +1,842 @@
@@ -825,7 +825,7 @@ index 0000000..bff62a8bc53217a9f17838f4db08b84441963102
 +		}
 +	}
 +	if (emmc_lock == NULL) {
-+		lck_mtx_alloc_init(&emmc_lock, NULL, NULL);
++		emmc_lock = lck_mtx_alloc_init(NULL, NULL);
 +		if (emmc_lock == NULL) {
 +			printf("emmc: the mutex could not be allocated\n");
 +			return ENXIO;
