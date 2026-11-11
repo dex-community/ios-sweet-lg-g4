@@ -25,7 +25,41 @@ Stato macro del progetto: lo shim bare-metal gira sul telefono e XNU arriva al
 suo entry point (11 segmenti Mach-O caricati, jump a `__start`); manca il
 driver eMMC per XNU, il display (MDP/DSI command mode) e l'input.
 
-## 2. Stato attuale (al 2026-11-10, 19:00)
+## 2. Stato attuale (al 2026-11-11, sera)
+
+> **AGGIORNAMENTO 2026-11-11 — IL KERNEL XNU ORA È COMPILABILE PER LA CPU DEL G4.**
+>
+> Il crash all'avvio di XNU era causato da istruzioni **LSE** (ARMv8.1
+> Atomic Extension) e dal registro **PAN**: il G4 ha Cortex-A53/A57 =
+> **ARMv8.0**, che non hanno né l'uno né l'altro. Tre fix, tutti veri:
+>
+> 1. `xnu/patches/0005b-sweet-commpage-llsc.patch` → `casa` nella commpage
+>    diventa un loop LL/SC (`ldaxr`/`stlxr`).
+> 2. `xnu/patches/0010b-sweet-no-pan.patch` → gli accessi a `pan` sono
+>    stubbati (letture → 1, scritture → no-op). Non si abilita `+pan`:
+>    l'hardware non ha il registro.
+> 3. `libfirehose_kernel.a` (non è una patch: è il workflow) → slice arm64
+>    solo, con `-mcpu=cortex-a53+crypto`. **Attenzione: `-march` NON basta**,
+>    il triple `arm64-apple-macos15` implica `+lse`; solo `-mcpu` resetta le
+>    feature.
+>
+> Run CI `43080427388`: **verde**, kernel Mach-O arm64, **0 istruzioni LSE**,
+> 2226 LL/SC. Boot sul telefono: lo shim carica 10 segmenti e **salta a XNU**
+> (`JUMP 00000000814A8488`), poi il watchdog riporta in recovery.
+> **Non ancora stabilito dove si fermi XNU**: i ring in RAM
+> (`sweet_early_buf`, console ring) erano vuoti quando li ho letti, perché
+> la recovery aveva già riusato la RAM. Va catturato subito dopo il crash.
+>
+> **Documentazione completa e procedura replicabile:
+> `docs/LSE-PAN-FIX-2026-11-11.md`** (problema, patch, pre-test locale,
+> check 4, build, boot, come leggere i log).
+>
+> **Pre-test locale (nuovo, senza aspettare la CI):**
+> `bash tools/local-pretest.sh` → ricompila in locale, con le flag esatte
+> del CI, le TU toccate dalle patch e conta le LSE. Richiede prima
+> `gh run download <RUN> -n xnu-buildtree -D /tmp/ci-buildtree`.
+
+## 2b. Stato precedente (al 2026-11-10, 19:00)
 
 > **AGGIORNAMENTO 19:00 — i due blocchi sono chiusi.**
 > - CMD2 passa: `C2OK v=00000009 rsp=48B72E52` (136+CRC, il tipo del driver
@@ -178,6 +212,18 @@ Dettagli: `docs/DEVICE-TEST.md`.
 
 ## 5. Prossimi passi in ordine
 
+0. **Dove si ferma XNU?** (priorità 2026-11-11). Il kernel è pulito
+   (0 LSE) e lo shim salta a XNU, ma i ring in RAM
+   (`sweet_early_buf` PA `0x81c46dbc`, console ring in BSS) erano vuoti
+   alla lettura: la recovery riusa la RAM. Il log dello shim si legge
+   comunque dalla recovery:
+   ```bash
+   adb shell 'cat /sys/fs/pstore/console-ramoops-0' | tr -d '\r' | tail -30
+   ```
+   Per i ring di XNU: leggere **subito** dopo il crash con un kernel che ha
+   `/dev/mem` (`tools/read-xnu-early.py`, `tools/read-xnu-log.py`), non dopo
+   il riavvio in recovery. Poi aggiornare NOTES.md con l'ultima riga di
+   progresso (processor_up / arm_init / bsd_init) e proseguire.
 1. **Leggere il log dello sweep** (costo zero, §4). Se una `C2OK` c'è:
    fissare quel tipo di risposta nel codice (togliere lo sweep o lasciarlo
    con quell'ordine), aggiornare NOTES.md, committare.
@@ -309,6 +355,21 @@ gh run download <run-id> -n kernel-h815-hfsplus-devmem -D /tmp/kci
 - Tenere premuto Volume Su quando lo stack USB è wedged: non fa nulla;
   serve staccare la batteria.
 - Scrivere su controller senza clock: hang del bus.
+- **2026-11-11, LSE/PAN (non ritentare):**
+  - `-march=armv8-a+crypto` **NON** toglie le LSE: il triple
+    `arm64-apple-macos15` implica `+lse`. Serve `-mcpu=cortex-a53+crypto`.
+  - `-mno-lse` non esiste per clang/AArch64.
+  - in xcconfig `$(inherited)` non funziona (è sintassi make): va riscritto
+    l'elenco completo dei flag.
+  - `+pan` sull'hardware del G4: il registro non esiste, `msr pan` traperebbe.
+  - il regex `\bldadd\b` non matcha `ldaddal`/`ldaddh`/`ldaddl`: usare
+    `\b(ldadd|casa|ldclr|ldset|swp)[a-z]*\b`, altrimenti il kernel sembra
+    pulito quando non lo è.
+  - la CI **non** segnala i patch che non si applicano (`build.sh` fa
+    `git apply --check` e va avanti con un warning): usare
+    `tools/check-xnu-patch-chain.sh`.
+  - la build XNU completa **non** si fa in locale: servono KDK 13.5
+    (sudo) e SDK ≤ 15 (in locale c'è solo Xcode 27).
 
 ## 10. File chiave (tutti nel repo)
 
@@ -325,6 +386,11 @@ gh run download <run-id> -n kernel-h815-hfsplus-devmem -D /tmp/kci
 | `tools/pack-twrp-kernel.sh` | kernel + ramdisk TWRP + dt.img → boot.img |
 | `tools/boot-test-kernel.sh` | pack + boot + check automatici |
 | `tools/read-shim-log.py` | legge 0x50000000 via adb |
+| `tools/local-pretest.sh` | **pre-test locale**: ricompila in locale le TU toccate dalle patch con le flag del CI e conta le LSE (0 = ok) |
+| `tools/check-xnu-patch-chain.sh` | applica tutta la catena `xnu/patches/` su un xnu-8796 pulito e dice quali patch NON si applicano (la CI non lo segnala!) |
+| `docs/LSE-PAN-FIX-2026-11-11.md` | **la raccolta del 2026-11-11**: LSE/PAN, le patch, il firehose, il pre-test, la procedura completa |
+| `xnu/patches/0005b-sweet-commpage-llsc.patch` | `casa` → LL/SC nella commpage (LSE) |
+| `xnu/patches/0010b-sweet-no-pan.patch` | stub degli accessi al registro `pan` (ARMv8.1) |
 | `tools/check-mmio-writes.py` | audit MMIO (deve restare verde) |
 | `NOTES.md` | il diario: 17 "FATTO" documentati, LEGGILO prima di toccare codice |
 | `STATUS.md`, `README.md`, `GUIDE-*.md` | stato e procedure |
