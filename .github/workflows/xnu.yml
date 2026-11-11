@@ -78,7 +78,7 @@ jobs:
           open(p, "w").write(s)
           print("injected firehose march flags")
           PY
-          grep -n "march=armv8-a+crypto" dxb/build.sh
+          grep -n "mcpu=cortex-a53" dxb/build.sh
           grep -n 'ARCHS="arm64"' dxb/build.sh
           ls dxb/patches
 
