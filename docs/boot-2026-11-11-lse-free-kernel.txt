@@ -1,0 +1,45 @@
+=== boot LG G4 con kernel XNU senza LSE (2026-11-11) ===
+
+CI run:      43080427388  (verde)
+Kernel:      xnu/out-43080427388/kernel.development.sweet
+             Mach-O 64-bit executable arm64
+             LSE = 0    LL/SC = 2226
+Commit:      666bdbb (ci: fix verification grep after flag change)
+Immagine:    shim/out/shim-boot-g4.img
+             sha256 f517639e95cd768e3a9c69016f798306ee9b197831e35cc955c45f57b2eb7b9c
+Boot:        fastboot boot  (nessun flash, userdata intatto)
+
+--- log dello shim (pstore, letto dalla recovery) ---
+EMMC sec=03A3E000 sector_mode=00000001
+EMMC the card is identified; the writes are off
+PSTORE hdr=0FF80000 sig=43474244
+PSTORE wrote=00001BA0 start=0000C2EA
+WDT disarmed
+INITRD lo=02200000 hi=03239340
+PHYS base=80000000 size=5FF00000
+VIRT FFFFFE0006000000
+ENTRY FFFFFE00074A8488
+SEGS n=0000000A end=8252C000
+BOOTARG pa=82530000 top=82534000
+JUMP 00000000814A8488
+XNU jumping (fbcon clears screen)
+[G4SHIMPS1-END]
+No errors detected
+
+--- cosa significa ---
+- lo shim ha caricato 10 segmenti Mach-O e ha saltato a XNU (PA 0x814A8488,
+  VA 0xfffffe00074a8488): il kernel NON crasha più prima dell'entry point.
+- il watchdog (LK_RECOVERY_MODE) ha riportato il telefono in recovery ~60 s
+  dopo: XNU non porta il telefono a uno stato stabile (display assente,
+  nessun console, nessun root) e viene resettato.
+- i ring in RAM di XNU (sweet_early_buf PA 0x81c46dbc, console ring in BSS)
+  sono risultati VUOTI alla lettura: la recovery riusa la RAM. Per capire
+  dove si fermi XNU va letto /dev/mem subito dopo il crash, non dopo il
+  riavvio in recovery.
+- pstore: /sys/fs/pstore/console-ramoops-0 (copia integrale in
+  docs/ramoops-2026-11-11-xnu-boot.txt, 1648 righe: boot Android + log shim)
+
+--- device ---
+- LG H815, seriale b448b72e, bootloader sbloccato
+- dopo il test: in recovery (adb: LGH815b448b72e recovery), /dev/mem presente
+- nulla è stato flashato; userdata (rootfs iOS 16.7.16 20H392) solo letto
