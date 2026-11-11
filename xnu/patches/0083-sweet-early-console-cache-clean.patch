@@ -1,0 +1,74 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 381fef8..90c2085 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -24,9 +24,13 @@
+ 
+ #if defined(SWEET)
+ #include <stdint.h>
++#include <stddef.h>
+ #include <kern/misc_protos.h>
+ 
+ #define EARLY_LOG_SIZE 8192
++/* Cache line of the CPUs this runs on (Cortex-A53 and the sweet's A76/A55):
++ * 64 bytes, L1 and L2. Only used to pick the lines to clean. */
++#define EARLY_CACHE_LINE 64
+ 
+ /* The text, and how much of it there is. Both are in the BSS. */
+ char sweet_early_buf[EARLY_LOG_SIZE];
+@@ -46,6 +50,29 @@ sweet_early_putc(char c)
+ 	sweet_early_buf[sweet_early_len] = '\0';
+ }
+ 
++/*
++ * Push the text out to memory.
++ *
++ * The buffer is written with the MMU on, that is with a write-back cache, and
++ * the phone does not get a chance to shut down cleanly: the watchdog resets it
++ * halfway through bootstrap. A reset does not clean the cache, so the text
++ * would stay in the L1/L2 and the RAM read back from the recovery would be
++ * empty even though the kernel had written plenty. Clean the lines instead:
++ * the bytes land in DRAM at once and survive the reset.
++ */
++static void
++sweet_early_clean(void)
++{
++	uintptr_t line = (uintptr_t)sweet_early_buf &
++	    ~(uintptr_t)(EARLY_CACHE_LINE - 1);
++	uintptr_t end = (uintptr_t)sweet_early_buf + sweet_early_len;
++
++	for (; line < end; line += EARLY_CACHE_LINE) {
++		__asm__ volatile("dc civac, %0" :: "r"(line) : "memory");
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ static void
+ sweet_early_string(const char *s)
+ {
+@@ -65,7 +92,7 @@ sweet_early_mark(unsigned int stage, const char *label)
+ 	sweet_early_string(": ");
+ 	sweet_early_string(label);
+ 	sweet_early_putc('\n');
+-	__asm__ volatile("dsb sy" ::: "memory");
++	sweet_early_clean();
+ }
+ 
+ void
+@@ -81,7 +108,7 @@ sweet_early_panic(const char *fmt, va_list *args)
+ 	_doprnt(fmt, &copy, sweet_early_putc, 16);
+ 	va_end(copy);
+ 	sweet_early_putc('\n');
+-	__asm__ volatile("dsb sy" ::: "memory");
++	sweet_early_clean();
+ }
+ 
+ void
+@@ -89,6 +116,6 @@ sweet_early_disable(void)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+ 	early_disabled = 1;
+-	__asm__ volatile("dsb sy" ::: "memory");
++	sweet_early_clean();
+ }
+ #endif /* SWEET */

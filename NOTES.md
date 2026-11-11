@@ -3892,3 +3892,31 @@ marcatori, cioe' molto presto.
 - Baseline misurata in recovery (pagina mai scritta): **tutta `0xff`**. La
   recovery non la tocca e una pagina intatta si distingue nettamente da un
   marker: il canale è affidabile.
+
+### Misura 2026-11-11 23:2x — dove muore XNU (marker sul telefono)
+Kernel CI **43109688942** (commit `97e05c2`), immagine
+`shim/out/shim-boot-g4-marks.img` (sha256 `1779a18b…0d04`), ADT con
+`/pram` a `0xc0000000`.
+
+```
++0x0000  0x5eed0001  OK   _start raggiunto
++0x0040  0x5eed0002  OK   tabelle bootstrap costruite
++0x0080  0xffffffff  ---  primo fetch con MMU on      <-- non arriva
++0x00c0  0xffffffff  ---  ritorno a arm_init
+info: phys_base 0x81004000  mem_size 0x5effc000
+      end 0xe0000000  TCR/TTBR0/SCTLR = 0xff (mai scritti)
+```
+
+- Il telefono torna in recovery a **t=21 s**, vivo: nessun hang di bus.
+- **XNU arriva a `start_first_cpu` e muore fra la costruzione delle tabelle
+  bootstrap (`b common_start`) e il primo fetch con `SCTLR_EL1.M=1`.**
+  Non arriva mai in `arm_init`: per questo il buffer early era vuoto.
+- `phys_base` post-slide `0x81004000` + `mem_size` `0x5effc000` =
+  `0xe0000000`, che è **la fine vera del banco alto** (`0x80000000-0xdfffffff`
+  = 0x60000000 byte; il payload dichiara `mem_size 0x60000000`). Quindi i
+  boot_args sono coerenti, non c'è overflow della mappa.
+- Il prossimo passo è biforcare la finestra `common_start` (marker 5-10:
+  entry, TCR, TTBR0/1, MAIR, VBAR, prima di `SCTLR_EL1`). Se arriva a 10 e
+  non a 3, il colpevole è la scrittura di SCTLR o il primo fetch; se si ferma
+  prima, è un data abort su `sysreg_restore`, MAIR o VBAR — tutti indirizzi
+  V=P che con la MMU ancora spenta devono essere fisici.

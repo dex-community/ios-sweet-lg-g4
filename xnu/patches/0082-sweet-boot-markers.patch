@@ -1,8 +1,8 @@
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 6cafaf1..0bf0e61 100644
+index 6cafaf1..453d16b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -88,6 +88,50 @@
+@@ -88,6 +88,60 @@
  #endif /* defined(KERNEL_INTEGRITY_KTRR) */
  .endmacro
  
@@ -17,7 +17,7 @@ index 6cafaf1..0bf0e61 100644
 + * text never reaches the RAM that the recovery can read back.
 + *
 + * These markers are 32-bit words written to a page of the upper DRAM bank
-+ * (0x90003000, which the recovery does not reuse) at four points of the
++ * (0x90003000, which the recovery does not reuse) at fixed points of the
 + * assembly, each followed by a clean of the cache line so the word really
 + * lands in RAM whatever the MMU and the cache state are:
 + *
@@ -25,8 +25,18 @@ index 6cafaf1..0bf0e61 100644
 + *   0x90003040  bootstrap page tables built, before the MMU switch
 + *   0x90003080  first fetch after SCTLR_EL1 with M=1 survived
 + *   0x900030c0  about to return into arm_init
++ *   0x90003100  common_start entered
++ *   0x90003140  TCR_EL1 written from sysreg_restore
++ *   0x90003180  TTBR0/TTBR1 written
++ *   0x900031c0  MAIR_EL1 written, TLB invalidated
++ *   0x90003200  VBAR_EL1 set
++ *   0x90003240  about to write SCTLR_EL1
 + *
-+ * The block at 0x90003100 keeps what the kernel computed for itself:
++ * On the G4 the first readout stopped at 0x90003040: the machine dies
++ * between the page tables and the first fetch with the MMU on, which is the
++ * window the markers from 0x90003100 to 0x90003240 bisect.
++ *
++ * The block at 0x90003800 keeps what the kernel computed for itself:
 + * phys_base, mem_size, TCR_EL1, TTBR0_EL1 and SCTLR_EL1, so a wrong
 + * boot_args or a wrong granule is visible without a debugger. phys_base and
 + * mem_size are the values after the slide adjustment (start.s reads the
@@ -37,7 +47,7 @@ index 6cafaf1..0bf0e61 100644
 + * and the return to arm_init depends on them.
 + */
 +#define SWEET_MARK_BASE		0x90003000
-+#define SWEET_MARK_INFO		0x90003100
++#define SWEET_MARK_INFO		0x90003800
 +
 +.macro SWEET_MARK addr, value
 +	movz	w9, #((\value) & 0xffff)
@@ -53,7 +63,7 @@ index 6cafaf1..0bf0e61 100644
  /*
   * Checks the reset handler for global and CPU-specific reset-assist functions,
   * then jumps to the reset handler with boot args and cpu data. This is copied
-@@ -513,6 +557,11 @@ LEXT(start_first_cpu)
+@@ -513,6 +567,11 @@ LEXT(start_first_cpu)
  	mov		x20, x0
  	mov		x21, #0
  
@@ -65,7 +75,7 @@ index 6cafaf1..0bf0e61 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -662,6 +711,17 @@ Lkernelcache_base_found:
+@@ -662,6 +721,17 @@ Lkernelcache_base_found:
  	/* Ensure TTEs are visible */
  	dsb		ish
  
@@ -83,7 +93,76 @@ index 6cafaf1..0bf0e61 100644
  
  	b		common_start
  
-@@ -801,6 +861,26 @@ common_start:
+@@ -683,6 +753,11 @@ Lkernelcache_base_found:
+  */
+ common_start:
+ 
++#if defined(SWEET)
++	/* Marker 5: common_start entered, still with the MMU off. */
++	SWEET_MARK SWEET_MARK_BASE + 0x100, 0x5EED0005
++#endif
++
+ #if HAS_NEX_PG
+ 	mov x19, lr
+ 	bl		EXT(set_nex_pg)
+@@ -695,6 +770,11 @@ common_start:
+ 	ldr		x1, [x0, SR_RESTORE_TCR_EL1]
+ 	MSR_TCR_EL1_X1
+ 
++#if defined(SWEET)
++	/* Marker 6: TCR_EL1 came out of sysreg_restore and was written. */
++	SWEET_MARK SWEET_MARK_BASE + 0x140, 0x5EED0006
++#endif
++
+ 	/* Set up translation table base registers.
+ 	 *	TTBR0 - V=P table @ top of kernel
+ 	 *	TTBR1 - KVA table @ top of kernel + 1 page
+@@ -712,6 +792,11 @@ common_start:
+ 	and		x0, x0, #(TTBR_BADDR_MASK)
+ 	MSR_TTBR1_EL1_X0
+ 
++#if defined(SWEET)
++	/* Marker 7: TTBR0 (V=P table) and TTBR1 (KVA table) are in place. */
++	SWEET_MARK SWEET_MARK_BASE + 0x180, 0x5EED0007
++#endif
++
+ 	// Set up MAIR attr0 for normal memory, attr1 for device memory
+ 	mov		x0, xzr
+ 	mov		x1, #(MAIR_WRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITEBACK))
+@@ -735,6 +820,11 @@ common_start:
+ 	tlbi	vmalle1
+ 	dsb		ish
+ 
++#if defined(SWEET)
++	/* Marker 8: MAIR_EL1 set, TLB invalidated. Nothing is translated yet. */
++	SWEET_MARK SWEET_MARK_BASE + 0x1c0, 0x5EED0008
++#endif
++
+ 
+ #if defined(BCM2837)
+ 	// Setup timer interrupt routing; must be done before MMU is enabled
+@@ -792,15 +882,47 @@ common_start:
+ 1:
+ 	MSR_VBAR_EL1_X0
+ 
++#if defined(SWEET)
++	/* Marker 9: VBAR_EL1 points at the kernel exception vectors. */
++	SWEET_MARK SWEET_MARK_BASE + 0x200, 0x5EED0009
++#endif
++
+ #if HAS_APPLE_PAC
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+ 
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
++
++#if defined(SWEET)
++	/* Marker 10: about to write SCTLR_EL1. If this appears without marker 3,
++	 * the write itself, or the first fetch after it, is what kills the CPU. */
++	SWEET_MARK SWEET_MARK_BASE + 0x240, 0x5EED000A
++#endif
++
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
@@ -110,7 +189,7 @@ index 6cafaf1..0bf0e61 100644
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
-@@ -863,6 +943,17 @@ common_start:
+@@ -863,6 +985,17 @@ common_start:
  	mov	lr, x21
  #endif
  
