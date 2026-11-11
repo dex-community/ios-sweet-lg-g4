@@ -86,71 +86,33 @@ index d89b0f1..d0c710d 100644
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
  	flush_mmu_tlb();
-diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..777aca4 100644
---- a/osfmk/arm64/start.s
-+++ b/osfmk/arm64/start.s
-@@ -463,6 +463,25 @@ LEXT(start_first_cpu)
- 	mov		x20, x0
- 	mov		x21, #0
- 
-+#if defined(SWEET)
-+	/* Stage 0: white 64x32 band, no stack or page tables needed. */
-+	MOV64	x0, (0x9c000000 + 2368 * 4320)
-+	mov		w1, #-1
-+	mov		x2, #32
-+	mov		x4, #4320
-+Lsweet_mark_row:
-+	mov		x3, #64
-+	mov		x5, x0
-+Lsweet_mark_pixel:
-+	str		w1, [x5], #4
-+	subs	x3, x3, #1
-+	b.ne	Lsweet_mark_pixel
-+	add		x0, x0, x4
-+	subs	x2, x2, #1
-+	b.ne	Lsweet_mark_row
-+	dsb		sy
-+#endif
-+
- 	// Set low reset vector before attempting any loads
- 	adrp	x0, EXT(LowExceptionVectorBase)@page
- 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,6 +628,23 @@ Lkernelcache_base_found:
- 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
- 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
- 
-+#if defined(SWEET)
-+	/*
-+	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
-+	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
-+	 * create_bootstrap_mapping would replace the RAM L2 table.
-+	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
-+	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
-+	 */
-+	MOV64	x10, 0x9c000000
-+	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
-+	orr		x11, x11, x10
-+	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
-+	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
-+	add		x13, x25, #(2 * PGBYTES)
-+	str		x11, [x13, x12, lsl #TTE_SHIFT]
-+#endif
-+
- 	/* Ensure TTEs are visible */
- 	dsb		ish
- 
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 new file mode 100644
-index 0000000..8f4c808
+index 0000000..381fef82ee8acf768e735b93b6066ec2b08dc81b
 --- /dev/null
 +++ b/osfmk/arm64/sweet_early.c
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,94 @@
 +/*
-+ * Redmi Note 10 Pro bootstrap console. No allocation, locks, ADT parsing or
-+ * per-CPU state: panic() can reach this before a current thread exists.
-+ * start.s maps the splash framebuffer VA=PA as Normal Non-Cacheable memory.
-+ * Stop using that mapping before arm_vm_init tears down bootstrap TTBR0.
++ * SWEET early console: a text buffer in the BSS.
++ *
++ * The first version of this drew the text on the "framebuffer" of the sweet
++ * board (0x9c000000), with a Normal-NC mapping made by hand in the
++ * bootstrap page tables. On the G4 that address is not a framebuffer at all
++ * but plain RAM (the bank at 0x80000000-0xdfffffff), and nothing was ever
++ * written there: the early console stayed silent, and the kernel died
++ * before anybody could see where.
++ *
++ * A buffer in the BSS works on every board:
++ *   - the marks are all written from C, so the MMU is on and the BSS is
++ *     mapped (it is zeroed at boot, so it starts empty);
++ *   - it cannot fault, and it needs no page table surgery in the assembly
++ *     that runs with the MMU still off;
++ *   - it is read back out of the RAM with the symbol table, the same way
++ *     the log of the eMMC driver is:
++ *
++ *       pa = va - virt_base + phys_base
++ *
++ *     tools/read-xnu-early.py does that.
 + */
 +#include <arm64/sweet_early.h>
 +
@@ -158,70 +120,24 @@ index 0000000..8f4c808
 +#include <stdint.h>
 +#include <kern/misc_protos.h>
 +
-+#define EARLY_FB ((volatile uint32_t *)(uintptr_t)0x9c000000)
-+#define EARLY_WIDTH 1080u
-+#define EARLY_HEIGHT 2400u
-+#define EARLY_STRIDE (4320u / 4)
-+#define EARLY_SCALE 2u
-+#define EARLY_CELL_W (8u * EARLY_SCALE)
-+#define EARLY_CELL_H (16u * EARLY_SCALE)
-+#define EARLY_ROWS ((EARLY_HEIGHT - 32u) / EARLY_CELL_H)
-+#define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
++#define EARLY_LOG_SIZE 8192
 +
-+extern unsigned char iso_font[256 * 16];
++/* The text, and how much of it there is. Both are in the BSS. */
++char sweet_early_buf[EARLY_LOG_SIZE];
++uint32_t sweet_early_len;
 +
-+/* Initialized data must remain writable until disable, including panics. */
-+static unsigned int early_row, early_col;
-+static unsigned int early_started, early_disabled, early_panicking;
-+
-+static void
-+sweet_early_clear_row(void)
-+{
-+	for (unsigned int y = 0; y < EARLY_CELL_H; y++) {
-+		volatile uint32_t *line = EARLY_FB + (early_row * EARLY_CELL_H + y) * EARLY_STRIDE;
-+		for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
-+			line[x] = 0xff000000u;
-+		}
-+	}
-+}
++static uint32_t early_disabled;
++static uint32_t early_panicking;
 +
 +void
 +sweet_early_putc(char c)
 +{
-+	if (early_disabled) {
++	if (early_disabled)
 +		return;
-+	}
-+	if (!early_started) {
-+		early_started = 1;
-+		sweet_early_clear_row();
-+	}
-+	if (c == '\r') {
-+		early_col = 0;
++	if (sweet_early_len >= EARLY_LOG_SIZE - 1)
 +		return;
-+	}
-+	if (c == '\n' || early_col == EARLY_COLS) {
-+		early_col = 0;
-+		early_row = (early_row + 1) % EARLY_ROWS;
-+		sweet_early_clear_row();
-+		if (c == '\n') {
-+			return;
-+		}
-+	}
-+	const unsigned char *glyph = iso_font + (unsigned char)c * 16;
-+	for (unsigned int gy = 0; gy < 16; gy++) {
-+		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
-+			volatile uint32_t *line = EARLY_FB +
-+			    (early_row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE +
-+			    early_col * EARLY_CELL_W;
-+			for (unsigned int gx = 0; gx < 8; gx++) {
-+				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
-+				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
-+					line[gx * EARLY_SCALE + sx] = pixel;
-+				}
-+			}
-+		}
-+	}
-+	early_col++;
++	sweet_early_buf[sweet_early_len++] = c;
++	sweet_early_buf[sweet_early_len] = '\0';
 +}
 +
 +static void
@@ -238,18 +154,12 @@ index 0000000..8f4c808
 +	if (early_disabled || stage > 8) {
 +		return;
 +	}
-+	uint32_t color = 0xff00ff00u | (stage * 28u << 16);
-+	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
-+		for (unsigned int x = stage * 64; x < (stage + 1) * 64; x++) {
-+			EARLY_FB[y * EARLY_STRIDE + x] = color;
-+		}
-+	}
-+	__asm__ volatile("dsb sy" ::: "memory");
 +	sweet_early_string("SWEET EARLY ");
 +	sweet_early_putc((char)('0' + stage));
 +	sweet_early_string(": ");
 +	sweet_early_string(label);
 +	sweet_early_putc('\n');
++	__asm__ volatile("dsb sy" ::: "memory");
 +}
 +
 +void

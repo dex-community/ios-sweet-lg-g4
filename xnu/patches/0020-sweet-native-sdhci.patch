@@ -1,0 +1,45 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index abc1234..def5678 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -1000,6 +1000,23 @@ IOService::start(IOService *provider)
+ 	return true;
+ }
+ 
++/*
++ * sweet: publish the NativeSdhci eMMC driver on SWEET machines.
++ * The driver lives in drivers/NativeSdhci/ and implements IOBlockStorageDevice
++ * for the MSM8992 SDHCI controller at 0xf9824900.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern void native_sdhci_publish(void);
++void native_sdhci_publish(void);
++#endif
++
++extern "C" void sweet_publish_storage_driver(void)
++{
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	native_sdhci_publish();
++#endif
++}
++
+ #if CONFIG_MACF
+ /* We may have been called from the MACF policy callback */
+ int
+diff --git a/Makefile b/Makefile
+index 1234567..890abcd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -100,6 +100,12 @@ KERNEL_DEBUG_OBJS += (
+ 
+ KERNEL_BUILD := 1
+ 
++# sweet: include NativeSdhci driver for eMMC on SWEET
++DRIVERS_ARM64_sweet += \
++	$(SRCROOT)/drivers/NativeSdhci/NativeSdhci.cpp \
++	$(SRCROOT)/drivers/NativeSdhci/PollingHost.cpp \
++	$(SRCROOT)/drivers/NativeSdhci/SdhciCore.cpp
++
+ # If we're building in-tree, we may need some generated sources
+ ifneq ($(SDKROOT),)
+ 	PLATFORM = $(shell uname -p)

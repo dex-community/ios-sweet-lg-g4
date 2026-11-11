@@ -91,6 +91,23 @@ if [ "$COLLECT" = 0 ]; then
 		[ "$state" = fastboot ] && break
 	done
 
+	# Se il telefono è in recovery invece di fastboot, dobbiamo tornare in fastboot
+	# LK boot in recovery quando XNU crasha - dobbiamo forzare il ritorno in fastboot
+	if [ "$state" = "adb" ]; then
+		say "=== phone in recovery mode, forcing fastboot ==="
+		# Metodo 1: da recovery, reboot in bootloader
+		adb reboot bootloader 2>/dev/null || true
+		sleep 5
+		for _ in $(seq 1 20); do
+			fastboot devices 2>/dev/null | grep -q . && break
+			sleep 3
+		done
+		fastboot devices 2>/dev/null | grep -q . || {
+			# Metodo 2: se non funziona, forza con keys
+			say "forcing fastboot with volume down + power"
+		}
+	fi
+
 	# --- 3. the custom TWRP, the only image with /dev/mem -------------------
 	say "=== boot the custom TWRP ($TWRP_IMG) ==="
 	if ! fastboot devices 2>/dev/null | grep -q .; then

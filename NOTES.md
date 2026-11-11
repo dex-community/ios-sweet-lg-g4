@@ -3501,3 +3501,51 @@ della recovery (che prende le pagine che gli servono). Il ring e il log del
 driver stanno nella bank `0x80000000`, quella bassa `0x10000000` viene presa
 prima, quindi sopravvivono; il log dello shim, che sta nella bank bassa, non
 e' garantito dopo un boot di XNU.
+
+### FATTO 25 — XNU parte e muore PRIMA del driver eMMC (e la RAM si puo' leggere)
+
+**Il boot vero** (run `42942530869`, kernel con il driver riscritto, cmdline
+`rd=emmc0`): XNU parte, il telefono torna in recovery. Non e' il driver a
+fallire: **il driver non e' mai partito**.
+
+**La prova**: il buffer di log del driver (`emmc_log_buf`, nel BSS del kernel)
+e' vuoto, e il ring della console del kernel pure. Il vuoto potrebbe
+volere dire "la RAM e' stata sovrascritta", ma **non e' cosi'**: confrontando
+un simbolo inizializzato di `__DATA` (file e RAM) si ottengono **byte identici**
+— la RAM del kernel e' **intatta** dopo il panic e dopo il recovery.
+
+Quindi: **XNU muore prima di `IOFindBSDRoot`**, cioe' nell'avvio tardivo
+(ARM init, platform expert, boot CPU), non nel driver eMMC.
+
+**Dove si puo' guardare la console presto**:
+
+| cosa | dove | come si legge |
+|---|---|---|
+| console early di XNU | `0x9c000000` con il font ISO, celle 16x32 | `tools/read-xnu-early.py` |
+| log del driver eMMC | `emmc_log_buf` nel BSS | `tools/read-xnu-log.py` |
+| ring della console del kernel | `sweet_log_ring` nel BSS | `tools/read-xnu-log.py` |
+
+**La console early non scrive niente sul G4**: la patch 0010
+(`osfmk/arm64/sweet_early.c`) scrive sul "framebuffer" a `0x9c000000`, che
+sulla board *sweet* e' il display ma **sul G4 e' RAM** (la bank
+`0x80000000-0xdfffffff`). L'area e' leggibile (la RAM e' intatta) ma contiene
+rumore: la fascia bianca di stage 0 non c'e' e i marcatori
+`SWEET EARLY n: ...` non ci sono. Dunque XNU muore **prima** ancora dei
+marcatori, cioe' molto presto.
+
+**Cosa e' emerso lungo la strada**:
+
+* la **bank alta** (`0x80000000-0xdfffffff`, quella che XNU usa come
+  `phys_base`) **sopravvive** al boot di XNU e al recovery: il kernel Linux
+  della recovery non la tocca;
+* la **bank bassa** (`0x10000000-0x5fffffff`) **non** sopravvive: il kernel
+  Linux della recovery la usa, e cosi' il log dello shim a `0x50000000` sparisce
+  dopo un boot di XNU. Percio' il log dello shim si legge solo se si legge
+  **prima** che il recovery torni su;
+* la **console del livello BSD** non esiste quando il driver gira: il driver
+  e' called da `IOFindBSDRoot`, dentro `IOKitBSDInit`, molto prima di
+  `bsd_init`. Il suo `printf()` va a finire nel nulla, e per questo il
+  driver tiene una copia delle sue parole in un buffer nel BSS.
+
+**Indirizzo fisico di un simbolo del kernel**: `pa = va - virt_base + phys_base`
+(header del payload a 0x10 e 0x38), la stessa mappatura di `phystokv()`.

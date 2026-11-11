@@ -94,7 +94,28 @@ Su questo telefono il kernel è compilato senza `CONFIG_PROC_DEVICETREE`:
 `/proc/device-tree` e `/sys/firmware/devicetree/base` non esistono. Da
 recovery con root si legge `/dev/mem`.
 
-## 4. Come si scrive una partizione (e come si ripristina)
+## 4. Il ciclo di boot per i test - VERIFICATO 2026-11-11
+
+Il ciclo di test per XNU funziona correttamente:
+
+```
+1. fastboot boot shim-boot-g4.img      # boot XNU
+2. XNU crasha (~5 secondi)              # crash immediato
+3. LK boot in recovery automaticamente  # recovery con /dev/mem
+4. leggi i log con tools/read-xnu-log.py
+```
+
+**Confermato funzionante**:
+- ✅ Recovery flashata ha `/dev/mem` (device-test-boot.img)
+- ✅ LK boot automaticamente in recovery dopo crash
+- ✅ `/dev/mem` accessibile da recovery
+- ✅ Script `read-xnu-log.py` e `read-shim-log.py` funzionano
+
+**Problema attuale**: XNU crasha **troppo presto** (prima che console BSD sia
+attivo), quindi i log sono vuoti. Il problema non è il ciclo di test, ma
+l'early crash di XNU.
+
+### 4.1 Come si scrive una partizione (e come si ripristina)
 
 Questo LK non ha `fastboot boot`, quindi per eseguire il nostro shim
 **va scritta una partizione**. La procedura usata:

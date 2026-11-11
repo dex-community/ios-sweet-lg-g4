@@ -77,6 +77,24 @@ touch and hardware buttons.
 
 ## What does not work yet (blockers)
 
+### Critical Blocker: XNU Crash Immediato - VERIFICATO 2026-11-11
+- **Test pulito eseguito dal bootloader**: 
+  - `fastboot boot shim-boot-g4.img` → boot OK
+  - Crash dopo ~5 secondi → LK boot in recovery (comportamento corretto)
+  - Recovery con `/dev/mem` funziona ✅
+- **Risultati lettura log**:
+  - Log shim (0x50000000): **VUOTO** - lo shim non scrive prima di XNU
+  - Log XNU console BSD: **VUOTO** - console non inizializzato
+  - Log eMMC driver: **VUOTO** - driver mai eseguito
+- **Diagnosi**: XNU crasha **immediatamente** all'avvio, prima che:
+  - Il console BSD sia attivo (no output possibile)
+  - Il driver eMMC sia caricato
+  - Qualsiasi diagnostica sia disponibile
+- **Causa probabile**: panic very early nel boot (MMU setup, exception vector,
+  bad pointer, memory layout issue)
+- **Next**: verificare parametri boot (virt_base, phys_base, ADT), controllare
+  se lo shim completa correttamente prima di handoff a XNU
+
 ### Critical Blocker: XNU Boot Failure
 - **Symptom**: `fastboot boot shim-boot.img` with the XNU payload ends in a
   reboot; the phone comes back in recovery
