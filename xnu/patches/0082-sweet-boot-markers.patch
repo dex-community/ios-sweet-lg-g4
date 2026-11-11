@@ -1,8 +1,8 @@
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 6cafaf1..4e45735 100644
+index 6cafaf1..0bf0e61 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -88,6 +88,47 @@
+@@ -88,6 +88,50 @@
  #endif /* defined(KERNEL_INTEGRITY_KTRR) */
  .endmacro
  
@@ -26,9 +26,12 @@ index 6cafaf1..4e45735 100644
 + *   0x90003080  first fetch after SCTLR_EL1 with M=1 survived
 + *   0x900030c0  about to return into arm_init
 + *
-+ * The block at 0x90003100 keeps what the kernel thinks the machine is:
++ * The block at 0x90003100 keeps what the kernel computed for itself:
 + * phys_base, mem_size, TCR_EL1, TTBR0_EL1 and SCTLR_EL1, so a wrong
-+ * boot_args or a wrong granule is visible without a debugger.
++ * boot_args or a wrong granule is visible without a debugger. phys_base and
++ * mem_size are the values after the slide adjustment (start.s reads the
++ * mach header, subtracts it from the physical base and shrinks mem_size), so
++ * phys_base + mem_size must come out at the end of the DRAM window.
 + *
 + * x9 and x10 are scratch here: nothing between the start of start_first_cpu
 + * and the return to arm_init depends on them.
@@ -50,7 +53,7 @@ index 6cafaf1..4e45735 100644
  /*
   * Checks the reset handler for global and CPU-specific reset-assist functions,
   * then jumps to the reset handler with boot args and cpu data. This is copied
-@@ -513,6 +554,11 @@ LEXT(start_first_cpu)
+@@ -513,6 +557,11 @@ LEXT(start_first_cpu)
  	mov		x20, x0
  	mov		x21, #0
  
@@ -62,7 +65,7 @@ index 6cafaf1..4e45735 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -662,6 +708,17 @@ Lkernelcache_base_found:
+@@ -662,6 +711,17 @@ Lkernelcache_base_found:
  	/* Ensure TTEs are visible */
  	dsb		ish
  
@@ -80,7 +83,7 @@ index 6cafaf1..4e45735 100644
  
  	b		common_start
  
-@@ -801,6 +858,26 @@ common_start:
+@@ -801,6 +861,26 @@ common_start:
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
@@ -107,7 +110,7 @@ index 6cafaf1..4e45735 100644
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
-@@ -863,6 +940,17 @@ common_start:
+@@ -863,6 +943,17 @@ common_start:
  	mov	lr, x21
  #endif
  

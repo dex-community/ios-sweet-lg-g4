@@ -107,9 +107,9 @@ def show_marks(argv):
 
     info = base + 0x100
     phys_base, mem_size, tcr, ttbr0, sctlr = struct.unpack_from("<5Q", blob, 0x100)
-    print(f"info at {info:#x} (written with marker 2):")
+    print(f"info at {info:#x} (written with marker 2, after the slide adjust):")
     print(f"  phys_base {phys_base:#x}  mem_size {mem_size:#x}"
-          f"  end {phys_base + mem_size:#x}")
+          f"  end {phys_base + mem_size:#x} (expect 0xdff00000)")
     print(f"  TCR_EL1   {tcr:#018x}")
     print(f"  TTBR0_EL1 {ttbr0:#018x}")
     print(f"  SCTLR_EL1 {sctlr:#018x}")
