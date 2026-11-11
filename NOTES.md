@@ -3920,3 +3920,47 @@ info: phys_base 0x81004000  mem_size 0x5effc000
   non a 3, il colpevole è la scrittura di SCTLR o il primo fetch; se si ferma
   prima, è un data abort su `sysreg_restore`, MAIR o VBAR — tutti indirizzi
   V=P che con la MMU ancora spenta devono essere fisici.
+
+### Misura 2 — biforcazione di `common_start` (CI 43111639112)
+Immagine `shim/out/shim-boot-g4-bisect.img` (sha256 `da566cb0…c166`).
+
+```
+1 _start                           OK
+2 tabelle bootstrap costruite      OK
+5 common_start entrato             OK
+6 TCR_EL1 scritto                  OK
+7 TTBR0/TTBR1 scritti              OK
+8 MAIR_EL1 scritto, TLB flush      OK
+9 VBAR_EL1 impostato               OK
+10 prima di MSR SCTLR_EL1          OK
+3  primo fetch con MMU on          MANCA
+4  ritorno a arm_init              MANCA
+```
+
+**Il kernel muore sulla scrittura di `SCTLR_EL1` o sul primo fetch dopo.**
+Tutti i passi precedenti (lettura di `sysreg_restore`, `set_mmu_ttb`, TTBR0/1,
+MAIR, VBAR) funzionano.
+
+### Le tabelle bootstrap sono corrette (verificato in RAM, senza CI)
+- Layout del payload: `virt_base 0xfffffe0006000000`, `phys_base 0x80000000`,
+  quindi **PA = 0x80000000 + (VA - virt_base)**; `_mh_execute_header` finisce a
+  `0x81004000` e l'entry a `0x814a8488`.
+- `bootstrap_pagetables` VA `0xfffffe0007180000` → PA **`0x81180000`**.
+  Letto dalla recovery: `L1[0] = 0x81188003` (tabella valida) e una sola
+  entry, coerente col fatto che tutto il banco sta sotto i 256 GiB.
+- L2 a `0x81188000`: **47 block entry** da `L2[64]` (VA `0x80000000`) a
+  `L2[110]` (VA `0xdc000000`), ognuna `0x…0601` = block valido, **AF=1**,
+  **attrindx 0 (write-back)**, shareable outer. Copre `0x814a8488` ✓ e anche
+  la pagina dei marker `0x90003000` ✓.
+- Quindi la mappa V=P è giusta: se il fetch dopo `MSR SCTLR_EL1` faultasse,
+  non sarebbe per una traduzione mancante. Serve l'eccezione vera.
+
+### Prossimo esperimento — vettori d'eccezione propri (patch 0082)
+- Il build diagnostico installa `sweet_exc_vectors` in `VBAR_EL1` subito
+  prima dell'accensione della MMU: 16 slot, ognuno salva `ESR_EL1`, `FAR_EL1`,
+  `ELR_EL1`, `SPSR_EL1` in `0x90005000` e `0x5EED0B00|slot` in `0x90003300`,
+  poi resta in loop fino al watchdog.
+- La tabella sta in `.text`, quindi il suo indirizzo è lo stesso con MMU
+  spenta (fisico) e accesa (V=P): funziona in entrambi i mondi.
+- `tools/read-pram.py --marks` decodifica ESR (classe EC, fault status DFSC,
+  read/write) e stampa FAR/ELR/SPSR.
