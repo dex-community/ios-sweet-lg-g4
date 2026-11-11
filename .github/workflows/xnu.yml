@@ -52,6 +52,13 @@ jobs:
           # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          # the arm64 slice must not use LSE atomics (casa/ldadd/...): they trap
+          # SIGILL on the Cortex-A53/A57 of msm8992. Downgrade the firehose build
+          # to plain armv8-a like the kernel itself (patch 0004).
+          XC=libdispatch/xcodeconfig/libfirehose_kernel.xcconfig
+          echo 'OTHER_CFLAGS = $(inherited) -march=armv8-a+crypto -mno-outline-atomics' >> dxb/$XC
+          echo 'OTHER_CPLUSPLUSFLAGS = $(inherited) -march=armv8-a+crypto -mno-outline-atomics' >> dxb/$XC
+          tail -2 dxb/$XC
           ls dxb/patches
 
       - name: Deps
