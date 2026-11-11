@@ -53,10 +53,11 @@ jobs:
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
           # the arm64 slice must not use LSE atomics (casa/ldadd/...): they trap
-          # SIGILL on the Cortex-A53/A57 of msm8992. Downgrade the firehose build
-          # to plain armv8-a like the kernel itself (patch 0004). The xcconfig
-          # only exists once build.sh has cloned libdispatch, so the injection
-          # goes into build.sh itself, next to its own sed calls.
+          # SIGILL on the Cortex-A53/A57 of msm8992. -march alone does NOT help:
+          # the arm64-apple-macos15 triple implies +lse, so the CPU has to be
+          # pinned with -mcpu=cortex-a53+crypto (same as the kernel, patch 0004).
+          # The xcconfig only exists once build.sh has cloned libdispatch, so
+          # the injection goes into build.sh itself, next to its own sed calls.
           python3 - <<'PY'
           p = "dxb/build.sh"
           s = open(p).read()
@@ -66,7 +67,7 @@ jobs:
               anchor + "\n"
               "    # arm64 only (arm64e needs armv8.5) and no LSE atomics: the kernel\n"
               "    # links the arm64 slice and msm8992 (cortex-a53) traps on casa/ldadd\n"
-              "    printf 'OTHER_CFLAGS = -mkernel -nostdinc -Wno-packed -march=armv8-a+crypto -mno-outline-atomics\\n' "
+              "    printf 'OTHER_CFLAGS = -mkernel -nostdinc -Wno-packed -mcpu=cortex-a53+crypto -mno-outline-atomics\\n' "
               ">> \"${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig\""
           )
           s = s.replace(anchor, extra, 1)
