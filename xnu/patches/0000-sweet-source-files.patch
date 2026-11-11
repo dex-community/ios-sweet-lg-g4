@@ -1,21 +1,45 @@
 diff --git a/bsd/dev/sweet_emmc.c b/bsd/dev/sweet_emmc.c
 new file mode 100644
-index 0000000..53ef344
+index 0000000..bff62a8bc53217a9f17838f4db08b84441963102
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,842 @@
 +/*
-+ * SWEET eMMC root device (read-only).
++ * SWEET eMMC root device (read-only block device).
 + *
 + * The Qualcomm SDHCI host (MSM8992) is left enabled by the bootloader,
-+ * which loaded our boot image from the eMMC. This driver reuses that state:
-+ * it issues polled MMC commands to the card to read sectors.
++ * which loaded our boot image from the eMMC. The shim that runs before XNU
++ * has already brought the host and the card up (core reset, legacy clock
++ * path, 400 kHz, CMD0..CMD16), but this driver does not rely on that: it
++ * re-identifies the card from CMD0, the way the working Linux driver and
++ * the UniXNU NativeSdhci driver do, and then serves the partition that
++ * holds the iOS root filesystem as a BSD block device.
 + *
-+ * Based on NativeSdhci from UniXNU-lumia950xl (MSM8992, same as LG G4 H815).
++ * The register layout and the flag value of every command are the ones
++ * measured on the phone by the shim (shim/emmc.c). The command register is
++ * 16 bit at 0x0E, the command index goes into bits [15:8] and the low byte
++ * holds the length of the answer plus the checks. These are the values the
++ * card answered to on the real device:
 + *
-+ * Root on eMMC with rd=emmc0.
++ *   CMD0   0x00  no answer
++ *   CMD1   0x02  48 bit (OCR), no CRC7, no index
++ *   CMD2   0x09  136 bit + CRC7, NO index check
++ *   CMD3   0x1a  48 bit + CRC7 + index
++ *   CMD7   0x0b  48 bit busy + CRC7
++ *   CMD16  0x0a  48 bit + CRC7
++ *   CMD17  0x3a  48 bit + CRC7 + index + data present
 + *
-+ * Reads only - writes are refused.
++ * CMD2 with the index check (0x19) is what the first version of the shim
++ * used and the card refused it: the answer came back as an error and the
++ * command line stayed busy. Without the index check (0x09) the CID comes
++ * back, which is what the working Linux driver programs too.
++ *
++ * The root filesystem is the HFS+ volume of the "ios" partition. The device
++ * that XNU gets is that partition, not the whole card: the volume header
++ * of an HFS+ volume sits at offset 1024 of its partition, so the device
++ * has to start exactly there.
++ *
++ * Root on eMMC with rd=emmc0. Reads only - writes are refused.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +
@@ -30,422 +54,795 @@ index 0000000..53ef344
 +#include <miscfs/devfs/devfs.h>
 +#include <kern/locks.h>
 +#include <kern/clock.h>
-+#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
-+#include <pexpert/pexpert.h>
-+#include <pexpert/device_tree.h>
 +#include <libkern/libkern.h>
 +#include <arm/machine_routines.h>
 +
-+/* Forward declarations for ARM-specific functions */
++/*
++ * ml_io_map is declared by <arm/machine_routines.h> only under
++ * MACH_KERNEL_PRIVATE or PEXPERT_KERNEL_PRIVATE; the declaration is repeated
++ * here so the file does not depend on those.
++ */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
-+/* SDHCI register offsets (from SdhciRegs.h) */
++/* Controller windows (MSM8992, LG G4 H815). */
 +#define HC_BASE         0xf9824900ULL
 +#define HC_SIZE         0x1a0
 +#define CORE_BASE       0xf9824000ULL
 +#define CORE_SIZE       0x800
 +
-+/* Standard SDHCI registers */
-+#define HC_CTRL1        0x28
-+#define HC_CLK_CTRL     0x2c
-+#define HC_TIMEOUT_CTRL 0x2e
-+#define HC_POWER_CTRL   0x29
-+#define HC_CAPABILITIES 0x40
-+#define HC_CAPABILITIES_2 0x44
-+#define HC_HOST_CTRL2   0x3c
-+#define HC_PRESENT      0x24
-+#define HC_INT_STATUS   0x30
-+#define HC_INT_ENABLE   0x34
-+#define HC_SIGNAL_ENABLE 0x38
-+#define HC_BLOCK_SIZE   0x04
-+#define HC_BLOCK_COUNT  0x06
-+#define HC_ARGUMENT     0x08
-+#define HC_COMMAND      0x0c
-+#define HC_RESPONSE     0x10
-+#define HC_BUFFER       0x20
++/* SDHCI registers. */
++#define HC_BLK_SIZE     0x04	/* 16 bit */
++#define HC_BLK_COUNT    0x06	/* 16 bit */
++#define HC_ARGUMENT     0x08	/* 32 bit */
++#define HC_TRANSFER     0x0c	/* 16 bit */
++#define HC_COMMAND      0x0e	/* 16 bit: index << 8 | flags */
++#define HC_RESPONSE     0x10	/* 32 bit x 4 (0x10..0x1c) */
++#define HC_BUF_PORT     0x20	/* 32 bit */
++#define HC_PRESENT      0x24	/* 32 bit */
++#define HC_CTRL1        0x28	/* 8 bit */
++#define HC_POWER        0x29	/* 8 bit */
++#define HC_CLK_CTRL     0x2c	/* 16 bit */
++#define HC_TIMEOUT      0x2e	/* 8 bit */
++#define HC_SWRST        0x2f	/* 8 bit */
++#define HC_INT_STATUS   0x30	/* 32 bit */
++#define HC_INT_ENABLE   0x34	/* 32 bit */
++#define HC_INT_SIGNAL   0x38	/* 32 bit */
++#define HC_HOST_CTRL2   0x3c	/* 16 bit */
++#define HC_CAPS1        0x40	/* 32 bit */
++#define HC_CAPS2        0x44	/* 32 bit */
++#define HC_VENDOR_SPEC  0x10c	/* 32 bit: the MSM clock path */
 +
-+/* SDHCI flags */
-+#define PS_CARD_PRESENT     (1u << 16)
-+#define PS_CMD_INHIBIT      (1u << 0)
-+#define PS_DAT_INHIBIT      (1u << 1)
-+#define PS_DAT0_LEVEL       (1u << 20)
++/* MCI (core) registers. */
++#define CORE_POWER      0x00	/* 32 bit, bit 7 = core reset */
++#define CORE_HC_MODE    0x78	/* 32 bit, bit 0 = HC mode, bit 13 = FF_CLK_SW_RST_DIS */
 +
-+#define INT_CMD_COMPLETE    (1u << 0)
-+#define INT_DATA_COMPLETE   (1u << 1)
-+#define INT_ERROR           (1u << 15)
++#define HC_MODE_EN        (1u << 0)
++#define FF_CLK_SW_RST_DIS (1u << 13)
 +
-+#define CMD_RESP_NONE       0x00
-+#define CMD_RESP_R1         0x01
-+#define CMD_RESP_R1B        0x02
-+#define CMD_RESP_R2         0x03
-+#define CMD_RESP_R3         0x04
++/* Present state (0x24). */
++#define PS_CMD_INHIBIT    0x00000001u
++#define PS_DATA_INHIBIT   0x00000002u
++#define PS_DATA_AVAILABLE 0x00000800u	/* buffer read enable */
++#define PS_DAT0_LEVEL     0x00100000u
 +
-+/* MMC commands */
++/* Interrupt status (0x30). */
++#define INT_CMD_DONE      0x00000001u
++#define INT_XFER_DONE     0x00000002u
++#define INT_ERR_MASK      0xffff8000u	/* error summary and the error half */
++
++/* Command register flags (the low byte of HC_COMMAND). */
++#define CMD_RESP_NONE      0x00
++#define CMD_RESP_136       0x01
++#define CMD_RESP_48        0x02
++#define CMD_RESP_48_BUSY   0x03
++#define CMD_CRC_CHECK      0x08
++#define CMD_INDEX_CHECK    0x10
++#define CMD_DATA_PRESENT   0x20
++
++/* The flag sets the card answered to, measured on the phone. */
++#define CFG_CMD0    CMD_RESP_NONE
++#define CFG_CMD1    CMD_RESP_48			/* OCR: 48 bit, no CRC7, no index */
++#define CFG_CMD2    (CMD_RESP_136 | CMD_CRC_CHECK)	/* CID: 136 bit + CRC7 */
++#define CFG_CMD3    (CMD_RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK)
++#define CFG_CMD7    (CMD_RESP_48_BUSY | CMD_CRC_CHECK)
++#define CFG_CMD16   (CMD_RESP_48 | CMD_CRC_CHECK)
++#define CFG_CMD17   (CMD_RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK | CMD_DATA_PRESENT)
++
++/* Transfer mode (0x0c). */
++#define MODE_READ          0x0010
++
++/* Card status (R1): the state is bits 12:9, READY_FOR_DATA is bit 8. */
++#define R1_STATE(r)        (((r) >> 9) & 0xfu)
++#define CARD_STATE_TRAN    4u
++/* The errors that make an answer unusable. */
++#define R1_FATAL           0xe4180000u
++
++/* MMC commands. */
 +#define CMD_GO_IDLE         0
 +#define CMD_SEND_OP_COND    1
 +#define CMD_ALL_SEND_CID    2
-+#define CMD_SET_RELATIVE_ADDR 3
++#define CMD_SET_REL_ADDR    3
 +#define CMD_SELECT_CARD     7
-+#define CMD_SEND_STATUS     13
-+#define CMD_READ_SINGLE     17
-+#define CMD_SET_BLOCKLEN    16
++#define CMD_SET_BLOCKLEN   16
++#define CMD_READ_SINGLE    17
 +
-+static vm_address_t hc_base = 0;
-+static uint16_t card_rca;
-+static int emmc_initialized = 0;
++/* The card is high capacity: the argument of CMD17 is the block number. */
++#define OCR_VALUE           0x40ff8000u
++#define OCR_BUSY            0x80000000u
++#define OCR_POWER_UP        0x40000000u
 +
-+/* Buffer for reads */
-+#define EMMC_BUFFER_SIZE    (1u << 20)  /* 1 MB bounce buffer */
-+static vm_address_t emmc_buffer;
++/* Timeouts, in microseconds of polling. */
++#define EMMC_CMD_TIMEOUT    500000
++#define EMMC_XFER_TIMEOUT   2000000
++#define EMMC_FIFO_TIMEOUT   100000
 +
-+static inline uint32_t rd32(uintptr_t addr)
++/* The relative card address the host assigns with CMD3. The factory LK
++ * assigns 2 on this phone and the card has answered to it at every boot. */
++#define EMMC_RCA            2u
++
++/*
++ * The partition that holds the iOS root filesystem, measured on the phone
++ * when the volume was written (the HFS+ volume header is at offset 1024 of
++ * it). It is only used when the GPT cannot be read; the partition is found
++ * by name and by its HFS+ signature first.
++ */
++#define EMMC_FALLBACK_FIRST_LBA  12419072ULL
++#define EMMC_FALLBACK_BLOCKS     48627712ULL
++
++/* GPT layout (UEFI 2.10). */
++#define GPT_SIGNATURE       "EFI PART"
++#define GPT_HEADER_LBA      1ULL
++#define GPT_ENTRY_ARRAY_LBA 2ULL
++#define GPT_ENTRY_SECTORS   32
++#define GPT_NAME_OFFSET     56
++#define GPT_FIRST_LBA_OFF   32
++#define GPT_LAST_LBA_OFF    40
++
++static vm_address_t hc_base;
++static vm_address_t core_base;
++
++static uint32_t emmc_last_int_status;	/* the interrupt status of a failure */
++static uint32_t emmc_rca = EMMC_RCA;
++
++/* The geometry of the partition that is served. */
++static uint64_t emmc_part_first;	/* first LBA on the card */
++static uint64_t emmc_part_blocks;	/* size in 512 byte blocks */
++
++static int emmc_initialized;
++static int emmc_major = -1;
++static void *emmc_node;
++/* lck_mtx_t is opaque on arm64: the mutex is allocated. */
++static lck_mtx_t *emmc_lock;
++
++static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
++static inline void     wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
++static inline uint16_t rd16(uintptr_t a) { return *(volatile uint16_t *)a; }
++static inline void     wr16(uintptr_t a, uint16_t v) { *(volatile uint16_t *)a = v; }
++static inline uint8_t  rd8(uintptr_t a)  { return *(volatile uint8_t *)a; }
++static inline void     wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
++
++static uint32_t le32(const uint8_t *p)
 +{
-+    return *(volatile uint32_t *)addr;
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 +}
 +
-+static inline void wr32(uintptr_t addr, uint32_t val)
++static uint64_t le64(const uint8_t *p)
 +{
-+    *(volatile uint32_t *)addr = val;
++	return (uint64_t)le32(p) | ((uint64_t)le32(p + 4) << 32);
 +}
 +
-+static inline uint8_t rd8(uintptr_t addr)
++/*
++ * Wait for one of the wanted interrupt bits. Returns the status, or 0 on
++ * timeout. A status that carries an error bit is returned as well: the
++ * caller tells the two apart with INT_ERR_MASK.
++ */
++static uint32_t emmc_wait_status(uint32_t wanted, uint32_t timeout_us)
 +{
-+    return *(volatile uint8_t *)addr;
++	uint32_t i;
++
++	for (i = 0; i < timeout_us; i++) {
++		uint32_t status = rd32(hc_base + HC_INT_STATUS);
++
++		if (status & INT_ERR_MASK)
++			return status;
++		if (status & wanted)
++			return status;
++		delay(1);
++	}
++	return 0;
 +}
 +
-+static inline void wr8(uintptr_t addr, uint8_t val)
++/* Wait until the command and the data lines are free. */
++static int emmc_wait_idle(void)
 +{
-+    *(volatile uint8_t *)addr = val;
++	uint32_t i;
++
++	for (i = 0; i < EMMC_CMD_TIMEOUT; i++) {
++		if (!(rd32(hc_base + HC_PRESENT) & (PS_CMD_INHIBIT | PS_DATA_INHIBIT)))
++			return 0;
++		delay(1);
++	}
++	return -1;
 +}
 +
-+static inline uint16_t rd16(uintptr_t addr)
++/*
++ * The card holds DAT0 low while it is busy. If the host does not show the
++ * line level, fall back to a fixed delay that is longer than a 512 byte
++ * program.
++ */
++static void emmc_wait_busy(void)
 +{
-+    return *(volatile uint16_t *)addr;
++	uint32_t i;
++
++	for (i = 0; i < 3000000; i++) {
++		if (rd32(hc_base + HC_PRESENT) & PS_DAT0_LEVEL)
++			return;
++		delay(1);
++	}
 +}
 +
-+static inline void wr16(uintptr_t addr, uint16_t val)
++/*
++ * One command without a data phase. The flags are the low byte of the
++ * command register, already assembled.
++ */
++static int emmc_cmd(uint8_t index, uint32_t arg, uint16_t flags, uint32_t *rsp)
 +{
-+    *(volatile uint16_t *)addr = val;
++	uint32_t status;
++
++	if (emmc_wait_idle())
++		return -1;
++
++	/* Acknowledge every status bit before the command goes out. */
++	wr32(hc_base + HC_INT_STATUS, 0xffffffffu);
++
++	wr32(hc_base + HC_ARGUMENT, arg);
++	wr16(hc_base + HC_TRANSFER, 0);
++	wr16(hc_base + HC_COMMAND, (uint16_t)(((uint16_t)index << 8) | flags));
++
++	status = emmc_wait_status(INT_CMD_DONE, EMMC_CMD_TIMEOUT);
++	if (!status)
++		return -2;
++	if (status & INT_ERR_MASK) {
++		emmc_last_int_status = status;
++		return -3;
++	}
++	if (rsp)
++		*rsp = rd32(hc_base + HC_RESPONSE);
++	wr32(hc_base + HC_INT_STATUS, INT_CMD_DONE);
++
++	/* A 48 bit "busy" answer is sent when the card is ready. */
++	if ((flags & 0x03u) == CMD_RESP_48_BUSY)
++		emmc_wait_busy();
++
++	return 0;
 +}
 +
-+static void emmc_delay(uint32_t us)
++/*
++ * One block of 512 bytes, read with CMD17 (READ_SINGLE_BLOCK) through the
++ * FIFO, no DMA. Exactly like the shim does it on the phone.
++ */
++static int emmc_read_sector(uint32_t lba, uint8_t *dst)
 +{
-+    delay(us);
++	volatile uint32_t *fifo = (volatile uint32_t *)(hc_base + HC_BUF_PORT);
++	uint32_t status, r1;
++	int i;
++
++	if (emmc_wait_idle())
++		return -1;
++
++	wr16(hc_base + HC_BLK_SIZE, 0x0200);	/* 512 bytes */
++	wr16(hc_base + HC_BLK_COUNT, 1);
++	wr16(hc_base + HC_TRANSFER, MODE_READ);
++	wr32(hc_base + HC_INT_STATUS, 0xffffffffu);
++	wr32(hc_base + HC_ARGUMENT, lba);
++	wr16(hc_base + HC_COMMAND,
++	    (uint16_t)(((uint16_t)CMD_READ_SINGLE << 8) | CFG_CMD17));
++
++	status = emmc_wait_status(INT_CMD_DONE, EMMC_CMD_TIMEOUT);
++	if (!status)
++		return -2;
++	if (status & INT_ERR_MASK) {
++		emmc_last_int_status = status;
++		return -3;
++	}
++	r1 = rd32(hc_base + HC_RESPONSE);
++	wr32(hc_base + HC_INT_STATUS, INT_CMD_DONE);
++	if (r1 & R1_FATAL)
++		return -4;
++
++	for (i = 0; i < 128; i++) {
++		uint32_t v;
++		uint32_t spins = 0;
++
++		while (!(rd32(hc_base + HC_PRESENT) & PS_DATA_AVAILABLE)) {
++			uint32_t st = rd32(hc_base + HC_INT_STATUS);
++
++			if (st & INT_ERR_MASK) {
++				emmc_last_int_status = st;
++				return -5;
++			}
++			if (++spins > EMMC_FIFO_TIMEOUT)
++				return -6;
++			delay(1);
++		}
++		/* Every read of the buffer port pops four bytes. */
++		v = fifo[0];
++		dst[i * 4 + 0] = (uint8_t)v;
++		dst[i * 4 + 1] = (uint8_t)(v >> 8);
++		dst[i * 4 + 2] = (uint8_t)(v >> 16);
++		dst[i * 4 + 3] = (uint8_t)(v >> 24);
++	}
++
++	status = emmc_wait_status(INT_XFER_DONE, EMMC_XFER_TIMEOUT);
++	if (!status)
++		return -7;
++	if (status & INT_ERR_MASK) {
++		emmc_last_int_status = status;
++		return -8;
++	}
++	wr32(hc_base + HC_INT_STATUS, INT_XFER_DONE);
++
++	return 0;
 +}
 +
-+static int emmc_cmd(uint8_t cmd, uint32_t arg, uint8_t resp_type, uint32_t *resp)
++/*
++ * The clock of the card, in divided clock mode with a 10 bit divider, the
++ * way the LK does it (0x0f912ec4). The base clock comes from the
++ * capabilities register.
++ */
++static int emmc_set_clock(uint32_t base_hz, uint32_t target_hz)
 +{
-+    uint32_t reg;
-+    int timeout = 100000;
-+    uintptr_t hc = hc_base;
-+    
-+    /* Wait for cmd inhibit */
-+    while ((rd32(hc + HC_PRESENT) & PS_CMD_INHIBIT) && timeout--) {
-+        emmc_delay(1);
-+    }
-+    if (timeout <= 0) {
-+        printf("emmc: CMD%d cmd inhibit timeout\n", cmd);
-+        return -1;
-+    }
-+    
-+    /* Clear interrupts */
-+    wr32(hc + HC_INT_STATUS, 0xFFFFFFFF);
-+    
-+    /* Set argument */
-+    wr32(hc + HC_ARGUMENT, arg);
-+    
-+    /* Set command: resp type + enable */
-+    reg = (cmd & 0x3F) | (1u << 8);  /* Command index check enable */
-+    switch (resp_type) {
-+        case CMD_RESP_NONE:
-+            break;
-+        case CMD_RESP_R1:
-+        case CMD_RESP_R1B:
-+            reg |= (1u << 6);  /* CRC check */
-+            reg |= (1u << 7);  /* Index check */
-+            break;
-+        case CMD_RESP_R2:
-+            reg |= (1u << 6);  /* CRC check */
-+            break;
-+    }
-+    wr32(hc + HC_COMMAND, reg);
-+    
-+    /* Wait for complete */
-+    timeout = 100000;
-+    while (!(rd32(hc + HC_INT_STATUS) & INT_CMD_COMPLETE) && timeout--) {
-+        emmc_delay(1);
-+    }
-+    
-+    if (timeout <= 0) {
-+        printf("emmc: CMD%d timeout\n", cmd);
-+        return -1;
-+    }
-+    
-+    /* Check for error */
-+    if (rd32(hc + HC_INT_STATUS) & INT_ERROR) {
-+        printf("emmc: CMD%d error, status=0x%x\n", cmd, rd32(hc + HC_INT_STATUS));
-+        return -1;
-+    }
-+    
-+    /* Clear interrupt */
-+    wr32(hc + HC_INT_STATUS, INT_CMD_COMPLETE);
-+    
-+    /* Read response */
-+    if (resp && resp_type != CMD_RESP_NONE) {
-+        resp[0] = rd32(hc + HC_RESPONSE);
-+        if (resp_type == CMD_RESP_R2) {
-+            resp[1] = rd32(hc + HC_RESPONSE + 4);
-+            resp[2] = rd32(hc + HC_RESPONSE + 8);
-+            resp[3] = rd32(hc + HC_RESPONSE + 12);
-+        }
-+    }
-+    
-+    return 0;
++	uint32_t clk;
++	uint32_t i;
++
++	if (base_hz <= target_hz) {
++		clk = 1;
++	} else {
++		uint32_t d = 2, n;
++
++		for (; d < 0x7fe; d += 2)
++			if (target_hz >= base_hz / d)
++				break;
++		if (d >= 0x7fe)
++			return -1;
++		n = d >> 1;
++		clk = ((n & 0xffu) << 8) | (((n >> 8) & 3u) << 6) | 1u;
++	}
++
++	wr16(hc_base + HC_CLK_CTRL, (uint16_t)clk);
++	for (i = 0; i < 200; i++) {
++		if (rd16(hc_base + HC_CLK_CTRL) & 2u)
++			break;
++		delay(100);
++	}
++	if (!(rd16(hc_base + HC_CLK_CTRL) & 2u))
++		return -2;
++	/* The SD clock comes out of the divider. */
++	wr16(hc_base + HC_CLK_CTRL, (uint16_t)(clk | 4u));
++	return 0;
++}
++
++/*
++ * The clock path of the MCI. The LK leaves the controller on the HS400
++ * path (MCLK_SEL = 3, the CDC input on HS400) and then puts the card to
++ * sleep; in that state the identification clock never reaches the card.
++ * The working Linux driver puts both back to the default before it talks
++ * to a card that is not in HS400, and so does this driver.
++ */
++static void emmc_legacy_clock_path(void)
++{
++	uint32_t vs = rd32(hc_base + HC_VENDOR_SPEC);
++
++	vs = (vs & ~(3u << 8)) | (2u << 8);	/* MCLK_SEL = free running MCLK */
++	vs &= ~(1u << 18);			/* SELECT_IN_EN off */
++	vs &= ~(7u << 19);			/* SELECT_IN = default */
++	vs &= ~(1u << 1);			/* CLK_PWRSAVE off: no self gating */
++	wr32(hc_base + HC_VENDOR_SPEC, vs);
++}
++
++/*
++ * The card identification: CMD0, CMD1 until the OCR says the card is up,
++ * CMD2 for the CID, CMD3 for the address, CMD7 to select it and CMD16 for
++ * the block length. The flag values are the ones measured on the phone.
++ */
++static int emmc_identify(void)
++{
++	uint32_t rsp = 0, cid[4];
++	uint32_t i;
++
++	/* CMD0: the card goes back to the idle state. */
++	if (emmc_cmd(CMD_GO_IDLE, 0, CFG_CMD0, NULL)) {
++		printf("emmc: CMD0 failed\n");
++		return -1;
++	}
++	delay(1000);
++
++	/* CMD1: the card powers up and answers with its OCR. */
++	for (i = 0; i < 1000; i++) {
++		if (emmc_cmd(CMD_SEND_OP_COND, OCR_VALUE, CFG_CMD1, &rsp)) {
++			printf("emmc: CMD1 failed\n");
++			return -1;
++		}
++		if (rsp & OCR_BUSY)
++			break;
++		delay(1000);
++	}
++	if (i >= 1000) {
++		printf("emmc: CMD1 never completed\n");
++		return -1;
++	}
++
++	/*
++	 * CMD2: the CID, a 136 bit answer. The card refuses this command
++	 * when the index check is asked for, so the flags are the ones that
++	 * worked on the phone (136 bit + CRC7).
++	 */
++	if (emmc_cmd(CMD_ALL_SEND_CID, 0, CFG_CMD2, cid)) {
++		printf("emmc: CMD2 failed (int=0x%x)\n", emmc_last_int_status);
++		return -1;
++	}
++	printf("emmc: CID %08x %08x %08x %08x\n",
++	    cid[0], cid[1], cid[2], cid[3]);
++
++	/* CMD3: the host gives the card its relative address. */
++	if (emmc_cmd(CMD_SET_REL_ADDR, emmc_rca << 16, CFG_CMD3, &rsp)) {
++		printf("emmc: CMD3 failed\n");
++		return -1;
++	}
++
++	/* CMD7: the card is selected and goes to the transfer state. */
++	if (emmc_cmd(CMD_SELECT_CARD, emmc_rca << 16, CFG_CMD7, &rsp)) {
++		printf("emmc: CMD7 failed\n");
++		return -1;
++	}
++
++	/* CMD16: the block length, 512 bytes. */
++	if (emmc_cmd(CMD_SET_BLOCKLEN, 512, CFG_CMD16, &rsp)) {
++		printf("emmc: CMD16 failed\n");
++		return -1;
++	}
++	if (R1_STATE(rsp) != CARD_STATE_TRAN) {
++		printf("emmc: the card is not in the transfer state (R1=0x%08x)\n", rsp);
++		return -1;
++	}
++
++	return 0;
++}
++
++/* Does the sector hold the signature of an HFS+ volume header? */
++static int emmc_is_hfs_header(const uint8_t *sector)
++{
++	if (sector[0] != 'H' || sector[1] != 'X')
++		return 0;
++	if (sector[2] != 0 || sector[3] != 5)
++		return 0;
++	return 1;
++}
++
++/* The name of a GPT entry is UTF-16LE. */
++static int emmc_gpt_name_is(const uint8_t *entry, const char *ascii)
++{
++	int i;
++
++	for (i = 0; ascii[i] != '\0'; i++) {
++		if (entry[GPT_NAME_OFFSET + i * 2] != (uint8_t)ascii[i])
++			return 0;
++		if (entry[GPT_NAME_OFFSET + i * 2 + 1] != 0)
++			return 0;
++	}
++	return 1;
++}
++
++/*
++ * The partition that holds the iOS root filesystem. The GPT is read from
++ * the card, and the partition is the one named "ios"; a partition is
++ * accepted when its offset 1024 holds the signature of an HFS+ volume
++ * header, so the answer does not depend on the name alone.
++ */
++static int emmc_find_partition(void)
++{
++	uint8_t sector[512];
++	uint8_t header[512];
++	uint64_t entries_lba;
++	uint32_t num_entries, entry_size;
++	uint32_t sec, e;
++	int have_by_name = 0;
++	uint64_t by_name_first = 0, by_name_blocks = 0;
++
++	if (emmc_read_sector((uint32_t)GPT_HEADER_LBA, header))
++		return -1;
++	if (memcmp(header, GPT_SIGNATURE, 8) != 0) {
++		printf("emmc: no GPT signature at LBA %llu\n",
++		    (unsigned long long)GPT_HEADER_LBA);
++		return -1;
++	}
++
++	entries_lba = le64(&header[72]);
++	num_entries = le32(&header[80]);
++	entry_size = le32(&header[84]);
++	if (entries_lba < GPT_ENTRY_ARRAY_LBA || entries_lba > 64) {
++		printf("emmc: the GPT points to a bad entry array (LBA %llu)\n",
++		    (unsigned long long)entries_lba);
++		return -1;
++	}
++	if (num_entries == 0 || num_entries > 512 || entry_size < 128 ||
++	    entry_size > 512) {
++		printf("emmc: the GPT entry geometry is wrong (%u x %u)\n",
++		    num_entries, entry_size);
++		return -1;
++	}
++
++	for (sec = 0; sec < GPT_ENTRY_SECTORS; sec++) {
++		uint32_t per_sector = 512 / entry_size;
++
++		if (emmc_read_sector((uint32_t)(entries_lba + sec), sector))
++			return -1;
++
++		for (e = 0; e < per_sector; e++) {
++			const uint8_t *entry = &sector[e * entry_size];
++			uint64_t first, last;
++			uint8_t probe[512];
++
++			if (sec * per_sector + e >= num_entries)
++				break;
++			first = le64(&entry[GPT_FIRST_LBA_OFF]);
++			last = le64(&entry[GPT_LAST_LBA_OFF]);
++			if (last <= first)
++				continue;
++
++			/* The volume header of an HFS+ volume is at 1024. */
++			if (emmc_read_sector((uint32_t)(first + 2), probe))
++				continue;
++			if (!emmc_is_hfs_header(probe))
++				continue;
++
++			if (emmc_gpt_name_is(entry, "ios")) {
++				emmc_part_first = first;
++				emmc_part_blocks = last - first + 1;
++				printf("emmc: the ios partition is LBA %llu..%llu\n",
++				    (unsigned long long)first,
++				    (unsigned long long)last);
++				return 0;
++			}
++			if (!have_by_name) {
++				have_by_name = 1;
++				by_name_first = first;
++				by_name_blocks = last - first + 1;
++			}
++		}
++	}
++
++	if (have_by_name) {
++		emmc_part_first = by_name_first;
++		emmc_part_blocks = by_name_blocks;
++		printf("emmc: the partition with the HFS+ volume is LBA %llu..%llu\n",
++		    (unsigned long long)by_name_first,
++		    (unsigned long long)(by_name_first + by_name_blocks - 1));
++		return 0;
++	}
++
++	/*
++	 * No GPT, or no partition with a volume in it: fall back to the
++	 * partition the volume was written to, but only if the signature is
++	 * really there.
++	 */
++	if (emmc_read_sector((uint32_t)(EMMC_FALLBACK_FIRST_LBA + 2), sector))
++		return -1;
++	if (!emmc_is_hfs_header(sector)) {
++		printf("emmc: no HFS+ volume found on the card\n");
++		return -1;
++	}
++	emmc_part_first = EMMC_FALLBACK_FIRST_LBA;
++	emmc_part_blocks = EMMC_FALLBACK_BLOCKS;
++	printf("emmc: falling back to LBA %llu for the root filesystem\n",
++	    (unsigned long long)EMMC_FALLBACK_FIRST_LBA);
++	return 0;
 +}
 +
 +static int emmc_init(void)
 +{
-+    uint32_t resp[4];
-+    uint32_t ocr;
-+    int i;
-+    kern_return_t kr;
-+    
-+    printf("emmc: initializing...\n");
-+    
-+    /* Map registers - use pmap_map instead of ml_io_map */
-+    hc_base = ml_io_map(HC_BASE, HC_SIZE);
-+    if (!hc_base) {
-+        printf("emmc: failed to map HC registers\n");
-+        return -1;
-+    }
-+    
-+    /* Allocate bounce buffer - use kernel_memory_allocate */
-+    kr = kernel_memory_allocate(kernel_map, &emmc_buffer, EMMC_BUFFER_SIZE, 0, KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_NONE);
-+    if (kr != KERN_SUCCESS) {
-+        printf("emmc: failed to allocate buffer\n");
-+        return -1;
-+    }
-+    
-+    /* Card identification sequence */
-+    /* CMD0: GO_IDLE_STATE */
-+    if (emmc_cmd(CMD_GO_IDLE, 0, CMD_RESP_NONE, NULL) != 0) {
-+        printf("emmc: CMD0 failed\n");
-+        return -1;
-+    }
-+    emmc_delay(1000);
-+    
-+    /* CMD1: SEND_OP_COND (polling for busy) */
-+    for (i = 0; i < 1000; i++) {
-+        ocr = 0x40FF8000;  /* 3.3V, high capacity */
-+        if (emmc_cmd(CMD_SEND_OP_COND, ocr, CMD_RESP_R3, &resp[0]) != 0)
-+            break;
-+        if (resp[0] & 0x80000000) {  /* Power up complete */
-+            break;
-+        }
-+        emmc_delay(1000);
-+    }
-+    
-+    if (i >= 1000) {
-+        printf("emmc: CMD1 failed (could not get OCR)\n");
-+        return -1;
-+    }
-+    
-+    /* CMD2: SEND_CID */
-+    if (emmc_cmd(CMD_ALL_SEND_CID, 0, CMD_RESP_R2, resp) != 0) {
-+        printf("emmc: CMD2 failed\n");
-+        return -1;
-+    }
-+    printf("emmc: CID = %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
-+    
-+    /* CMD3: SET_RELATIVE_ADDR */
-+    card_rca = 2;  /* Use RCA 2, same as LK */
-+    if (emmc_cmd(CMD_SET_RELATIVE_ADDR, (uint32_t)card_rca << 16, CMD_RESP_R1, resp) != 0) {
-+        printf("emmc: CMD3 failed\n");
-+        return -1;
-+    }
-+    
-+    /* CMD7: SELECT_CARD */
-+    if (emmc_cmd(CMD_SELECT_CARD, (uint32_t)card_rca << 16, CMD_RESP_R1B, resp) != 0) {
-+        printf("emmc: CMD7 failed\n");
-+        return -1;
-+    }
-+    
-+    /* CMD16: SET_BLOCKLEN (512 bytes) */
-+    if (emmc_cmd(CMD_SET_BLOCKLEN, 512, CMD_RESP_R1, resp) != 0) {
-+        printf("emmc: CMD16 failed\n");
-+        return -1;
-+    }
-+    
-+    emmc_initialized = 1;
-+    printf("emmc: initialized, RCA=%d\n", card_rca);
-+    return 0;
++	uint32_t caps, base_mhz;
++	int rc;
++
++	printf("emmc: initializing...\n");
++
++	hc_base = (vm_address_t)ml_io_map(HC_BASE, HC_SIZE);
++	if (!hc_base) {
++		printf("emmc: failed to map the host registers\n");
++		return -1;
++	}
++	core_base = (vm_address_t)ml_io_map(CORE_BASE, CORE_SIZE);
++	if (!core_base) {
++		printf("emmc: failed to map the core registers\n");
++		return -1;
++	}
++
++	/*
++	 * The LK switches the HC mode off before it jumps to the kernel.
++	 * The reverse operation is not only "set the bit again": it clears
++	 * the bit, pulses the core reset, waits a millisecond, writes the
++	 * register and sets FF_CLK_SW_RST_DIS. The core reset is what
++	 * re-synchronises the SDHCI side with the card. It resets the MCI,
++	 * not the host controller, so the CDC and the DLL calibration that
++	 * the LK set up are left alone.
++	 */
++	if (!(rd32(core_base + CORE_HC_MODE) & HC_MODE_EN)) {
++		wr32(core_base + CORE_HC_MODE,
++		    rd32(core_base + CORE_HC_MODE) & ~HC_MODE_EN);
++		wr32(core_base + CORE_POWER, rd32(core_base + CORE_POWER) | (1u << 7));
++		delay(1000);
++		wr32(core_base + CORE_HC_MODE, HC_MODE_EN);
++		wr32(core_base + CORE_HC_MODE,
++		    rd32(core_base + CORE_HC_MODE) | FF_CLK_SW_RST_DIS);
++	}
++
++	caps = rd32(hc_base + HC_CAPS1);
++	if (caps == 0 || caps == 0xffffffffu) {
++		printf("emmc: the capability register reads 0x%x\n", caps);
++		return -1;
++	}
++	base_mhz = (caps >> 8) & 0xffu;
++	if (base_mhz == 0)
++		base_mhz = 200;
++	printf("emmc: base clock %u MHz\n", base_mhz);
++
++	/* The status bits that are polled have to be latched. */
++	wr32(hc_base + HC_INT_ENABLE,
++	    rd32(hc_base + HC_INT_ENABLE) | 0x03ff00ffu);
++	/* No interrupt is raised: everything is polled. */
++	wr32(hc_base + HC_INT_SIGNAL, 0);
++
++	/* The bus power comes up at 3.3 V, the way the LK does it. */
++	wr8(hc_base + HC_POWER, 0x0f);
++	/* One bit, legacy speed. */
++	wr8(hc_base + HC_CTRL1, rd8(hc_base + HC_CTRL1) & ~0x26u);
++	wr8(hc_base + HC_TIMEOUT, 0x0f);
++
++	emmc_legacy_clock_path();
++
++	/* The identification wants the 400 kHz clock. */
++	rc = emmc_set_clock(base_mhz * 1000000u, 400000);
++	if (rc) {
++		printf("emmc: cannot set the 400 kHz clock (%d)\n", rc);
++		return -1;
++	}
++
++	if (emmc_identify())
++		return -1;
++
++	/*
++	 * The card is identified and in the transfer state. Now it can run
++	 * at 25 MHz, which is the fastest the legacy timing allows on one
++	 * bit. At 400 kHz the 128 MB catalog of the volume would take three
++	 * quarters of an hour.
++	 */
++	rc = emmc_set_clock(base_mhz * 1000000u, 25000000);
++	if (rc)
++		printf("emmc: the 25 MHz clock failed (%d), staying at 400 kHz\n", rc);
++	else
++		printf("emmc: the card runs at 25 MHz\n");
++
++	if (emmc_find_partition())
++		return -1;
++
++	emmc_initialized = 1;
++	return 0;
 +}
 +
-+static int emmc_read_block(uint32_t lba, void *buf)
-+{
-+    uint32_t resp[4];
-+    uint32_t reg;
-+    int timeout;
-+    uintptr_t hc = hc_base;
-+    
-+    /* Set block count */
-+    wr16(hc + HC_BLOCK_COUNT, 1);
-+    
-+    /* Set block size */
-+    wr16(hc + HC_BLOCK_SIZE, 512);
-+    
-+    /* Set argument (single block read) */
-+    wr32(hc + HC_ARGUMENT, lba);
-+    
-+    /* Wait for data inhibit */
-+    timeout = 100000;
-+    while ((rd32(hc + HC_PRESENT) & PS_DAT_INHIBIT) && timeout--) {
-+        emmc_delay(1);
-+    }
-+    if (timeout <= 0) {
-+        printf("emmc: read data inhibit timeout\n");
-+        return -1;
-+    }
-+    
-+    /* Clear interrupts */
-+    wr32(hc + HC_INT_STATUS, 0xFFFFFFFF);
-+    
-+    /* Send CMD17: READ_SINGLE_BLOCK */
-+    reg = CMD_READ_SINGLE | (1u << 8);  /* Enable */
-+    wr32(hc + HC_COMMAND, reg);
-+    
-+    /* Wait for data complete */
-+    timeout = 100000;
-+    while (!(rd32(hc + HC_INT_STATUS) & (INT_DATA_COMPLETE | INT_ERROR)) && timeout--) {
-+        emmc_delay(1);
-+    }
-+    
-+    if (timeout <= 0 || (rd32(hc + HC_INT_STATUS) & INT_ERROR)) {
-+        printf("emmc: read timeout/error, status=0x%x\n", rd32(hc + HC_INT_STATUS));
-+        return -1;
-+    }
-+    
-+    /* Read data from buffer port - 512 bytes */
-+    volatile uint32_t *buf32 = (volatile uint32_t *)(hc + HC_BUFFER);
-+    uint32_t *dst = (uint32_t *)buf;
-+    for (int i = 0; i < 128; i++) {  /* 512 bytes / 4 */
-+        dst[i] = buf32[i];
-+    }
-+    
-+    /* Clear interrupt */
-+    wr32(hc + HC_INT_STATUS, INT_DATA_COMPLETE);
-+    
-+    return 0;
-+}
-+
-+/* BSD device operations */
++/*
++ * The block device interface. The root of XNU is a block device: the file
++ * system reads it through the buffer cache, which calls the strategy
++ * function with the block number and the byte count of the request.
++ */
 +static int emmc_open(dev_t dev, int flags, int fmt, proc_t p)
 +{
-+    if (!emmc_initialized) {
-+        if (emmc_init() != 0) {
-+            return ENXIO;
-+        }
-+    }
-+    return 0;
++	if (!emmc_initialized) {
++		if (emmc_init())
++			return ENXIO;
++	}
++	return 0;
 +}
 +
 +static int emmc_close(dev_t dev, int flags, int fmt, proc_t p)
 +{
-+    return 0;
++	return 0;
 +}
 +
-+static int emmc_read(dev_t dev, struct uio *uio, int ioflag)
++static int emmc_size(dev_t dev)
 +{
-+    uint64_t offset = uio->uio_offset;
-+    user_ssize_t n = uio->uio_resid_64;
-+    int error = 0;
-+    
-+    if (!emmc_initialized)
-+        return ENXIO;
-+    
-+    /* Read in at most EMMC_BUFFER_SIZE chunks */
-+    while (n > 0 && !error) {
-+        int chunk = (n > EMMC_BUFFER_SIZE) ? EMMC_BUFFER_SIZE : n;
-+        uint32_t lba = offset / 512;
-+        int blocks = chunk / 512;
-+        
-+        if (blocks == 1) {
-+            error = emmc_read_block(lba, (void *)emmc_buffer);
-+        } else {
-+            /* Multiple blocks - read one at a time for simplicity */
-+            for (int i = 0; i < blocks && !error; i++) {
-+                error = emmc_read_block(lba + i, (void *)(emmc_buffer + i * 512));
-+            }
-+        }
-+        
-+        if (!error) {
-+            error = uiomove((void *)emmc_buffer, chunk, uio);
-+        }
-+        
-+        offset += chunk;
-+        n -= chunk;
-+    }
-+    
-+    return error;
++	return 512;
 +}
 +
-+static int emmc_write(dev_t dev, struct uio *uio, int ioflag)
++static int emmc_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
 +{
-+    /* Read-only */
-+    return EROFS;
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*((uint32_t *)data) = 512;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*((uint64_t *)data) = emmc_part_blocks;
++		return 0;
++	default:
++		return ENOTTY;
++	}
 +}
 +
-+static struct cdevsw emmc_cdevsw = {
-+    .d_open = emmc_open,
-+    .d_close = emmc_close,
-+    .d_read = emmc_read,
-+    .d_write = emmc_write,
-+    .d_ioctl = enoioctl,
-+    .d_stop = eno_stop,
-+    .d_reset = eno_reset,
-+    .d_ttys = NULL,
-+    .d_select = eno_select,
-+    .d_mmap = eno_mmap,
-+    .d_strategy = eno_strat,
++static void emmc_strategy(struct buf *bp)
++{
++	caddr_t vaddr = NULL;
++	uint32_t count = buf_count(bp);
++	uint64_t lba = buf_blkno(bp);
++	uint32_t off;
++	int error = 0;
++
++	if (!(buf_flags(bp) & B_READ)) {
++		/* The medium is read only. */
++		buf_seterror(bp, EROFS);
++		buf_biodone(bp);
++		return;
++	}
++
++	if (buf_map(bp, &vaddr)) {
++		buf_seterror(bp, EIO);
++		buf_biodone(bp);
++		return;
++	}
++
++	lck_mtx_lock(emmc_lock);
++	for (off = 0; off < count; off += 512) {
++		uint64_t block = lba + off / 512;
++
++		if (emmc_part_blocks && block >= emmc_part_blocks) {
++			error = EINVAL;
++			break;
++		}
++		if (emmc_read_sector((uint32_t)(emmc_part_first + block),
++		    (uint8_t *)vaddr + off)) {
++			printf("emmc: the read of LBA %llu failed (int=0x%x)\n",
++			    (unsigned long long)(emmc_part_first + block),
++			    emmc_last_int_status);
++			error = EIO;
++			break;
++		}
++	}
++	lck_mtx_unlock(emmc_lock);
++
++	buf_unmap(bp);
++
++	if (error)
++		buf_seterror(bp, error);
++	else
++		buf_setresid(bp, 0);
++	buf_biodone(bp);
++}
++
++static const struct bdevsw emmc_bdevsw = {
++	.d_open     = emmc_open,
++	.d_close    = emmc_close,
++	.d_strategy = emmc_strategy,
++	.d_ioctl    = emmc_ioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = emmc_size,
++	.d_type     = D_DISK,
 +};
 +
-+static int emmc_console = 0;
-+
-+static void emmc_cdevsw_init(void)
-+{
-+    dev_t dev = makedev(12, 0);  /* Major number 12 for disk */
-+    devfs_make_node(dev, DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0660, "emmc0");
-+    printf("emmc: devfs node created at /dev/emmc0\n");
-+}
-+
-+/* Called from IOKitBSDInit for rd=emmc0 */
++/* Called from IOKitBSDInit for rd=emmc0. */
 +int sweet_emmc_rootdev(dev_t *dev)
 +{
-+    if (!emmc_initialized) {
-+        if (emmc_init() != 0) {
-+            printf("emmc: initialization failed\n");
-+            return ENXIO;
-+        }
-+    }
-+    
-+    if (!emmc_console) {
-+        emmc_cdevsw_init();
-+        emmc_console = 1;
-+    }
-+    
-+    *dev = makedev(12, 0);
-+    return 0;
-+}
++	if (!emmc_initialized) {
++		if (emmc_init())
++			return ENXIO;
++	}
 +
-+#endif /* ARM64_BOARD_CONFIG_SWEET */
-+#endif /* ARM64_BOARD_CONFIG_SWEET */
++	if (emmc_major < 0) {
++		emmc_major = bdevsw_add(-1, &emmc_bdevsw);
++		if (emmc_major < 0) {
++			printf("emmc: no major number for the block device\n");
++			return ENXIO;
++		}
++	}
++	if (emmc_lock == NULL) {
++		lck_mtx_alloc_init(&emmc_lock, NULL, NULL);
++		if (emmc_lock == NULL) {
++			printf("emmc: the mutex could not be allocated\n");
++			return ENXIO;
++		}
++	}
 +
-+#endif /* ARM64_BOARD_CONFIG_SWEET */
-+    
-+    *dev = makedev(12, 0);
-+    return 0;
++	if (emmc_node == NULL) {
++		emmc_node = devfs_make_node(makedev(emmc_major, 0), DEVFS_BLOCK,
++		    UID_ROOT, GID_OPERATOR, 0660, "emmc0");
++		if (emmc_node == NULL) {
++			printf("emmc: the device node could not be created\n");
++			return ENXIO;
++		}
++	}
++
++	*dev = makedev(emmc_major, 0);
++	return 0;
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
