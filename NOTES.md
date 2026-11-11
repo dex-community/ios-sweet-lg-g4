@@ -3736,3 +3736,53 @@ marcatori, cioe' molto presto.
 - run `43072646908` fallito (mio override xcconfig, file non esistente nello step) → corretto
 - run `43073257684` **verde** ma 6 LSE ancora nel firehose (override xcconfig non applicato)
 - run `43075706641` in corso (firehose solo arm64 + `-march=armv8-a+crypto`)
+
+## 2026-11-11 (serale) — kernel 0 LSE, build e boot
+
+### FACT 26 — `-march` NON disattiva LSE, serve `-mcpu`
+- Il triple `arm64-apple-macos15.0` implica `+lse` (ogni Apple silicon ha
+  LSE). `-march=armv8-a+crypto` da solo **non** lo toglie.
+- Verifica locale:
+  - `-march=armv8-a+crypto` → `ldaddal` presente (LSE=1)
+  - `-mcpu=cortex-a53+crypto` → 0 LSE, `ldaxr/stlxr`
+- `-mno-lse` non esiste per clang/AArch64 (`unknown argument`).
+- In xcconfig `$(inherited)` non esiste (è roba di make): va riscritto
+  l'elenco completo dei flag.
+
+### FACT 27 — Regex LSE: attenzione alle varianti
+- `\bldadd\b` NON matcha `ldaddal`/`ldaddh`/`ldaddl`/`casal`.
+- Regex corretta: `\b(casa|casp|ldadd|ldclr|ldeor|ldset|swp)[a-z]*\b`.
+- Con la regex sbagliata il kernel sembrava pulito (0 LSE) mentre aveva
+  8 istruzioni LSE.
+
+### FACT 28 — Run 43080427388: kernel VERDE, 0 LSE
+- `file` → Mach-O 64-bit executable arm64
+- LSE = 0, LL/SC = 2226
+- `libfirehose_kernel.a`: slice arm64 only, `-mcpu=cortex-a53+crypto`
+  (le slice x86_64/arm64e non servono al kernel SWEET)
+- Run precedenti e loro esito:
+  | run | esito | causa |
+  | --- | --- | --- |
+  | 43065985813 | fallito | LSE `casa` in commpage |
+  | 43067814044 | verde | kernel 0 LSE, ma 8 LSE nel firehose |
+  | 43072646908 | fallito | il mio override xcconfig puntava a un file inesistente |
+  | 43073257684 | verde | override xcconfig non applicato (`$(inherited)`) |
+  | 43075706641 | verde | `-march` non bastava (FACT 26) |
+  | 43080157946 | fallito | il mio `grep` di verifica cercava la flag vecchia |
+  | 43080427388 | **verde** | LSE=0 |
+
+### FACT 29 — Boot sul G4 con il kernel nuovo
+- `tools/build-g4-image.sh 43080427388 g4` → `shim/out/shim-boot-g4.img`
+  (sha256 `f517639e95cd768e3a9c69016f798306ee9b197831e35cc955c45f57b2eb7b9c`)
+- `fastboot boot` (nessun flash): lo shim carica 10 segmenti e salta a XNU
+  → `JUMP 00000000814A8488` (PA; VA `0xfffffe00074a8488`).
+- Il telefono torna in recovery (watchdog + `LK_RECOVERY_MODE`, ~60 s).
+- I ring di XNU in RAM (`sweet_early_buf` PA `0x81c46dbc`, console ring)
+  risultano **vuoti**: la recovery ha già riusato la RAM. Per leggerli va
+  fatto subito dopo il crash, non dopo il riavvio in recovery.
+- Il pstore (`/sys/fs/pstore/console-ramoops-0`) contiene il boot Android
+  + il log dello shim: è la via più semplice per vedere dove siamo arrivati.
+
+### Documentazione
+- `docs/LSE-PAN-FIX-2026-11-11.md`: raccolta completa (problema, patch,
+  pre-test locale, procedura step-by-step, check 4, stato).
