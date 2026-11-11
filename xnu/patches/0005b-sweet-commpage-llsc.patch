@@ -1,0 +1,36 @@
+diff --git a/osfmk/arm/commpage/commpage_asm.s b/osfmk/arm/commpage/commpage_asm.s
+index da0bbba..69c170d 100644
+--- a/osfmk/arm/commpage/commpage_asm.s
++++ b/osfmk/arm/commpage/commpage_asm.s
+@@ -273,9 +273,12 @@ _pfz_trylock_and_enqueue:
+ 	mov		w11, #1			 // locked value = w11 = 1
+ 
+ 	// Try to grab the lock
+-	casa	w10, w11, [x3]	 // Atomic CAS with acquire barrier
+-	cbz		w10, Ltrylock_enqueue_success
+-
++1:	ldaxr	w10, [x3]	 // LL/SC CAS: LSE (casa) traps on Cortex-A53
++	cbnz	w10, 9f		 // old value != 0 -> failed
++	stlxr	w14, w11, [x3]	 // store locked value if [x3] still 0
++	cbnz	w14, 1b		 // lost arbitration, retry
++	b		Ltrylock_enqueue_success
++9:
+ 	mov		x0, #-1			// Failed
+ 	b Ltrylock_enqueue_exit
+ 
+@@ -323,9 +326,12 @@ _pfz_trylock_and_dequeue:
+ 	mov		w10, wzr		 // unlock value = w10 = 0
+ 	mov		w11, #1			 // locked value = w11 = 1
+ 
+-	casa	w10, w11, [x2]	 // Atomic CAS with acquire barrier
+-	cbz		w10, Ltrylock_dequeue_success
+-
++1:	ldaxr	w10, [x2]	 // LL/SC CAS: LSE (casa) traps on Cortex-A53
++	cbnz	w10, 9f		 // old value != 0 -> failed
++	stlxr	w14, w11, [x2]	 // store locked value if [x2] still 0
++	cbnz	w14, 1b		 // lost arbitration, retry
++	b		Ltrylock_dequeue_success
++9:
+ 	mov		x0, #-1			// Failed
+ 	b Ltrylock_dequeue_exit
+ 
