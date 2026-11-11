@@ -1,0 +1,83 @@
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..a5d104a 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -70,7 +70,16 @@ find_gicr_pe_base()
+ 		}
+ 	}
+ 
+-	panic("%s: cannot find GICR base for core %u", __func__, ml_get_cpu_number(phys_id));
++	/*
++	 * No redistributor frame: the G4 has a GICv2 (qcom,msm-qgic2) with
++	 * no RD base and no TYPER register. There is nothing to wake up and
++	 * nothing to program, so this is not an error. Returning the base
++	 * keeps the caller going; the SGI/PPI block is skipped because the
++	 * window is too small (see pe_init_fiq).
++	 */
++	kprintf("%s: no redistributor frame for core %u (GICR window %lu bytes)\n",
++	    __func__, ml_get_cpu_number(phys_id), (unsigned long)gicr_size);
++	return gicr_base;
+ }
+ 
+ void
+@@ -146,8 +155,13 @@ pe_init_fiq()
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+ 
+-	// Mark this PE to be awake
+-	uint32_t gicr_waker = gicr_read32(GICR_WAKER);
++	// Mark this PE to be awake. The WAKER register is in the
++	// redistributor frame, so there is nothing to do on a board without
++	// one (the G4's GICv2).
++	uint32_t gicr_waker = 0;
++	if (gicr_size >= GICR_SGI_PPI_END) {
++		gicr_waker = gicr_read32(GICR_WAKER);
++	}
+ 	if (gicr_waker & GICR_WAKER_CHILDRENASLEEP) {
+ 		gicr_waker &= ~GICR_WAKER_PROCESSORSLEEP;
+ 
+@@ -171,11 +185,25 @@ pe_init_fiq()
+ 	 * and arrives as an IRQ (see sleh_irq). GICR_IGROUPR0 reads as zero
+ 	 * from the non-secure side even after this write; delivery still works.
+ 	 */
+-	gicr_write32(GICR_IGROUPR0, 0xFFFFFFFF);
+-	for (unsigned int i = 0; i < 32; i += 4) {
+-		gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
++	/*
++	 * The SGI/PPI block lives in the redistributor frame: the group
++	 * register at GICR+0x10080, the enable register at GICR+0x10100. A
++	 * board whose GICR window is smaller than that has no redistributor
++	 * (the G4 has a GICv2, qcom,msm-qgic2), and writing there would
++	 * land outside the mapping and take a data abort. Such a board has
++	 * no SGI/PPI block to program: the bootloader already enabled the
++	 * timer PPI, so only enable the SGI when there is a real frame.
++	 */
++	if (gicr_size >= GICR_SGI_PPI_END) {
++		gicr_write32(GICR_IGROUPR0, 0xFFFFFFFF);
++		for (unsigned int i = 0; i < 32; i += 4) {
++			gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
++		}
++		gicr_write32(GICR_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++	} else {
++		kprintf("SWEET GIC: no redistributor frame (GICR window %lu bytes), "
++		    "skipping the SGI/PPI block\n", (unsigned long)gicr_size);
+ 	}
+-	gicr_write32(GICR_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
+ #else
+ 	// Configure timers and legacy FIQ to be group 0
+ 	gicr_write32(GICR_IGROUPR0, 0x81FFFFFF);
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..a5cc676 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -68,6 +68,10 @@
+ #define GICR_IGROUPR0                           0x10080
+ #define GICR_ISENABLER0                         0x10100
+ #define GICR_IPRIORITYR0                        0x10400
++/* End of the SGI/PPI block (the enable register is at 0x10100). A GICR
++ * window smaller than this has no redistributor frame: the G4 has a
++ * GICv2 (qcom,msm-qgic2) and no SGI/PPI block at all. */
++#define GICR_SGI_PPI_END                        0x10104
+ 
+ #define GICR_TYPER_AFFINITY_VALUE_SHIFT         32
+ #define GICR_TYPER_LAST                         0x10
