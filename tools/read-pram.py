@@ -8,6 +8,7 @@ upper DRAM bank: plain System RAM, which the recovery can read back through
 /dev/mem after the watchdog reboot.
 
     tools/read-pram.py PANIC_PA PANIC_SIZE [OUT.bin]
+    tools/read-pram.py --marks
 
 The address and the size must be the ones in the device tree:
 
@@ -80,7 +81,46 @@ def decode(blob):
     }
 
 
+def show_marks(argv):
+    """Decode the page the boot markers of patch 0082 are written to."""
+    base = 0x90003000
+    blob = read_pa(base, 0x1000)
+    names = {
+        0x00: "_start reached",
+        0x40: "bootstrap page tables built",
+        0x80: "first fetch with the MMU on",
+        0xc0: "returning into arm_init",
+    }
+    print(f"boot markers at {base:#x}:")
+    last = 0
+    for off, name in names.items():
+        val = struct.unpack_from("<I", blob, off)[0]
+        ok = val == 0x5EED0000 | (off // 0x40 + 1)
+        print(f"  +{off:#04x}  {val:#010x}  {'OK ' if ok else '--- '} {name}")
+        if ok:
+            last = off
+    if last:
+        n = last // 0x40 + 1
+        print(f"  => the kernel got as far as marker {n}: {names[last]}")
+    else:
+        print("  => no marker: _start never ran, the jump itself is wrong")
+
+    info = base + 0x100
+    phys_base, mem_size, tcr, ttbr0, sctlr = struct.unpack_from("<5Q", blob, 0x100)
+    print(f"info at {info:#x} (written with marker 2):")
+    print(f"  phys_base {phys_base:#x}  mem_size {mem_size:#x}"
+          f"  end {phys_base + mem_size:#x}")
+    print(f"  TCR_EL1   {tcr:#018x}")
+    print(f"  TTBR0_EL1 {ttbr0:#018x}")
+    print(f"  SCTLR_EL1 {sctlr:#018x}")
+    if not phys_base and not mem_size:
+        print("  (all zero: the kernel died before marker 2)")
+    return 0
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[1] == "--marks":
+        return show_marks(argv)
     if len(argv) < 3:
         sys.exit(__doc__)
     pa = int(argv[1], 0)

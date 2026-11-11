@@ -3836,3 +3836,59 @@ marcatori, cioe' molto presto.
   0x20000000) invece di quello SWEET.
 - `tools/read-xnu-ram.py` legge dalla RAM del telefono il panic region
   (magic "DEED") e il buffer fbcon dopo un crash.
+
+## 2026-11-11 (notte 2) — il canale di lettura e i boot marker (FACT 33-35)
+
+### FACT 33 — /dev/mem: due indirizzi "RAM" che uccidono la recovery
+- `persistent_ram` `0x0ff00000-0x0ffdffff` è elencata in `/proc/iomem` come
+  RAM, ma una `dd if=/dev/mem` lì **non restituisce niente** e pochi istanti
+  dopo la recovery muore (schermo nero, USB muto, serve staccare la batteria).
+- Le due morti precedenti erano **errori miei di aritmetica** sullo `skip` di
+  `dd`: `0x08184600` (buco tra `0x06400000` e `0x0f400000`) e `0x03fc0000`
+  preso per `0x0ff00000`. Lo `skip` va **sempre** calcolato da un tool.
+- `tools/read-pram.py` ora rifiuta qualunque PA fuori dalle finestre RAM
+  leggibili (la lista `G4_RAM` **non** contiene più `persistent_ram`), stampa
+  un'anteprima esadecimale e cerca `SWEET EARLY` / `G4SHIM` / `DEED`.
+
+### FACT 34 — la canary prova che la pagina sopravvive, il buffer early no
+- Prima del salto a XNU lo shim scrive `0xCA11CA00+j` (Device,
+  non-cacheable) in tre pagine: `0x81c46000` (pagina di `sweet_early_buf`),
+  `0x90000000`, `0xdff00000`.
+- Dopo il reboot in recovery (t≈21 s, telefono **vivo e fermo**) tutte e tre
+  le canary sono **intatte** → la recovery non riusa quelle pagine.
+- Nella pagina `0x81c46000` però **non c'è nessun "SWEET EARLY"**.
+- Conclusione: il buffer early è scritto con MMU on e cache **write-back**, e
+  un reset del watchdog **non fa il clean della cache**. Il testo può non
+  essere mai arrivato in RAM, quindi "buffer vuoto" **non** prova che XNU non
+  sia arrivato in `arm_init`. Serve un canale che si scriva da solo in RAM.
+
+### FACT 35 — il panic log del G4 va in RAM normale, non in persistent_ram
+- `check_for_panic_log()` usa `ml_io_map_wcomb()`, quindi `/pram` può stare a
+  qualunque PA; ma un PA illeggibile da `/dev/mem` (FACT 33) è inutilizzabile
+  anche per XNU: qualunque accesso blocca il bus.
+- `/pram` spostato da `0x0ff40000` (persistent_ram) a **`0xc0000000`**
+  (`tools/mkadt.py: G4_PANIC_LOG_PA`, 256 KiB), dentro il banco alto
+  `0x80000000-0xdfffffff`, che è RAM normale e leggibile.
+- Non viene sottratto da `mem_size` (sottrarlo dalla cima è ciò che faceva
+  morire il kernel dopo `kdp_core zlib memory`): il commento nel file dice
+  quando andrà ritagliato per bene.
+
+### Canale dei boot marker (patch 0082)
+- `xnu/patches/0082-sweet-boot-markers.patch` scrive 32 bit + `dc civac` in
+  `0x90003000` (pagina del banco alto, dentro la mappa bootstrap V=P
+  `0x80000000..0xdff00000`) a quattro punti di `osfmk/arm64/start.s`:
+  - `+0x00` `0x5EED0001` `_start` raggiunto
+  - `+0x40` `0x5EED0002` tabelle bootstrap costruite (MMU ancora off)
+  - `+0x80` `0x5EED0003` primo fetch con `SCTLR_EL1.M=1` sopravvissuto
+  - `+0xc0` `0x5EED0004` ritorno a `arm_init` imminente
+- A `0x90003100`: `phys_base`, `mem_size`, `TCR_EL1`, `TTBR0_EL1`,
+  `SCTLR_EL1` → un `boot_args` sbagliato o un granulo sbagliato si vede
+  senza debugger.
+- Catena patch verificata: 86 applicate, fallisce solo la 0012 già nota.
+- CI: run **43109412740** (commit `8eb4371`).
+- `tools/read-pram.py --marks` decodifica la pagina: stampa i 4 marker, dice
+  fino a quale è arrivato il kernel, e i valori `phys_base`/`mem_size`/
+  `TCR_EL1`/`TTBR0_EL1`/`SCTLR_EL1`.
+- Baseline misurata in recovery (pagina mai scritta): **tutta `0xff`**. La
+  recovery non la tocca e una pagina intatta si distingue nettamente da un
+  marker: il canale è affidabile.
