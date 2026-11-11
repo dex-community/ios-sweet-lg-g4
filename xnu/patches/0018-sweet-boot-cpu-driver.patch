@@ -177,8 +177,10 @@ new file mode 100644
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -41,6 +41,12 @@
-     "     'IONameMatch'     = 'xiaomi,sweet';"
+@@ -45,8 +45,14 @@
+     "     'IOClass'         = SweetPlatformExpert;"
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+     "     'IONameMatch'     = 'lg,h815';"
      "     'IOProbeScore'    = 10000:32;"
      "   },"
 +    "   {"
