@@ -1,9 +1,9 @@
 diff --git a/bsd/dev/sweet_emmc.c b/bsd/dev/sweet_emmc.c
 new file mode 100644
-index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
+index 0000000..860e945d7663a7dbf70072f6ac661f70f506521d
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,842 @@
+@@ -0,0 +1,883 @@
 +/*
 + * SWEET eMMC root device (read-only block device).
 + *
@@ -58,6 +58,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +#include <vm/vm_kern.h>
 +#include <libkern/libkern.h>
 +#include <arm/machine_routines.h>
++#include <stdarg.h>
 +
 +/*
 + * ml_io_map is declared by <arm/machine_routines.h> only under
@@ -195,6 +196,46 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +static void *emmc_node;
 +/* lck_mtx_t is opaque on arm64: the mutex is allocated. */
 +static lck_mtx_t *emmc_lock;
++
++/*
++ * The console of the BSD layer does not exist yet when this driver runs: it
++ * is called from IOKitBSDInit, long before bsd_init puts the console up.
++ * Everything the driver says would be lost, and a reset does not scrub the
++ * DRAM, so the same text is kept in a buffer in the BSS that
++ * tools/read-xnu-log.py reads out of the RAM.
++ */
++#define EMMC_LOG_SIZE 8192
++static char emmc_log_buf[EMMC_LOG_SIZE];
++static uint32_t emmc_log_len;
++
++/*
++ * Say something: to the console (when there is one) and to the buffer in the
++ * BSS, which survives the reset.
++ */
++static void emmc_log(const char *fmt, ...)
++{
++	char line[512];
++	va_list ap;
++	int n;
++
++	va_start(ap, fmt);
++	n = vsnprintf(line, sizeof(line), fmt, ap);
++	va_end(ap);
++	if (n < 0)
++		return;
++	if (n > (int)sizeof(line) - 1)
++		n = (int)sizeof(line) - 1;
++
++	if (emmc_log_len < EMMC_LOG_SIZE - 1) {
++		uint32_t room = EMMC_LOG_SIZE - 1 - emmc_log_len;
++		uint32_t take = ((uint32_t)n < room) ? (uint32_t)n : room;
++
++		memcpy(emmc_log_buf + emmc_log_len, line, take);
++		emmc_log_len += take;
++		emmc_log_buf[emmc_log_len] = '\0';
++	}
++	printf("%s", line);
++}
 +
 +static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
 +static inline void     wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
@@ -435,7 +476,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +
 +	/* CMD0: the card goes back to the idle state. */
 +	if (emmc_cmd(CMD_GO_IDLE, 0, CFG_CMD0, NULL)) {
-+		printf("emmc: CMD0 failed\n");
++		emmc_log("emmc: CMD0 failed\n");
 +		return -1;
 +	}
 +	delay(1000);
@@ -443,7 +484,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	/* CMD1: the card powers up and answers with its OCR. */
 +	for (i = 0; i < 1000; i++) {
 +		if (emmc_cmd(CMD_SEND_OP_COND, OCR_VALUE, CFG_CMD1, &rsp)) {
-+			printf("emmc: CMD1 failed\n");
++			emmc_log("emmc: CMD1 failed\n");
 +			return -1;
 +		}
 +		if (rsp & OCR_BUSY)
@@ -451,7 +492,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +		delay(1000);
 +	}
 +	if (i >= 1000) {
-+		printf("emmc: CMD1 never completed\n");
++		emmc_log("emmc: CMD1 never completed\n");
 +		return -1;
 +	}
 +
@@ -461,31 +502,31 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	 * worked on the phone (136 bit + CRC7).
 +	 */
 +	if (emmc_cmd(CMD_ALL_SEND_CID, 0, CFG_CMD2, cid)) {
-+		printf("emmc: CMD2 failed (int=0x%x)\n", emmc_last_int_status);
++		emmc_log("emmc: CMD2 failed (int=0x%x)\n", emmc_last_int_status);
 +		return -1;
 +	}
-+	printf("emmc: CID %08x %08x %08x %08x\n",
++	emmc_log("emmc: CID %08x %08x %08x %08x\n",
 +	    cid[0], cid[1], cid[2], cid[3]);
 +
 +	/* CMD3: the host gives the card its relative address. */
 +	if (emmc_cmd(CMD_SET_REL_ADDR, emmc_rca << 16, CFG_CMD3, &rsp)) {
-+		printf("emmc: CMD3 failed\n");
++		emmc_log("emmc: CMD3 failed\n");
 +		return -1;
 +	}
 +
 +	/* CMD7: the card is selected and goes to the transfer state. */
 +	if (emmc_cmd(CMD_SELECT_CARD, emmc_rca << 16, CFG_CMD7, &rsp)) {
-+		printf("emmc: CMD7 failed\n");
++		emmc_log("emmc: CMD7 failed\n");
 +		return -1;
 +	}
 +
 +	/* CMD16: the block length, 512 bytes. */
 +	if (emmc_cmd(CMD_SET_BLOCKLEN, 512, CFG_CMD16, &rsp)) {
-+		printf("emmc: CMD16 failed\n");
++		emmc_log("emmc: CMD16 failed\n");
 +		return -1;
 +	}
 +	if (R1_STATE(rsp) != CARD_STATE_TRAN) {
-+		printf("emmc: the card is not in the transfer state (R1=0x%08x)\n", rsp);
++		emmc_log("emmc: the card is not in the transfer state (R1=0x%08x)\n", rsp);
 +		return -1;
 +	}
 +
@@ -535,7 +576,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	if (emmc_read_sector((uint32_t)GPT_HEADER_LBA, header))
 +		return -1;
 +	if (memcmp(header, GPT_SIGNATURE, 8) != 0) {
-+		printf("emmc: no GPT signature at LBA %llu\n",
++		emmc_log("emmc: no GPT signature at LBA %llu\n",
 +		    (unsigned long long)GPT_HEADER_LBA);
 +		return -1;
 +	}
@@ -544,13 +585,13 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	num_entries = le32(&header[80]);
 +	entry_size = le32(&header[84]);
 +	if (entries_lba < GPT_ENTRY_ARRAY_LBA || entries_lba > 64) {
-+		printf("emmc: the GPT points to a bad entry array (LBA %llu)\n",
++		emmc_log("emmc: the GPT points to a bad entry array (LBA %llu)\n",
 +		    (unsigned long long)entries_lba);
 +		return -1;
 +	}
 +	if (num_entries == 0 || num_entries > 512 || entry_size < 128 ||
 +	    entry_size > 512) {
-+		printf("emmc: the GPT entry geometry is wrong (%u x %u)\n",
++		emmc_log("emmc: the GPT entry geometry is wrong (%u x %u)\n",
 +		    num_entries, entry_size);
 +		return -1;
 +	}
@@ -582,7 +623,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +			if (emmc_gpt_name_is(entry, "ios")) {
 +				emmc_part_first = first;
 +				emmc_part_blocks = last - first + 1;
-+				printf("emmc: the ios partition is LBA %llu..%llu\n",
++				emmc_log("emmc: the ios partition is LBA %llu..%llu\n",
 +				    (unsigned long long)first,
 +				    (unsigned long long)last);
 +				return 0;
@@ -598,7 +639,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	if (have_by_name) {
 +		emmc_part_first = by_name_first;
 +		emmc_part_blocks = by_name_blocks;
-+		printf("emmc: the partition with the HFS+ volume is LBA %llu..%llu\n",
++		emmc_log("emmc: the partition with the HFS+ volume is LBA %llu..%llu\n",
 +		    (unsigned long long)by_name_first,
 +		    (unsigned long long)(by_name_first + by_name_blocks - 1));
 +		return 0;
@@ -612,12 +653,12 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	if (emmc_read_sector((uint32_t)(EMMC_FALLBACK_FIRST_LBA + 2), sector))
 +		return -1;
 +	if (!emmc_is_hfs_header(sector)) {
-+		printf("emmc: no HFS+ volume found on the card\n");
++		emmc_log("emmc: no HFS+ volume found on the card\n");
 +		return -1;
 +	}
 +	emmc_part_first = EMMC_FALLBACK_FIRST_LBA;
 +	emmc_part_blocks = EMMC_FALLBACK_BLOCKS;
-+	printf("emmc: falling back to LBA %llu for the root filesystem\n",
++	emmc_log("emmc: falling back to LBA %llu for the root filesystem\n",
 +	    (unsigned long long)EMMC_FALLBACK_FIRST_LBA);
 +	return 0;
 +}
@@ -627,16 +668,16 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	uint32_t caps, base_mhz;
 +	int rc;
 +
-+	printf("emmc: initializing...\n");
++	emmc_log("emmc: initializing...\n");
 +
 +	hc_base = (vm_address_t)ml_io_map(HC_BASE, HC_SIZE);
 +	if (!hc_base) {
-+		printf("emmc: failed to map the host registers\n");
++		emmc_log("emmc: failed to map the host registers\n");
 +		return -1;
 +	}
 +	core_base = (vm_address_t)ml_io_map(CORE_BASE, CORE_SIZE);
 +	if (!core_base) {
-+		printf("emmc: failed to map the core registers\n");
++		emmc_log("emmc: failed to map the core registers\n");
 +		return -1;
 +	}
 +
@@ -661,13 +702,13 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +
 +	caps = rd32(hc_base + HC_CAPS1);
 +	if (caps == 0 || caps == 0xffffffffu) {
-+		printf("emmc: the capability register reads 0x%x\n", caps);
++		emmc_log("emmc: the capability register reads 0x%x\n", caps);
 +		return -1;
 +	}
 +	base_mhz = (caps >> 8) & 0xffu;
 +	if (base_mhz == 0)
 +		base_mhz = 200;
-+	printf("emmc: base clock %u MHz\n", base_mhz);
++	emmc_log("emmc: base clock %u MHz\n", base_mhz);
 +
 +	/* The status bits that are polled have to be latched. */
 +	wr32(hc_base + HC_INT_ENABLE,
@@ -686,7 +727,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	/* The identification wants the 400 kHz clock. */
 +	rc = emmc_set_clock(base_mhz * 1000000u, 400000);
 +	if (rc) {
-+		printf("emmc: cannot set the 400 kHz clock (%d)\n", rc);
++		emmc_log("emmc: cannot set the 400 kHz clock (%d)\n", rc);
 +		return -1;
 +	}
 +
@@ -701,9 +742,9 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	 */
 +	rc = emmc_set_clock(base_mhz * 1000000u, 25000000);
 +	if (rc)
-+		printf("emmc: the 25 MHz clock failed (%d), staying at 400 kHz\n", rc);
++		emmc_log("emmc: the 25 MHz clock failed (%d), staying at 400 kHz\n", rc);
 +	else
-+		printf("emmc: the card runs at 25 MHz\n");
++		emmc_log("emmc: the card runs at 25 MHz\n");
 +
 +	if (emmc_find_partition())
 +		return -1;
@@ -781,7 +822,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +		}
 +		if (emmc_read_sector((uint32_t)(emmc_part_first + block),
 +		    (uint8_t *)vaddr + off)) {
-+			printf("emmc: the read of LBA %llu failed (int=0x%x)\n",
++			emmc_log("emmc: the read of LBA %llu failed (int=0x%x)\n",
 +			    (unsigned long long)(emmc_part_first + block),
 +			    emmc_last_int_status);
 +			error = EIO;
@@ -820,14 +861,14 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +	if (emmc_major < 0) {
 +		emmc_major = bdevsw_add(-1, &emmc_bdevsw);
 +		if (emmc_major < 0) {
-+			printf("emmc: no major number for the block device\n");
++			emmc_log("emmc: no major number for the block device\n");
 +			return ENXIO;
 +		}
 +	}
 +	if (emmc_lock == NULL) {
 +		emmc_lock = lck_mtx_alloc_init(NULL, NULL);
 +		if (emmc_lock == NULL) {
-+			printf("emmc: the mutex could not be allocated\n");
++			emmc_log("emmc: the mutex could not be allocated\n");
 +			return ENXIO;
 +		}
 +	}
@@ -836,7 +877,7 @@ index 0000000..f3f7db4d6fcd3e97adc2d73247df14dadb8b16fa
 +		emmc_node = devfs_make_node(makedev(emmc_major, 0), DEVFS_BLOCK,
 +		    UID_ROOT, GID_OPERATOR, 0660, "emmc0");
 +		if (emmc_node == NULL) {
-+			printf("emmc: the device node could not be created\n");
++			emmc_log("emmc: the device node could not be created\n");
 +			return ENXIO;
 +		}
 +	}
