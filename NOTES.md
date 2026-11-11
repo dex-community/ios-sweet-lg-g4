@@ -3682,3 +3682,57 @@ marcatori, cioe' molto presto.
 3. Ricostruire `shim-boot-g4.img`: `cd shim && ./build.sh out/g4.bin`
 4. Boot hardware con `fastboot boot shim-boot-g4.img`
 5. Verifica log: i marcatori `SWEET EARLY 1-5` devono apparire in RAM
+
+## 2026-11-11 — LSE in commpage + registro PAN + firehose LSE (FACT 22-25)
+
+### FACT 22 — La commpage usava `casa` (LSE) → SIGILL su Cortex-A53
+- `osfmk/arm/commpage/commpage_asm.s` (`pfz_trylock_and_enqueue` / `_dequeue`)
+  usava `casa` (ARMv8.1 LSE). Il Cortex-A53/A57 di msm8992 è ARMv8.0 → trap.
+- Il `-mcpu=cortex-a53+crypto` di 0004 non basta: il file `.s` è assemblato con
+  i flag di default, e `casa` è un'istruzione esplicita nel sorgente.
+- **Fix**: `xnu/patches/0005b-sweet-commpage-llsc.patch` (nome 0005b perché 0006
+  era già preso) → entrambi i CAS riscritti come loop LL/SC
+  (`ldaxr` + `stlxr` con retry, w14 scratch).
+- Verifica: 0 LSE, 4 `ldaxr`/`stlxr` nella commpage assemblata.
+
+### FACT 23 — Il registro `pan` non esiste su msm8992
+- Con `-mcpu=cortex-a53` clang rifiuta `__builtin_arm_rsr/wsr("pan")`
+  (PAN è ARMv8.1): `invalid register "pan" for llvm.read_register`.
+- File coinvolti: `osfmk/arm64/{copyio.c,pcb.c,platform_tests.c}`,
+  `osfmk/arm/arm_init.c`, `osfmk/arm/pmap/pmap.c`.
+- **Fix**: `xnu/patches/0010b-sweet-no-pan.patch` → letture stubbate a 1,
+  scritture no-op. NON si abilita `+pan`: l'hardware non ha il registro e
+  `msr pan` traperebbe a runtime.
+- Ordine: `0010b` (non `0005c`) perché 0010 usa la riga `wsr("pan",1)` come
+  contesto del suo hunk → va applicato dopo.
+
+### FACT 24 — `libfirehose_kernel.a` generava LSE (6 istruzioni)
+- La slice arm64 di libfirehose era compilata da xcodebuild con il default
+  Apple (`armv8.4+` → LSE): `casa`, `ldclr`, `ldset`, 3× `ldadd` in
+  `firehose_buffer_create`.
+- Il kernel XNU era già pulito (0 LSE, 1945 LL/SC) — il resto veniva da lì.
+- **Fix**: nel workflow, `build.sh` viene patchato per
+  (a) costruire **solo la slice arm64** (arm64e richiede armv8.5) e
+  (b) appendere a `libfirehose_kernel.xcconfig`:
+  `OTHER_CFLAGS = -mkernel -nostdinc -Wno-packed -march=armv8-a+crypto -mno-outline-atomics`
+  (in xcconfig `$(inherited)` non esiste: va riscritto l'elenco completo).
+- Nota: le slice x86_64/arm64e non servono al kernel SWEET.
+
+### FACT 25 — Pre-test locale (nuovo tool)
+- `tools/local-pretest.sh`: ricompila in locale, con le **stesse flag CI**
+  (estratte dal log del run), le TU toccate dalle patch e conta le LSE
+  nel `.o` risultante.
+- Uso: `gh run download <RUN> -n xnu-buildtree -D /tmp/ci-buildtree` poi
+  `bash tools/local-pretest.sh`.
+- Validazione del gate: su sorgente **non** patchata lo script riproduce
+  `instruction requires: lse` (commpage) e `invalid register "pan"` (copyio) →
+  è un gate reale, non un no-op.
+- Build XNU completa in locale non praticabile: serve il KDK 13.5 (sudo) e un
+  SDK ≤ 15; in locale c'è solo Xcode 27 (SDK 27, niente Kernel.framework).
+
+### Stato build
+- run `43065985813` fallito (LSE commpage) → corretto
+- run `43067814044` **verde** (kernel 0 LSE, arm64 Mach-O) — residui 6 LSE nel firehose
+- run `43072646908` fallito (mio override xcconfig, file non esistente nello step) → corretto
+- run `43073257684` **verde** ma 6 LSE ancora nel firehose (override xcconfig non applicato)
+- run `43075706641` in corso (firehose solo arm64 + `-march=armv8-a+crypto`)
