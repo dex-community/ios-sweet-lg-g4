@@ -3330,3 +3330,128 @@ in `docs/display-2026-11-10.txt`, analisi in `docs/DISPLAY-FINDINGS.md`.
 **Prossimo passo**:
 - Testare build XNU con CI
 - Se la patch compila, testare sul telefono con `rd=emmc0`
+
+---
+
+## 2026-11-11 (sessione): la CI verde non diceva niente, e il driver eMMC non poteva funzionare
+
+### FATTO 22 — la CI XNU saltava 40 patch e non se ne accorgeva
+
+**Il fatto**: il run `42923144296` era "success", ma il kernel che ne e' uscito
+era senza il platform expert, senza il boot CPU driver, senza lo stack USB, senza
+il console USB, senza i driver touch e senza le patch dell'iowatchdog.
+
+**Perche'**: `blacktop/darwin-xnu-build` applica le patch cosi':
+
+```sh
+for PATCH in "${PATCH_DIR}"/*.patch; do
+    if APPLY_CHECK=$(git apply --check "$PATCH" 2>&1); then
+        git apply "$PATCH"
+    else
+        warning "Skipping patch ${PATCH} (already upstream, previously applied, or malformed): ${APPLY_CHECK}"
+    fi
+done
+```
+
+Una patch che non applica e' un **warning**, non un errore: la build va avanti
+e il risultato e' "verde". Il log del run mostra 40 `Skipping patch`.
+
+**La causa radice**: la patch `0016` (device-tree platform expert) aveva
+l'hunk header sbagliato (`@@ -34,6 +34,14 @@` per 20 righe aggiunte invece di
+14): `git apply` la dichiarava "corrupt patch at line 25" e la saltava. Tutto
+quello che dipendeva da lei dipendeva dal risultato e veniva saltato a sua
+volta. La catena si e' rotta al primo hop.
+
+**Le patch rotte** (contesto scritto contro una base diversa):
+
+| patch | problema |
+|---|---|
+| 0016 | hunk header `+14` per 20 righe: "corrupt patch" |
+| 0018 | contesto scritto contro una 0016 senza la entry `lg,h815` |
+| 0054 | `bsd/conf/files`: `sweet_sample.c` va **prima** di `mem.c` |
+| 0060 | `bsd/conf/files`: manca la riga `sweet_emmc.c` (aggiunta da 0029) |
+| 0062 | idem |
+| 0072 | idem |
+
+**Correzioni**: `0016` (+14 -> +20), `0018` (contesto aggiornato alla entry
+`lg,h815`), e le quattro patch `bsd/conf/files` con la riga `sweet_emmc.c` nel
+contesto. Ordine giusto in `bsd/conf/files` dopo tutte le patch:
+
+```
+bsd/dev/memdev.c
+bsd/dev/sweet_ufs.c
+bsd/dev/sweet_sample.c
+bsd/dev/sweet_keys.c
+bsd/dev/sweet_touch.c
+bsd/dev/sweet_rpmh.c
+bsd/dev/sweet_spmi.c
+bsd/dev/sweet_usb.c
+bsd/dev/mem.c
+bsd/dev/sweet_emmc.c
+bsd/dev/munge.c
+bsd/dev/unix_startup.c
+```
+
+**Il nuovo controllo**: `tools/check-xnu-patch-chain.sh` applica tutta la serie
+a un worktree pulito di xnu-8796 e **dice quali patch falliscono**, eseguendo
+anche gli script di staging (`0019`, `0020`, `0026`) come fa la CI. Prima:
+44 applicate / 40 fallite. Dopo: **83 applicate / 0 fallite**.
+
+Da usare ogni volta che si tocca la serie, prima di spendere una CI.
+
+### FATTO 23 — il driver eMMC di XNU era un character device: la root non l'avrebbe mai letto
+
+Il driver nel tree non poteva funzionare, su tre livelli indipendenti.
+
+1. **L'interfaccia**. La root di XNU e' un **block device**:
+   `vfs_mountroot()` chiama `bdevvp(rootdev, &rootvp)`, e `spec_read()` per un
+   vnode VBLK chiama `buf_bread()`, che finisce in `bdevsw[].d_strategy`.
+   Un `cdevsw` non viene mai consultato: il `d_read` del vecchio driver non
+   serviva a niente. Il modello da copiare e' `bsd/dev/memdev.c` (il device a
+   memoria): `bdevsw_add(-1, &sw)`, `d_strategy` che compila il `struct buf`,
+   `d_psize` che dice 512, `devfs_make_node(..., DEVFS_BLOCK, ...)`.
+
+2. **I registri**. Il comando era scritto a `HC+0x0c` con una word a 32 bit:
+   `0x0c` e' il **Transfer Mode**, non il comando; il comando e' a `HC+0x0e` e
+   si scrive a 16 bit, con l'indice nei bit [15:8] e i flag nel byte basso.
+   I flag usati erano anche sbagliati (CRC a bit 6, index a bit 7, tipo di
+   risposta mai programmato). Con quel codice nessun comando raggiungeva la
+   carta.
+
+   I valori **misurati sul telefono** (shim, `emmc.c`), che il driver ora copia:
+
+   | cmd | flag | risposta |
+   |---|---|---|
+   | CMD0 | `0x00` | nessuna |
+   | CMD1 | `0x02` | 48 bit (OCR), **senza** CRC7 e **senza** index |
+   | CMD2 | `0x09` | 136 bit + CRC7, **senza** index check |
+   | CMD3 | `0x1a` | 48 bit + CRC7 + index |
+   | CMD7 | `0x0b` | 48 bit busy + CRC7 |
+   | CMD16 | `0x0a` | 48 bit + CRC7 |
+   | CMD17 | `0x3a` | 48 bit + CRC7 + index + data present |
+
+   CMD2 con l'index check (`0x19`) e' quello che faceva fallire il CMD2: la
+   carta rispondeva con un errore e la linea di comando restava occupata.
+
+3. **La geometria**. La root non e' l'eMMC intero ma la **partizione** che
+   contiene il volume HFS+: il volume header di un volume HFS+ sta a offset
+   1024 della sua partizione. Il driver legge il GPT (header a LBA 1, entries
+   a LBA 2..33), preferisce la partizione chiamata `ios` e la accetta solo se
+   a offset 1024 c'e' davvero la firma di un volume header HFS+ (`'HX'`,
+   versione 5). Il LBA misurato (12419072) e' il fallback se il GPT non si
+   legge.
+
+**Il bring-up** segue lo shim: HC mode, il **clock path legacy** nel vendor
+spec register (`HC+0x10c`: `MCLK_SEL=2`, `SELECT_IN` off, `CLK_PWRSAVE` off —
+l'LK lascia la MCI sul path HS400 e a quel punto il clock di identificazione
+non arriva alla carta), clock a 400 kHz, CMD0..CMD16, e poi **25 MHz**, il
+massimo che il timing legacy permette su un bit. A 400 kHz il catalog da
+128 MB del volume ci metterebbe tre quarti d'ora.
+
+**Scritture**: rifiutate con `EROFS`. Il medio e' read-only per costruzione.
+
+**Il check locale**: `clang -fsyntax-only` contro l'albero XNU patchato ha
+trovato tre errori veri che la CI avrebbe preso: `delay()` richiede
+`XNU_KERNEL_PRIVATE`, `ml_io_map` e' dichiarato solo sotto
+`MACH_KERNEL_PRIVATE`/`PEXPERT_KERNEL_PRIVATE` (e su arm64 `lck_mtx_t` e' un
+tipo **opaco**: va allocato con `lck_mtx_alloc_init`, non statico).

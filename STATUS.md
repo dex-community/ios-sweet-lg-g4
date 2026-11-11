@@ -16,8 +16,8 @@ touch and hardware buttons.
 | --- | --- | --- |
 | 0 — setup and analysis | **done** | Hardware facts extracted and cross-checked; see `docs/g4-hardware/` |
 | 1 — shim + minimal boot | **done** | Shim builds, passes offline checks, runs under QEMU **and on the real phone**. eMMC card identified (Samsung 032G74, CID verified). CMD2 now passes with fix to OCR busy bit polling (commit e80f24a). Log channel via RAM@0x50000000 works. |
-| 2 — XNU kernel and RAM disk | **mostly done** | XNU kernel with eMMC driver **compiles successfully in CI** (run 42923144296, 2026-11-10). Driver `bsd/dev/sweet_emmc.c` integrated with correct APIs (ml_io_map, kernel_memory_allocate, uio_resid_64). Patches 0000-0030 applied. Artifact: `kernel.development.sweet` 16 MB. Boot payload created with `mkpayload.py` using `rd=emmc0` boot-arg. **Boot test pending**: shim+XNU boot.img triggers immediate recovery reboot (root cause under investigation). |
-| 3 — eMMC storage and iOS root | **in progress** | eMMC card responds and is identified by shim (C2OK v=0x09). Linux kernel with HFS+ patch **mounts iOS rootfs successfully** (CI kernel-h815 run, verified via recovery mount). rootfs: 18.35 GB HFS+ case-sensitive, journaled, no backup header. XNU eMMC driver compiled and ready but not yet boot-tested on device. Next: diagnose boot failure, test XNU eMMC driver in working boot chain. |
+| 2 — XNU kernel and RAM disk | **mostly done** | XNU kernel builds in CI. **The patch chain was broken and the CI did not say so**: `darwin-xnu-build` skips a patch that does not apply with a warning, so the green run 42923144296 built a kernel missing 40 patches (no platform expert, no USB, no touch). Fixed: `tools/check-xnu-patch-chain.sh` now applies the whole series to a clean xnu-8796 tree and reports every failure (83 applied, 0 failed). |
+| 3 — eMMC storage and iOS root | **in progress** | The XNU eMMC driver has been **rewritten as a block device**: the root of XNU is a VBLK vnode read through `buf_bread` → `bdevsw[].d_strategy`, so the old `cdevsw` could never be read. The register encoding is now the one measured on the phone (command 16 bit at 0x0E, index << 8, CMD2 = 136 bit + CRC7 without index check). The driver serves the partition that holds the HFS+ volume, found in the GPT. Linux still mounts the iOS rootfs read-only (CI kernel-h815 run). |
 | 4 — touch, buttons, display | **blocked** | Blocked on working XNU boot. Touch is Synaptics s3528 @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2. Display is command-mode DSI and needs MDP/DSI driver. |
 | 5 — polish and documentation | **in progress** | `STATUS.md`, `GUIDE-*` files updated. Engineering log in progress. |
 
@@ -39,20 +39,28 @@ touch and hardware buttons.
 - rootfs contents: iPhone OS 16.7.16 (20H392), 17.1 GB total, 11.2 GB used
 - dyld hash verified consistent between mount and userspace read
 
-### XNU Kernel (Phase 2) 
+### XNU Kernel (Phase 2)
 - CI workflow `.github/workflows/xnu.yml` builds XNU with SWEET machine config
-- **eMMC driver compilation successful** (run 42923144296, 2026-11-10 23:35 UTC)
-- Driver `bsd/dev/sweet_emmc.c` with correct XNU APIs:
-  - `ml_io_map(phys_addr, size)` for MMIO mapping
-  - `kernel_memory_allocate(..., VM_KERN_MEMORY_NONE)` for bounce buffer
-  - `uio->uio_resid_64` for I/O size
-  - `enoioctl`, `eno_stop`, etc. for cdevsw stubs
-  - Forward declaration for `ml_io_map` to avoid implicit function errors
-- IOKitBSDInit glue code for `rd=emmc0` verified present in build artifact
-- `bsd/conf/files` includes `bsd/dev/sweet_emmc.c` in build
-- Patches applied: 0000 (source files), 0001-0015, 0017, 0019-0030 (skipped: 0016, 0018, 0035+)
-- Build artifact: `kernel.development.sweet` (16 MB, sha256 in CI logs)
-- Payload created: `xnu-payload.bin` with boot-args `rd=emmc0 debug=0x8 kextlog=0xfff cpus=1 serial=3`
+- **The whole patch series applies**: 83 of 83, checked locally with
+  `tools/check-xnu-patch-chain.sh` against a clean xnu-8796 tree
+- The eMMC driver `bsd/dev/sweet_emmc.c` is a **block device**:
+  - `bdevsw` with `d_strategy`, `d_psize` (512) and `d_ioctl`
+    (block size and block count), registered with `bdevsw_add()`
+  - the strategy function serves the buffer cache one 512 byte block at a
+    time through the FIFO, exactly like the shim reads the card
+  - the registers are the ones measured on the phone: command register 16
+    bit at 0x0E (index << 8), flags CMD0 0x00, CMD1 0x02, CMD2 0x09,
+    CMD3 0x1a, CMD7 0x0b, CMD16 0x0a, CMD17 0x3a
+  - the bring-up follows the shim: HC mode, legacy clock path in the
+    vendor spec register (HC+0x10c), 400 kHz for the identification,
+    CMD0..CMD16, then 25 MHz
+  - the device is the **partition** with the iOS volume, found in the GPT
+    (header LBA 1, entries LBA 2..33), preferred by the name "ios" and
+    accepted only when offset 1024 really holds an HFS+ signature
+  - writes are refused with `EROFS`
+- IOKitBSDInit glue for `rd=emmc0` in `xnu/patches/0029-sweet-emmc-root-device.patch`
+- `bsd/conf/files` includes `bsd/dev/sweet_emmc.c` in the build
+- Payload created: `xnu-payload.bin` with boot-args `rd=emmc0`
 
 ### Tools
 - `tools/mkpayload.py`: creates XNU payloads with SWEETXNU magic header
@@ -63,16 +71,24 @@ touch and hardware buttons.
 ## What does not work yet (blockers)
 
 ### Critical Blocker: XNU Boot Failure
-- **Symptom**: `fastboot boot shim-boot.img` with XNU payload triggers immediate recovery reboot
-- **No visible diagnostics**: shim does not display on screen (even with FORCE_WAIT_S=60)
-- **No log access**: TWRP recovery has no `/dev/mem`, cannot read shim log from RAM
-- **Affects**: both XNU payload (16 MB) and empty diagnostic shim (97 byte ramdisk)
-- **Hypothesis**: boot.img format issue, shim crash before log output, or bootloader rejection
-- **Next steps**: 
-  - Compare with known-good boot.img from previous successful boots
-  - Try prebuilt XNU kernel from ios-sweet reference
-  - Check `fastboot getvar` for secure boot status
-  - Consider flash instead of boot, or test with H815 Linux kernel first
+- **Symptom**: `fastboot boot shim-boot.img` with the XNU payload ends in a
+  reboot; the phone comes back in recovery
+- **What was wrong with the diagnosis**: the boot image is not malformed (the
+  build self-checks that the ramdisk in the image is byte for byte the
+  payload), and the shim is not crashing early (it writes its log to
+  RAM@0x50000000 before it hands over). The most likely cause is that XNU
+  panics on the root device: the old driver could not identify the card
+  (the command register was written to the wrong address) and
+  `IOFindBSDRoot` panics with "SWEET eMMC root emmc0 unavailable"
+- **Now fixed in the driver** (command register, flags, block device); the
+  next boot is the first one with a driver that can actually read
+- **No visible diagnostics**: the shim does not display on screen (the panel
+  is command mode DSI and the clocks are off, see FATTO 21)
+- **Log access**: the console of XNU is kept in a 4 MiB ring in the kernel
+  BSS; `tools/read-xnu-log.py` computes its physical address from the
+  payload header (`pa = va - virt_base + phys_base`) and reads it with a
+  kernel that has `/dev/mem`. The log of the shim is read the same way
+  (`tools/read-shim-log.py`)
 
 ### Panel Display (Phase 4)
 - G4 panel is DSI command-mode, bootloader reprograms controller
@@ -80,11 +96,41 @@ touch and hardware buttons.
 - Real MDP/DSI driver needed (reference: NetHunter G4 kernel)
 
 ### Outstanding Questions
-1. **Boot.img validation**: Why does current boot.img trigger recovery?
-2. **XNU runtime**: Will XNU reach early console with current patch set?
-3. **eMMC driver runtime**: Will driver successfully mount userdata once XNU boots?
+1. **XNU runtime**: does the kernel identify the card and mount the HFS+
+   volume now that the driver is a block device with the right registers?
+2. **eMMC driver runtime**: is the partition found in the GPT, and does the
+   read of the 128 MB catalog finish inside the watchdog window at 25 MHz?
+3. **Console**: does the ring in the kernel BSS survive the panic and the
+   reboot, so that `tools/read-xnu-log.py` can show what XNU said?
 
 ## Recent Progress (2026-11-10 to 2026-11-11)
+
+### The patch chain was broken (2026-11-11)
+- **What**: `blacktop/darwin-xnu-build` applies the patches with
+  `git apply --check` and, when one does not apply, it only prints a warning
+  and goes on. The green run 42923144296 had **40 patches skipped**.
+- **Root cause**: `0016` had a wrong hunk header (`+14` for 20 added lines),
+  so `git apply` called it corrupt; everything downstream was skipped with it.
+- **Fixed**: `0016` (+14 → +20), `0018` (stale context), and `0054`, `0060`,
+  `0062`, `0072` (the `bsd/conf/files` context, which the `sweet_emmc.c`
+  line added by `0029` had broken).
+- **New tool**: `tools/check-xnu-patch-chain.sh` applies the whole series to
+  a clean xnu-8796 worktree, runs the staging scripts as the CI does, and
+  reports every patch that fails. Result: **83 applied, 0 failed**.
+- **Consequence**: the kernel that was built before had no SWEET platform
+  expert (0016), no boot CPU driver (0018), no USB stack and no USB console
+  (0072-0077, 0081), no touch drivers and no iowatchdog patches.
+
+### The eMMC driver could not work (2026-11-11)
+- It was a **character device**: the root of XNU is a block device
+  (`bdevvp` → `buf_bread` → `bdevsw[].d_strategy`), so its `d_read` was
+  never called
+- The command register was written at **0x0C** (that is the Transfer Mode)
+  as a 32 bit word, the index was in the low bits and the flags were in the
+  wrong bits: **no command ever reached the card**
+- Now rewritten: 16 bit command at 0x0E, index << 8, the flag values
+  measured on the phone, the block device interface, the GPT lookup of the
+  partition with the HFS+ volume, and 25 MHz after the identification
 
 ### Shim eMMC Driver
 - **Commit e80f24a** (2026-11-10 18:30): Fixed CMD1 loop to poll OCR bit 31 (busy flag)
