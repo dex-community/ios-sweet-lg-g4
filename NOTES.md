@@ -1,3 +1,79 @@
+# iOS 16 on LG G4 (H815) - working notes
+
+Last update: 2026-11-11 04:10 CET
+
+## HANDOFF 2026-11-11 04:10 - Test ciclo boot completo
+
+### Fatto oggi
+**Test pulito dal bootloader verificato** - commit 0773118:
+- ✅ Ciclo boot → crash → recovery funziona perfettamente
+- ✅ Recovery flashata (device-test-boot.img) ha `/dev/mem` funzionante
+- ✅ LK boot automaticamente in recovery dopo crash XNU (~5s)
+- ✅ Script read-xnu-log.py e read-shim-log.py funzionano
+
+**Problema confermato**: XNU crasha **immediatamente**, prima di:
+- Inizializzare console BSD (log vuoto)
+- Eseguire driver eMMC (log vuoto)
+- Scrivere qualsiasi diagnostica
+
+### Files chiave
+- Boot image: `shim/out/shim-boot-g4.img` (17MB, 2026-11-11 03:18)
+- Kernel XNU: `xnu/out-42942530869/kernel.development.sweet` (CI run 42942530869)
+- Payload: `shim/out/g4.bin` (16.6MB)
+- Test report: `test-reports/xnu-boot-test-2026-11-11.md`
+
+### Next steps (priorità)
+1. **Shim pre-XNU logging**: modificare lo shim per scrivere log a 0x50000000
+   PRIMA di saltare a XNU - confermare che il handoff avviene
+2. **Dump boot_args/ADT**: salvare parametri passati a XNU
+3. **Verificare virt_base/phys_base**: confrontare con sweet/v60 funzionanti
+4. **Exception vector early**: verificare che exception handler sia setup
+
+### Stato telefono
+- In recovery (LGH815b448b72e)
+- Recovery: device-test-boot.img con CONFIG_DEVMEM=y
+- Nessuna partizione modificata permanentemente
+
+---
+
+# iOS 16 on LG G4 (H815) - working notes
+
+Last update: 2026-11-11 04:10 CET
+
+## HANDOFF 2026-11-11 04:10 - Test ciclo boot completo
+
+### Fatto oggi
+**Test pulito dal bootloader verificato** - commit 0773118:
+- ✅ Ciclo boot → crash → recovery funziona perfettamente
+- ✅ Recovery flashata (device-test-boot.img) ha `/dev/mem` funzionante
+- ✅ LK boot automaticamente in recovery dopo crash XNU (~5s)
+- ✅ Script read-xnu-log.py e read-shim-log.py funzionano
+
+**Problema confermato**: XNU crasha **immediatamente**, prima di:
+- Inizializzare console BSD (log vuoto)
+- Eseguire driver eMMC (log vuoto)
+- Scrivere qualsiasi diagnostica
+
+### Files chiave
+- Boot image: `shim/out/shim-boot-g4.img` (17MB, 2026-11-11 03:18)
+- Kernel XNU: `xnu/out-42942530869/kernel.development.sweet` (CI run 42942530869)
+- Payload: `shim/out/g4.bin` (16.6MB)
+- Test report: `test-reports/xnu-boot-test-2026-11-11.md`
+
+### Next steps (priorità)
+1. **Shim pre-XNU logging**: modificare lo shim per scrivere log a 0x50000000
+   PRIMA di saltare a XNU - confermare che il handoff avviene
+2. **Dump boot_args/ADT**: salvare parametri passati a XNU
+3. **Verificare virt_base/phys_base**: confrontare con sweet/v60 funzionanti
+4. **Exception vector early**: verificare che exception handler sia setup
+
+### Stato telefono
+- In recovery (LGH815b448b72e)
+- Recovery: device-test-boot.img con CONFIG_DEVMEM=y
+- Nessuna partizione modificata permanentemente
+
+---
+
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 ## 2026-11-05 (seconda sessione): il telefono vero
 
