@@ -67,6 +67,13 @@ touch and hardware buttons.
 - `tools/mkbootimg_lg.py`: wraps shim+payload in LK boot.img format
 - `shim/build.sh`: end-to-end shim → boot.img pipeline
 - `tools/device-test.sh`: unified test script for kernel+HFS validation
+- `tools/xnu-boot-test.sh`: the XNU boot cycle (boot XNU, then the custom
+  TWRP with `/dev/mem`, then read the RAM)
+- `tools/read-xnu-log.py`: reads the log of the eMMC driver and the console
+  ring of the kernel out of the RAM
+- `tools/read-shim-log.py`: reads the log of the shim out of the RAM
+- `tools/check-xnu-patch-chain.sh`: applies the whole patch series to a clean
+  xnu-8796 tree and reports the ones that fail
 
 ## What does not work yet (blockers)
 
@@ -265,11 +272,18 @@ cat /mnt/System/Library/CoreServices/SystemVersion.plist
 
 ## Next Steps
 
-1. **Diagnose XNU boot failure**: Compare boot.img with known-good reference
-2. **Test alternative**: Try prebuilt XNU kernel from ios-sweet (if available)
-3. **Fallback validation**: Boot Linux H815 kernel to verify boot.img format works
-4. **If XNU boots**: Test eMMC driver read operations (mount userdata from XNU)
-5. **Documentation**: Record boot failure analysis in NOTES.md
+1. **Run the XNU boot cycle** with the new driver:
+   `tools/xnu-boot-test.sh <RUN_ID> g4` — the log of the eMMC driver says how
+   far the identification got (CMD0/1/2/3/7/16), whether the GPT gave the
+   partition with the HFS+ volume, and whether the card went to 25 MHz
+2. **If the driver gets to the partition**: the HFS+ mount is the next
+   question (the Apple driver wants a 4096 byte logical block on a device
+   with 512 byte sectors: 8 sectors per block)
+3. **If the driver stops at CMD2**: compare the interrupt status with the
+   values the shim recorded (`C2OK v=00000009`)
+4. **Console**: the ring of the kernel is empty until the BSD console is up;
+   the USB live log (patch 0077) is the only channel that works before that,
+   and its driver has never been run on the phone
 
 ## CI Workflow Status
 

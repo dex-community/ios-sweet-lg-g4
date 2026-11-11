@@ -41,20 +41,36 @@ The shim draws diagnostics into the framebuffer and writes a log to the phone's 
 
 ## Current blocker and next step
 
-**The eMMC is one command away.** The card is a Samsung 032G74 and it
-answers: the wake-up, the select, the idle and the `SEND_OP_COND` (which
-returns the OCR with the power-up bit) all work. The only command that
-fails is **CMD2 (SEND_ARG)**, and it fails with an *error interrupt*, not
-with a timeout: the controller says the answer is wrong.
+**The eMMC works from the shim; the driver of XNU has just been rewritten.**
+The card is a Samsung 032G74 and it answers every command: the wake-up, the
+select, the idle, the `SEND_OP_COND` (the OCR with the power-up bit) and the
+**CMD2**, which is the one that used to fail. The driver Linux that works on
+this phone sends CMD2 as a 136 bit answer with the CRC7 check and **without
+the index check**; the shim sent it with the index check as well, and that
+was the whole difference. `C2OK v=00000009` on the phone is the proof.
 
-The driver Linux that works on this phone sends CMD2 as a 136 bit answer
-with the CRC7 check and **without** the index check; the shim sent it with
-the index check as well. That is the only difference, and the shim now
-tries the four combinations one after the other and writes the outcome in
-the log. Reading that log is the next measurement, and it costs nothing:
-the phone is in fastboot, `fastboot boot` the shim, let it reset itself
-into the recovery, then `fastboot boot` the kernel with `/dev/mem` and
-read `0x50000000` (`tools/read-shim-log.py`).
+The driver of XNU (`bsd/dev/sweet_emmc.c`) was rewritten with those
+measurements, and it is now a **block device**: the root of XNU is a VBLK
+vnode read through the buffer cache (`bdevvp` → `buf_bread` →
+`bdevsw[].d_strategy`), so the `cdevsw` of the first version could never be
+read. It serves the partition that holds the HFS+ volume, found in the GPT.
+
+**The CI does not tell the truth unless you look.** The build script of
+`darwin-xnu-build` skips a patch that does not apply with a *warning*, so a
+green run had built a kernel without the platform expert, without the USB
+stack and without the USB console. `tools/check-xnu-patch-chain.sh` now
+applies the whole series to a clean xnu-8796 tree and reports the ones that
+fail.
+
+**How to see what XNU says.** XNU says it in the RAM, and the RAM is read
+with the custom TWRP (`/tmp/device-test-boot.img`), the only image on this
+phone with `/dev/mem`:
+
+```sh
+tools/xnu-boot-test.sh <RUN_ID> g4
+```
+
+The details are in `docs/XNU-BOOT-TEST.md`.
 
 **The iOS rootfs is readable in principle, but not yet in practice.** The
 volume on `userdata` is HFS+ case-sensitive, journaled and **without a
@@ -117,6 +133,7 @@ safe place to measure all of this is the recovery, through
 | `GUIDE-05-MMIO-SAFE.md` | The allowlist rule and how to prove a block is clocked |
 | `GUIDE-06-SD-MISURE.md` | microSD measurements (SDCC2 works; the inserted card is read-only) |
 | `docs/PLAN-2026-11-10.md` | Current action plan: eMMC, display, input |
+| `docs/XNU-BOOT-TEST.md` | The XNU boot cycle: the three images, the RAM channels, how to read the logs |
 | `docs/g4-hardware/HARDWARE-G4.md` | Every device-tree fact with file:line references |
 | `docs/g4-hardware/EMMC-REFERENCE.md` | UniXNU eMMC driver and what to change for the G4 |
 | `docs/QEMU_TESTING.md` | Offline QEMU test setup |

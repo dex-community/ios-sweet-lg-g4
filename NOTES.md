@@ -3455,3 +3455,49 @@ trovato tre errori veri che la CI avrebbe preso: `delay()` richiede
 `XNU_KERNEL_PRIVATE`, `ml_io_map` e' dichiarato solo sotto
 `MACH_KERNEL_PRIVATE`/`PEXPERT_KERNEL_PRIVATE` (e su arm64 `lck_mtx_t` e' un
 tipo **opaco**: va allocato con `lck_mtx_alloc_init`, non statico).
+
+### FATTO 24 — il ciclo di boot di XNU, e perche' il ring del kernel era vuoto
+
+**Il ciclo, sempre lo stesso** (`tools/xnu-boot-test.sh`, i dettagli in
+`docs/XNU-BOOT-TEST.md`):
+
+1. `fastboot boot shim/out/shim-boot-g4.img` — LK carica lo shim, lo shim
+   porta su l'host eMMC e scrive il suo log, poi passa a XNU;
+2. si aspetta che il telefono si assesti (XNU parte, oppure fa panic e il
+   telefono torna in recovery);
+3. **`fastboot boot /tmp/device-test-boot.img`** — il TWRP custom (kernel CI
+   H815 con `CONFIG_DEVMEM` + ramdisk TWRP + dt.img). **Questo passo non e'
+   facoltativo**: XNU dice le sue cose nella RAM e la RAM si legge solo con
+   un kernel che ha `/dev/mem`. Il TWRP di default non ce l'ha;
+4. si legge la RAM.
+
+Niente viene scritto: solo `fastboot boot`.
+
+**Il ring della console del kernel era vuoto, e il motivo e' interessante**:
+il driver eMMC gira dentro `IOFindBSDRoot` (quindi dentro
+`IOKitBSDInit`), **molto prima** che `bsd_init` alzi la console del livello
+BSD. L'aggancio su `_cnputs` che riempie il ring e' installato assai piu'
+tardi, e il driver del device root non c'e' nemmeno al suo posto: il suo
+`printf()` va a finire nel nulla.
+
+Per questo il driver ora tiene **una copia delle sue parole in un buffer
+nel BSS** (`emmc_log_buf`, 8 KiB), che sopravvive al reset, e
+`tools/read-xnu-log.py` la legge dalla RAM insieme al ring.
+
+**L'indirizzo fisico di un simbolo del kernel** si ricava dall'header del
+payload:
+
+```
+pa = va - virt_base + phys_base
+```
+
+la stessa mappatura di `phystokv()` (`osfmk/arm64/arm_vm_init.c`).
+`virt_base` e' a 0x10 dell'header, `phys_base` a 0x38.
+
+**La RAM non e' cancellata dal reset**, ma due cose la possono sovrascrivere:
+il payload (lo shim lo carica *dopo* aver scritto il suo log, e un payload
+da 17 MB arriva fino a `0x50000000`, dove sta il log dello shim) e il kernel
+della recovery (che prende le pagine che gli servono). Il ring e il log del
+driver stanno nella bank `0x80000000`, quella bassa `0x10000000` viene presa
+prima, quindi sopravvivono; il log dello shim, che sta nella bank bassa, non
+e' garantito dopo un boot di XNU.
