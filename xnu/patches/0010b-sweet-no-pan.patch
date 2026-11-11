@@ -1,0 +1,166 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index e3579f1..1398ca3 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -518,7 +518,7 @@ arm_init(
+ 	PE_parse_boot_argn("immediate_NMI", &force_immediate_debug_halt, sizeof(force_immediate_debug_halt));
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ 	sweet_early_mark(7, "entering arm_vm_init");
+@@ -670,7 +670,7 @@ arm_init_cpu(
+ 	cpu_data_t      *cpu_data_ptr)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif
+ 
+ #ifdef __arm64__
+@@ -802,7 +802,7 @@ arm_init_idle_cpu(
+ 	cpu_data_t      *cpu_data_ptr)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 00568d3..0e6e89a 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -13852,7 +13852,7 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+ 
+ 		/* Disable PAN; pmap shouldn't be the kernel pmap. */
+ #if __ARM_PAN_AVAILABLE__
+-		__builtin_arm_wsr("pan", 0);
++		(void)(0); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif /* __ARM_PAN_AVAILABLE__ */
+ 	}
+ 
+@@ -13871,7 +13871,7 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+ 
+ 	if (pmap != NULL) {
+ #if __ARM_PAN_AVAILABLE__
+-		__builtin_arm_wsr("pan", 1);
++		(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif /* __ARM_PAN_AVAILABLE__ */
+ 
+ 		pmap_switch(old_pmap);
+diff --git a/osfmk/arm64/copyio.c b/osfmk/arm64/copyio.c
+index 15b949c..5a714f6 100644
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -86,8 +86,8 @@ static inline void
+ user_access_enable(void)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	assert(__builtin_arm_rsr("pan") != 0);
+-	__builtin_arm_wsr("pan", 0);
++	assert(1 != 0);
++	(void)(0); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ }
+@@ -96,7 +96,7 @@ static inline void
+ user_access_disable(void)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ }
+diff --git a/osfmk/arm64/pcb.c b/osfmk/arm64/pcb.c
+index 7b98a33..b7910ae 100644
+--- a/osfmk/arm64/pcb.c
++++ b/osfmk/arm64/pcb.c
+@@ -168,7 +168,7 @@ machine_switch_context(thread_t old,
+ 	thread_t retval;
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
++	if (__improbable(1 == 0)) {
+ 		panic("context switch with PAN disabled");
+ 	}
+ #endif
+@@ -511,7 +511,7 @@ machine_stack_handoff(thread_t old,
+ 	vm_offset_t  stack;
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
++	if (__improbable(1 == 0)) {
+ 		panic("stack handoff with PAN disabled");
+ 	}
+ #endif
+diff --git a/osfmk/arm64/platform_tests.c b/osfmk/arm64/platform_tests.c
+index b58b94d..5f4dc23 100644
+--- a/osfmk/arm64/platform_tests.c
++++ b/osfmk/arm64/platform_tests.c
+@@ -1237,7 +1237,7 @@ struct pan_test_thread_args {
+ static void
+ arm64_pan_test_thread(void *arg, wait_result_t __unused wres)
+ {
+-	T_ASSERT(__builtin_arm_rsr("pan") != 0, NULL);
++	T_ASSERT(1 != 0, NULL);
+ 
+ 	struct pan_test_thread_args *args = arg;
+ 
+@@ -1302,7 +1302,7 @@ arm64_pan_test_pan_enabled_fault_handler(arm_saved_state_t * state)
+ 			ml_expect_fault_begin(arm64_pan_test_pan_enabled_fault_handler, far);
+ 			pan_fault_value = *(volatile char *)far;
+ 			ml_expect_fault_end();
+-			__builtin_arm_wsr("pan", 1); // turn PAN back on after the nested exception cleared it for this context
++			(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */; // turn PAN back on after the nested exception cleared it for this context
+ 		}
+ 		// this fault address is used for PAN test
+ 		// disable PAN and rerun
+@@ -1332,7 +1332,7 @@ arm64_pan_test_pan_disabled_fault_handler(arm_saved_state_t * state)
+ 		ml_expect_fault_begin(arm64_pan_test_pan_enabled_fault_handler, pan_test_addr);
+ 		pan_fault_value = *(volatile char *)pan_test_addr;
+ 		ml_expect_fault_end();
+-		__builtin_arm_wsr("pan", 1); // turn PAN back on after the nested exception cleared it for this context
++		(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */; // turn PAN back on after the nested exception cleared it for this context
+ 		add_saved_state_pc(state, 4);
+ 
+ 		retval = true;
+@@ -1352,7 +1352,7 @@ arm64_pan_test()
+ 
+ 	T_ASSERT((__builtin_arm_rsr("SCTLR_EL1") & SCTLR_PAN_UNCHANGED) == 0, "SCTLR_EL1.SPAN must be cleared");
+ 
+-	T_ASSERT(__builtin_arm_rsr("pan") != 0, NULL);
++	T_ASSERT(1 != 0, NULL);
+ 
+ 	pan_exception_level = 0;
+ 	pan_fault_value = 0xDE;
+@@ -1395,7 +1395,7 @@ arm64_pan_test()
+ 
+ 	T_ASSERT(pan_exception_level == 2, NULL);
+ 
+-	T_ASSERT(__builtin_arm_rsr("pan") == 0, NULL);
++	T_ASSERT(1 == 0, NULL);
+ 
+ 	T_ASSERT(pan_fault_value == *(char *)priv_addr, NULL);
+ 
+@@ -1411,7 +1411,7 @@ arm64_pan_test()
+ 
+ 	T_ASSERT(pan_exception_level == 2, NULL);
+ 
+-	T_ASSERT(__builtin_arm_rsr("pan") == 0, NULL);
++	T_ASSERT(1 == 0, NULL);
+ 
+ 	T_ASSERT(pan_fault_value == *(char *)priv_addr, NULL);
+ 
+@@ -1419,7 +1419,7 @@ arm64_pan_test()
+ 
+ 	pan_ro_addr = 0;
+ 
+-	__builtin_arm_wsr("pan", 1);
++	(void)(1); /* sweet: msm8992 is armv8.0, no PAN register */;
+ 
+ 	mp_enable_preemption();
+ 
