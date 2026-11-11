@@ -81,6 +81,57 @@ def decode(blob):
     }
 
 
+# Exception class of a synchronous exception, from ESR_EL1[31:26].
+ESR_EC = {
+    0x00: "unknown reason (undefined instruction?)",
+    0x01: "trapped WF*",
+    0x07: "access to SIMD/FP",
+    0x0E: "illegal execution state",
+    0x18: "trapped MSR/MRS (system register)",
+    0x20: "instruction abort from a lower EL",
+    0x21: "instruction abort from the same EL",
+    0x22: "PC alignment",
+    0x24: "data abort from a lower EL",
+    0x25: "data abort from the same EL",
+    0x26: "SP alignment",
+    0x2C: "trapped FP exception",
+    0x2F: "SError",
+}
+
+# Fault status of a data/instruction abort, from ESR_EL1[5:0].
+DFSC = {
+    0x05: "translation fault, level 1",
+    0x06: "translation fault, level 2",
+    0x07: "translation fault, level 3",
+    0x09: "access flag fault, level 1",
+    0x0A: "access flag fault, level 2",
+    0x0B: "access flag fault, level 3",
+    0x0D: "permission fault, level 1",
+    0x0E: "permission fault, level 2",
+    0x0F: "permission fault, level 3",
+    0x10: "synchronous external abort",
+    0x21: "alignment fault",
+}
+
+
+def show_exception():
+    """Print what the exception probe (patch 0082, sweet_exc_vectors) saved."""
+    blob = read_pa(0x90005000, 0x40)
+    esr, far, elr, spsr = struct.unpack_from("<4Q", blob, 0)
+    ec = (esr >> 26) & 0x3F
+    print(f"exception registers at 0x90005000:")
+    print(f"  ESR_EL1  {esr:#018x}  EC {ec:#x}: "
+          f"{ESR_EC.get(ec, 'unknown class')}")
+    if ec in (0x20, 0x21, 0x24, 0x25):
+        print(f"           fault status {esr & 0x3F:#x}: "
+              f"{DFSC.get(esr & 0x3F, 'unknown')}")
+        if ec in (0x24, 0x25):
+            print(f"           {'write' if esr & 0x40 else 'read'} access")
+    print(f"  FAR_EL1  {far:#018x}")
+    print(f"  ELR_EL1  {elr:#018x}  (the instruction that faulted)")
+    print(f"  SPSR_EL1 {spsr:#018x}")
+
+
 def show_marks(argv):
     """Decode the page the boot markers of patch 0082 are written to."""
     base = 0x90003000
@@ -111,6 +162,33 @@ def show_marks(argv):
         print(f"  => the kernel got as far as marker {last[0]}: {last[1]}")
     else:
         print("  => no marker: _start never ran, the jump itself is wrong")
+
+    # The exception probe: which vector ran, and the registers it saved.
+    exc = struct.unpack_from("<I", blob, 0x300)[0]
+    if exc & 0xFFFFFFF0 == 0x5EED0B00:
+        slot = exc & 0xF
+        kinds = {
+            0x0: "current EL, SP0: synchronous",
+            0x1: "current EL, SP0: IRQ",
+            0x2: "current EL, SP0: FIQ",
+            0x3: "current EL, SP0: SError",
+            0x4: "current EL, SPx: synchronous",
+            0x5: "current EL, SPx: IRQ",
+            0x6: "current EL, SPx: FIQ",
+            0x7: "current EL, SPx: SError",
+            0x8: "lower EL, AArch64: synchronous",
+            0x9: "lower EL, AArch64: IRQ",
+            0xA: "lower EL, AArch64: FIQ",
+            0xB: "lower EL, AArch64: SError",
+            0xC: "lower EL, AArch32: synchronous",
+            0xD: "lower EL, AArch32: IRQ",
+            0xE: "lower EL, AArch32: FIQ",
+            0xF: "lower EL, AArch32: SError",
+        }
+        print(f"  +0x0300  {exc:#010x}  EXCEPTION TAKEN: {kinds[slot]}")
+        show_exception()
+    elif exc != 0xFFFFFFFF:
+        print(f"  +0x0300  {exc:#010x}  (unexpected)")
 
     info_off = 0x800
     phys_base, mem_size, tcr, ttbr0, sctlr = struct.unpack_from(
