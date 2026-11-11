@@ -1,0 +1,127 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 6cafaf1..4e45735 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -88,6 +88,47 @@
+ #endif /* defined(KERNEL_INTEGRITY_KTRR) */
+ .endmacro
+ 
++#if defined(SWEET)
++/*
++ * SWEET boot markers.
++ *
++ * The G4 dies somewhere between the jump into _start and the first line of
++ * C in arm_init, and nothing survives the reboot into the recovery: the
++ * kernel's early console is in the BSS, written with the MMU on and the
++ * cache write-back, and a watchdog reset does not clean the cache. So the
++ * text never reaches the RAM that the recovery can read back.
++ *
++ * These markers are 32-bit words written to a page of the upper DRAM bank
++ * (0x90003000, which the recovery does not reuse) at four points of the
++ * assembly, each followed by a clean of the cache line so the word really
++ * lands in RAM whatever the MMU and the cache state are:
++ *
++ *   0x90003000  _start reached (the bootloader's MMU tables are active)
++ *   0x90003040  bootstrap page tables built, before the MMU switch
++ *   0x90003080  first fetch after SCTLR_EL1 with M=1 survived
++ *   0x900030c0  about to return into arm_init
++ *
++ * The block at 0x90003100 keeps what the kernel thinks the machine is:
++ * phys_base, mem_size, TCR_EL1, TTBR0_EL1 and SCTLR_EL1, so a wrong
++ * boot_args or a wrong granule is visible without a debugger.
++ *
++ * x9 and x10 are scratch here: nothing between the start of start_first_cpu
++ * and the return to arm_init depends on them.
++ */
++#define SWEET_MARK_BASE		0x90003000
++#define SWEET_MARK_INFO		0x90003100
++
++.macro SWEET_MARK addr, value
++	movz	w9, #((\value) & 0xffff)
++	movk	w9, #((((\value) >> 16)) & 0xffff), lsl #16
++	movz	x10, #((\addr) & 0xffff)
++	movk	x10, #((((\addr) >> 16)) & 0xffff), lsl #16
++	str		w9, [x10]
++	dc		civac, x10
++	dsb		sy
++.endm
++#endif /* defined(SWEET) */
++
+ /*
+  * Checks the reset handler for global and CPU-specific reset-assist functions,
+  * then jumps to the reset handler with boot args and cpu data. This is copied
+@@ -513,6 +554,11 @@ LEXT(start_first_cpu)
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
++#if defined(SWEET)
++	/* Marker 1: _start was reached at all. */
++	SWEET_MARK SWEET_MARK_BASE + 0x00, 0x5EED0001
++#endif
++
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+@@ -662,6 +708,17 @@ Lkernelcache_base_found:
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
+ 
++#if defined(SWEET)
++	/* Marker 2: the bootstrap page tables are built. */
++	SWEET_MARK SWEET_MARK_BASE + 0x40, 0x5EED0002
++	/* What the kernel was told the machine is. */
++	movz	x10, #((SWEET_MARK_INFO) & 0xffff)
++	movk	x10, #((((SWEET_MARK_INFO) >> 16)) & 0xffff), lsl #16
++	str		x23, [x10, #0x00]		// phys_base
++	str		x24, [x10, #0x08]		// mem_size
++	dc		civac, x10
++	dsb		sy
++#endif
+ 
+ 	b		common_start
+ 
+@@ -801,6 +858,26 @@ common_start:
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
++#if defined(SWEET)
++	/*
++	 * Marker 3: this instruction is fetched with the MMU on and the
++	 * bootstrap TTBR0 in place. If the V=P mapping does not cover the
++	 * code, the fetch aborts here and this word is never written.
++	 */
++	SWEET_MARK SWEET_MARK_BASE + 0x80, 0x5EED0003
++	/* The translation state, for the record. */
++	movz	x10, #((SWEET_MARK_INFO) & 0xffff)
++	movk	x10, #((((SWEET_MARK_INFO) >> 16)) & 0xffff), lsl #16
++	mrs		x11, TCR_EL1
++	str		x11, [x10, #0x10]
++	mrs		x11, TTBR0_EL1
++	str		x11, [x10, #0x18]
++	mrs		x11, SCTLR_EL1
++	str		x11, [x10, #0x20]
++	dc		civac, x10
++	dsb		sy
++#endif
++
+ #if !VMAPPLE && !defined(SWEET)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+ 	cmp		x0, x1
+@@ -863,6 +940,17 @@ common_start:
+ 	mov	lr, x21
+ #endif
+ 
++#if defined(SWEET)
++	/*
++	 * Marker 4: everything in start.s is done. The very next instruction
++	 * that executes is the first one of arm_init(), which writes the
++	 * early console into the BSS. If this marker is missing the failure
++	 * is above this line and the early console can never have run.
++	 * x0 (boot args KVA) must survive: the macro only uses x9 and x10.
++	 */
++	SWEET_MARK SWEET_MARK_BASE + 0xc0, 0x5EED0004
++#endif
++
+ 	// Return to arm_init()
+ 	ret
+ 

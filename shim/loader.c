@@ -162,6 +162,36 @@ const char *loader_boot(uintptr_t dtb)
 	con_str("XNU", "jumping (fbcon clears screen)");
 
 #if SHIM_HW_DIAG
+	/*
+	 * Canaries. XNU's early console lives in its BSS (sweet_early_buf,
+	 * va 0xfffffe0007c46dbc on the current kernel), and the only moment
+	 * the phone can be read back is the recovery that the watchdog boots
+	 * afterwards. These writes prove, in the same boot, that the pages
+	 * still hold what was written before the jump:
+	 *
+	 *   0x81c46000  the page of sweet_early_buf (upper DRAM bank)
+	 *   0x90000000  middle of the 0x80000000-0xdfffffff bank
+	 *   0xdff00000  top of that bank
+	 *
+	 * If a canary survives and sweet_early_buf does not contain
+	 * "SWEET EARLY", the kernel never reached arm_init: nothing to blame
+	 * on the readout. If the canaries are gone, the page was reused and
+	 * the marker has to move somewhere the recovery never touches.
+	 */
+	{
+		static const uintptr_t canary_pa[3] = {
+			0x81c46000UL, 0x90000000UL, 0xdff00000UL
+		};
+		for (unsigned int i = 0; i < 3; i++) {
+			volatile uint32_t *w = (volatile uint32_t *)canary_pa[i];
+			for (unsigned int j = 0; j < 16; j++) {
+				w[j] = 0xCA11CA00U + j;
+			}
+		}
+	}
+#endif
+
+#if SHIM_HW_DIAG
 	pstore_console_write(con_log, (unsigned)con_log_len);
 #if SHIM_WDT_GUARD
 	g4_wdt_arm(60000);

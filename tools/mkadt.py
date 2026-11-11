@@ -26,6 +26,19 @@ MEM_SIZE = 0x4d000000
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
+# The G4 cannot carve the panic log off the top of DRAM: that leaves mem_size
+# one MiB short of the bank and the kernel dies right after "kdp_core zlib
+# memory". It also cannot use the persistent_ram carve-out (0x0ff00000): a
+# /dev/mem read there returns nothing and the recovery dies, so an access from
+# XNU would hang the same way. The log goes in the middle of the upper bank
+# instead, on plain System RAM, which the recovery can read back through
+# /dev/mem after the watchdog reboot.
+#
+# ponytail: not carved off mem_size, so XNU may eventually allocate over it.
+# That is harmless while the kernel panics during bootstrap, which is the only
+# case this is for; carve it properly once the kernel reaches userland.
+G4_PANIC_LOG_PA = 0xc0000000
+G4_PANIC_LOG_SIZE = 0x40000
 # --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
 # <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
@@ -139,8 +152,14 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
         cpu_regs = None
         board_compat = cstr('xiaomi,sweet') + cstr('qcom,sm7150')
     # Carve the panic log off the top so the kernel never allocates over it.
-    panic_base = phys_base + mem_size - PANIC_LOG_SIZE
-    mem_size -= PANIC_LOG_SIZE
+    if g4 and not qemu:
+        # Plain RAM the recovery can read back; see G4_PANIC_LOG_PA.
+        panic_base = G4_PANIC_LOG_PA
+        panic_size = G4_PANIC_LOG_SIZE
+    else:
+        panic_base = phys_base + mem_size - PANIC_LOG_SIZE
+        panic_size = PANIC_LOG_SIZE
+        mem_size -= PANIC_LOG_SIZE
     timebase = TIMEBASE
     if qemu:
         # The G4 profile also has to use QEMU's GIC addresses: QEMU virt has
@@ -163,7 +182,7 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
+        ('embedded-panic-log-size', u32(panic_size)),
         ('firmware-version', cstr('g4-shim' if g4 else 'sweet-shim')),
         ('system-firmware-version', cstr('g4-shim' if g4 else 'sweet-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
@@ -318,7 +337,7 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
     # dram-size we expose, so XNU maps it but never allocates into it.
-    pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
+    pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(panic_size))])
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
