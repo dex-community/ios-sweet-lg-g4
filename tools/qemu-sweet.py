@@ -24,6 +24,12 @@ import argparse, json, os, shutil, socket, struct, subprocess, sys, time, zlib
 
 FB_BASE, FB_W, FB_H = 0x9c000000, 1080, 2400
 FB_STRIDE = FB_W * 4
+# The G4 panel is 1440x2560 and the kernel's fbcon lives at 0x20000000.
+# --g4 switches the framebuffer geometry the decoder expects; the fbcon
+# address itself comes from the ADT (sweet-fbcon), so the QEMU RAM must
+# cover it (QEMU virt RAM starts at 0x40000000).
+G4_FB_BASE, G4_FB_W, G4_FB_H = 0x20000000, 1440, 2560
+G4_FB_STRIDE = G4_FB_W * 4
 PAGE = 0x4000
 STUB_PA = 0x40200000	# above the dtb QEMU places at RAM base
 BOOT_LINE_LENGTH = 608
@@ -74,7 +80,7 @@ def check_kernel_tools(kernel_path):
     return True
 
 
-def build_image(payload):
+def build_image(payload, g4=False):
     """Return (phys_base, ram_image, boot_args_pa, entry_pa)."""
     magic, ver, nsegs = struct.unpack_from('<8sII', payload, 0)
     assert magic == b'SWEETXNU' and ver == 1, 'not a SWEETXNU v1 payload'
@@ -91,8 +97,10 @@ def build_image(payload):
         o = vmaddr + delta - phys_base
         img[o:o + fsize] = payload[foff:foff + fsize]
     img[adt_pa - phys_base:adt_pa - phys_base + adt_size] = payload[adt_off:adt_off + adt_size]
+    fb_base, fb_stride, fb_w, fb_h = (G4_FB_BASE, G4_FB_STRIDE, G4_FB_W, G4_FB_H) if g4 \
+        else (FB_BASE, FB_STRIDE, FB_W, FB_H)
     ba = struct.pack('<HH4x4Q6QI4xQI', 2, 2, virt_base, phys_base, mem_size, top,
-                     FB_BASE, 1, FB_STRIDE, FB_W, FB_H, 32, 0, adt_pa - delta, adt_size)
+                     fb_base, 1, fb_stride, fb_w, fb_h, 32, 0, adt_pa - delta, adt_size)
     ba += cmdline + b'\0' * 4 + struct.pack('<QQ', 0, mem_size)
     assert len(ba) == 736
     img[ba_pa - phys_base:ba_pa - phys_base + len(ba)] = ba
@@ -104,15 +112,15 @@ def stub(ba_pa, entry_pa):
     return struct.pack('<4I2Q', 0x58000080, 0x580000a1, 0xd61f0020, 0xd503201f, ba_pa, entry_pa)
 
 
-def write_png(path, raw):
+def write_png(path, raw, stride=FB_STRIDE, width=FB_W, height=FB_H):
     rows = []
-    for y in range(FB_H):
-        line = raw[y * FB_STRIDE:(y + 1) * FB_STRIDE]
-        rgb = bytearray(FB_W * 3)	# a8r8g8b8 little endian = B G R A in memory
+    for y in range(height):
+        line = raw[y * stride:(y + 1) * stride]
+        rgb = bytearray(width * 3)	# a8r8g8b8 little endian = B G R A in memory
         rgb[0::3], rgb[1::3], rgb[2::3] = line[2::4], line[1::4], line[0::4]
         rows.append(b'\0' + bytes(rgb))
     chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
-    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', FB_W, FB_H, 8, 2, 0, 0, 0))
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
     png += chunk(b'IDAT', zlib.compress(b''.join(rows), 6)) + chunk(b'IEND', b'')
     open(path, 'wb').write(png)
 
@@ -128,16 +136,16 @@ def payload_data(payload, va, size):
     raise ValueError(f'VA {va:#x}+{size:#x} not in initialized payload segments')
 
 
-def decode_screen(raw, font):
+def decode_screen(raw, font, stride=FB_STRIDE, width=FB_W, height=FB_H):
     """Exact glyph matching for pe_serial.c's 2x, white-on-black fbcon."""
     glyphs = {font[c * 16:(c + 1) * 16]: chr(c) for c in range(32, 127)}
     rows, unknown = [], 0
-    for row in range(FB_H // 32):
+    for row in range(height // 32):
         chars = []
-        for col in range(FB_W // 16):
+        for col in range(width // 16):
             glyph = bytearray(16)
             for y in range(16):
-                offset = (row * 32 + y * 2) * FB_STRIDE + col * 16 * 4
+                offset = (row * 32 + y * 2) * stride + col * 16 * 4
                 for x in range(8):
                     if raw[offset + x * 8:offset + x * 8 + 4] == b'\xff' * 4:
                         glyph[y] |= 1 << x
@@ -227,6 +235,8 @@ def main():
     ap.add_argument('--kernel', help='matching unstripped kernel, for exact framebuffer text decoding (uses llvm-nm)')
     ap.add_argument('--fail-on-panic', action='store_true', help='exit 2 for a visible panic, 3 for incomplete/blank decoding; requires --kernel')
     ap.add_argument('--live-serial', action='store_true', help='stream serial console output to stdout in real time')
+    ap.add_argument('--g4', action='store_true',
+                    help='the LG G4 panel (1440x2560 at 0x20000000) instead of the SWEET one')
     ap.add_argument('--check-env', action='store_true', help='check QEMU installation and dependencies without running a payload')
     a = ap.parse_args()
 
@@ -262,7 +272,7 @@ def main():
     os.makedirs(a.outdir, exist_ok=True)
     out = os.path.abspath(a.outdir)
 
-    phys_base, img, ba_pa, entry_pa = build_image(payload)
+    phys_base, img, ba_pa, entry_pa = build_image(payload, g4=a.g4)
     open(f'{out}/ram.bin', 'wb').write(img)
     open(f'{out}/stub.bin', 'wb').write(stub(ba_pa, entry_pa))
     print(f'phys_base={phys_base:#x} boot_args={ba_pa:#x} entry={entry_pa:#x}', file=sys.stderr)
@@ -304,15 +314,17 @@ def main():
 
         result = {'status': 'qemu_exited', 'qemu_returncode': p.returncode}
         if p.poll() is None:
-            _, regs, *extra = qmp(mon, 'stop', 'info registers', *a.hmp, pmemsave=(FB_BASE, FB_STRIDE * FB_H, f'{out}/fb.raw'))
+            fb_base, fb_stride, fb_w, fb_h = (G4_FB_BASE, G4_FB_STRIDE, G4_FB_W, G4_FB_H) if a.g4 \
+                else (FB_BASE, FB_STRIDE, FB_W, FB_H)
+            _, regs, *extra = qmp(mon, 'stop', 'info registers', *a.hmp, pmemsave=(fb_base, fb_stride * fb_h, f'{out}/fb.raw'))
             open(f'{out}/regs.txt', 'w').write(regs + ''.join(f'\n(qemu) {c}\n{r}' for c, r in zip(a.hmp, extra)))
             p.kill()
             p.wait()
             raw = open(f'{out}/fb.raw', 'rb').read()
-            write_png(f'{out}/fb.png', raw)
+            write_png(f'{out}/fb.png', raw, fb_stride, fb_w, fb_h)
             result = {'status': 'not_decoded'}
             if font is not None:
-                screen, unknown = decode_screen(raw, font)
+                screen, unknown = decode_screen(raw, font, fb_stride, fb_w, fb_h)
                 open(f'{out}/fb.txt', 'w').write(screen)
                 result = screen_result(screen, unknown)
             os.unlink(f'{out}/fb.raw')

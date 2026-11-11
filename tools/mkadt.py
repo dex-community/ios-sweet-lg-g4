@@ -142,8 +142,17 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
     timebase = TIMEBASE
-    if qemu and not g4:
+    if qemu:
+        # The G4 profile also has to use QEMU's GIC addresses: QEMU virt has
+        # no device at the G4's 0xf8000000, and XNU writes the GICR
+        # registers during pe_init_fiq (patch 0004), so with the G4 addresses
+        # the kernel takes a data abort there. On the phone the GIC is real.
         gicd, gicr, timebase = QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE
+        # The GICR window has to cover the redistributor frame: XNU writes
+        # GICR_IGROUPR0 at GICR+0x10080 (the SGI/PPI block) while scanning
+        # frames with a 0x20000 stride, so a 4 KiB window makes it write
+        # outside the mapping (data abort).
+        gicd_size, gicr_size = 0x10000, 0x100000
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -254,6 +263,17 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
         ])])
+
+    # The device tree reserves fb_size bytes for the console, but the panel
+    # geometry (fb_h * fb_stride) can be larger: on the G4 the window is
+    # 12 MiB while 1440x2560x4 needs 14.7 MiB. XNU's fbcon clears every
+    # declared row, so an unclamped height writes past the end of the
+    # mapping and takes a data abort (the kernel then panics and the
+    # watchdog reboots the phone). The shim clamps the same way
+    # (shim/shim.c: "Never draw outside the window the device tree
+    # reserved"), so clamp here too.
+    if fb_stride and fb_size and fb_size // fb_stride < fb_h:
+        fb_h = fb_size // fb_stride
 
     fbcon = node('sweet-fbcon', [
         ph(),

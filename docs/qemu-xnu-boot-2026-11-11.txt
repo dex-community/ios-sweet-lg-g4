@@ -1,0 +1,75 @@
+CORE 0 is the one that panicked. Check the full backtrace for detai
+ls.
+Compressor Info: 0% of compressed pages limit (OK) and 0% of segmen
+ts limit (OK) with 0 swapfiles and OK swap space
+Panicked task 0xfffffe24d9177470: 0 pages, 40 threads: pid 0: kerne
+l_task
+Panicked thread: 0xfffffe24d9188430, backtrace: 0xfffffe8fd692f2a0,
+ tid: 101
+    lr: 0xfffffe000732e868  fp: 0xfffffe8fd692f320
+    lr: 0xfffffe00074b65c0  fp: 0xfffffe8fd692f340
+    lr: 0xfffffe00074a6dc0  fp: 0xfffffe8fd692f390
+    lr: 0xfffffe00074a5df8  fp: 0xfffffe8fd692f460
+    lr: 0xfffffe00074a55a4  fp: 0xfffffe8fd692f470
+    lr: 0xfffffe000732dde8  fp: 0xfffffe8fd692f820
+    lr: 0xfffffe000732ef8c  fp: 0xfffffe8fd692f8a0
+    lr: 0xfffffe0007b04010  fp: 0xfffffe8fd692f8c0
+    lr: 0xfffffe0007a9a174  fp: 0xfffffe8fd692f980
+    lr: 0xfffffe00077a1dac  fp: 0xfffffe8fd692fed0
+    lr: 0xfffffe0007b0e96c  fp: 0xfffffe8fd692ff20
+    lr: 0xfffffe00074aa500  fp: 0x0000000000000000
+
+
+** Stackshot Succeeded ** Bytes Traced 4603 (Uncompressed 13072) **
+Original panic string:
+panic(cpu 0 caller 0xfffffe0007a9a174): IOFindBSDRoot: specified ro
+ot memory device, md0, has not been configured @IOKitBSDInit.cpp:84
+4
+handshake structure not initialized
+
+Please go to https://panic.apple.com to report this panic
+
+
+ot memory device, md0, has not been configured @IOKitBSDInit.cpp:84
+4
+Debugger message: panic
+Device: D22
+Hardware Model: iPhone10,3
+ECID: 5357454554000001
+Boot args: debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spa
+m rd=md0
+Memory ID: 0x0
+OS release type: Not set yet
+OS version: Not set yet
+Kernel version: Darwin Kernel Version 22.6.0: Mon Aug 14 05:06:07 U
+TC 2023; runner:xnu-8796.141.3
+Kernel UUID: DAF20843-525B-3361-89C2-65704D54C9E5
+Boot session UUID: 3D8BD0CC-622E-4818-9C28-10F01F6D7580
+iBoot version: sweet-shim
+secure boot?: NO
+roots installed: 0
+Paniclog version: 14
+Kernel text base:  0xfffffe0007004000
+mach_absolute_time: 0x71976c85
+Epoch Time:        sec       usec
+  Boot    : 0x0000001e 0x0005869e
+  Sleep   : 0x00000000 0x00000000
+  Wake    : 0x00000000 0x00000000
+  Calendar: 0x0000001e 0x0007816f
+
+Zone info:
+  Zone map: 0xfffffe100c04c000 - 0xfffffe300c04c000
+  . PGZ   : 0xfffffe100c04c000 - 0xfffffe100c9a0000
+  . VM    : 0xfffffe100c9a0000 - 0xfffffe14d9504000
+  . RO    : 0xfffffe14d9504000 - 0xfffffe1672e24000
+  . GEN0  : 0xfffffe1672e24000 - 0xfffffe1b3f988000
+  . GEN1  : 0xfffffe1b3f988000 - 0xfffffe200c4f0000
+  . GEN2  : 0xfffffe200c4f0000 - 0xfffffe24d9058000
+  . GEN3  : 0xfffffe24d9058000 - 0xfffffe29a5bc0000
+  . DATA  : 0xfffffe29a5bc0000 - 0xfffffe300c04c000
+  Metadata: 0xfffffe46dddfc000 - 0xfffffe46e5dfc000
+  Bitmaps : 0xfffffe46e5dfc000 - 0xfffffe46e617c000
+  Extra   : 0 - 0
+
+TPIDRx_ELy = {1: 0xfffffe24d9188430  0: 0x0000000000000000  0ro: 0x
+0000000000000000 }

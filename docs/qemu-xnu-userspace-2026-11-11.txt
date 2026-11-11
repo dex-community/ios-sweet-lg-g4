@@ -1,0 +1,75 @@
+6384, drv_buf_seg_size 65536 [eff 81920], usr_buf_seg_size 16384
+Skywalk: running self-tests
+Skywalk: sk_copy64_8 ... PASSED
+Skywalk: sk_copy32_8 ... PASSED
+Skywalk: sk_copy64_16 ... PASSED
+Skywalk: sk_copy32_16 ... PASSED
+Skywalk: sk_copy64_20 ... PASSED
+Skywalk: sk_copy64_24 ... PASSED
+Skywalk: sk_copy64_32 ... PASSED
+Skywalk: sk_copy32_32 ... PASSED
+Skywalk: sk_copy64_40 ... PASSED
+Skywalk: sk_copy64_64x ... PASSED
+Skywalk: sk_copy64_32x ... PASSED
+Skywalk: sk_copy64_8x ... PASSED
+Skywalk: sk_copy64_4x ... PASSED
+Skywalk: sk_zero_16 ... PASSED
+Skywalk: sk_zero_32 ... PASSED
+Skywalk: sk_zero_48 ... PASSED
+Skywalk: sk_zero_128 ... PASSED
+Skywalk: memcmp mask ... PASSED
+bsd_autoconf: calling kminit
+ifnet_attach: All kernel threads created for interface lo0 have bee
+n scheduled at least once. Proceeding.
+ifnet_attach: Waiting for all kernel threads created for interface
+gif0 to get scheduled at least once.
+ifnet_attach: All kernel threads created for interface gif0 have be
+en scheduled at least once. Proceeding.
+skip attaching fsw to lo0 using legacy TX modelifnet_attach: Waitin
+g for all kernel threads created for interface stf0 to get schedule
+d at least once.
+ifnet_attach: All kernel threads created for interface stf0 have be
+en scheduled at least once. Proceeding.
+Added memory device md0/rmd0 (01000000/12000000) at FFFFFE000852C00
+0 for 0000000000008000
+BSD root: md0, major 1, minor 0
+Serial keyboard started
+vm_free_delayed_pages: initialized 0 free pages
+VM Swap Subsystem is ON
+No POST boot-arg set.
+load_init_program: attempting to load /usr/appleinternal/sbin/launc
+hd.development
+load_init_program: attempting to load /sbin/launchd
+
+
+_number 0 is type 0
+SWEET CPU: requested=1 selected=1 (limit=8)
+cpu_start() cpu: 0
+SWEET CPU: cpu=0 entered initCPU mpidr=0x0 EL1 IRQs=1
+SWEET CPU: cpu=0 mpidr=0x0 came alive; SGI1 OK
+Copyright (c) 1982, 1986, 1989, 1991, 1993
+ The Regents of the University of California. All rights reserved.
+
+MAC Framework successfully initialized
+SWEET CPU: 1/1 CPUs initialized, SGI1 verified
+using 1527 buffer headers and 1527 cluster IO buffer headers
+SWEET FB: AppleCLCD 1080x2400 stride 4320 at 0x9c000000, default su
+rface 1, presented as 1125x2436
+ktriage_register_subsystem_strings: set subsystem 8 strings
+calling mpo_policy_init for SWEET AMFI
+Security policy loaded: SWEET built-in Mobile File Integrity (SWEET
+ AMFI)
+SWEET AMFI: platform binary policy registered (0)
+calling mpo_policy_init for Sandbox
+Security policy loaded: SWEET permissive sandbox stand-in (Sandbox)
+SWEET Sandbox: permissive policy registered (0)
+SWEET HFS: hfs-627.100.6 registered
+mcache: 1 CPU(s), 64 bytes CPU cache line size
+mbinit: done [64 MB total pool size, (42/21) split]
+SK: netagent is enabled by default for this platform
+DLIL: running SUM16 self-tests ... PASSED
+dlil_init: Waiting for all the create dlil kernel threads to get sc
+heduled at least once.
+dlil_init: All the created dlil kernel threads have been scheduled
+at least once. Proceeding.
+SK[0]: skmem_region_init              seg_size 16384, md_seg_size 1
