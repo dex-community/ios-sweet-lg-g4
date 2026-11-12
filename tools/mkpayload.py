@@ -147,8 +147,10 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     segs = [s for s in m['segs'] if s['vmsize']]
     text = m['segs'][0]
     assert text['name'] == '__TEXT' and text['fileoff'] == 0
-    # virt_base: 32MB (16K-granule L2 block) below the mach header, so start.s's
-    # block mapping that starts at the header's block begins exactly at phys_base.
+    # virt_base: 32MB below the mach header. The kernel is built for the
+    # 4 KiB granule (the Cortex-A53 has no 16 KiB one), so an L2 block is
+    # 2MB; 32MB is a multiple of it, and start.s's block mapping that
+    # starts at the header's block still begins exactly at phys_base.
     virt_base = text['vmaddr'] & ~(0x2000000 - 1)
     kernel_end = max(s['vmaddr'] + s['vmsize'] for s in segs)
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)

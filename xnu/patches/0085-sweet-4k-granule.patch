@@ -1,0 +1,84 @@
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 8c95880..c800590 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -337,6 +337,19 @@ ARM64_PLKSEG_ADDR  =0xfffffe0004004000
+ ARM64_LINK_ADDR    =0xfffffe0007004000
+ endif
+ 
++# The SWEET board (Qualcomm msm8992, Cortex-A53) runs XNU with 4 KiB
++# pages, so it cannot use the ARM_LARGE_MEMORY layout: that one puts the
++# kernel in a 48 bit address space, while 4 KiB pages give T0SZ_BOOT = 26
++# (38 bits) at most, and the kernel link address 0xfffffe00_0700_4000 is
++# outside it. The 37 bit layout below (kernel link address
++# 0xfffffff0_0700_4000, VM_MIN_KERNEL_ADDRESS 0xffffffe0_0000_0000) is
++# the one BCM2837, the other 4K ARM64 board XNU supports, uses.
++ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)
++LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY
++ARM64_PLKSEG_ADDR  =0xfffffff004004000
++ARM64_LINK_ADDR    =0xfffffff007004000
++endif
++
+ 
+ CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
+ 			$(LARGE_MEMORY_DEFINE) -momit-leaf-frame-pointer -fno-strict-aliasing -D__API__=v4 -mkernel
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index a5cc676..61753f3 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -1,12 +1,20 @@
+ /*
+- * Board config for the Redmi Note 10 Pro ("sweet", Qualcomm SM7150 /
+- * Snapdragon 732G): Kryo 470 = Cortex-A76 + Cortex-A55, ARMv8.2, no PAC.
++ * Board config for the LG G4 H815 ("sweet", Qualcomm msm8992 / Snapdragon
++ * 820): Cortex-A53 r3p0 + Cortex-A72, Armv8.0, no PAC, no LSE atomics.
+  *
+  * Generic ARM like BCM2837 (no APPLE_ARM64_ARCH_FAMILY: none of Apple's
+- * implementation-defined system registers exist), 16K pages and GICv3 like
++ * implementation-defined system registers exist), 4K pages and GICv3 like
+  * VMAPPLE. Unlike VMAPPLE the GIC has two security states (GICD_TYPER
+  * SecurityExtn=1): Group 0 belongs to TrustZone, so every interrupt,
+  * including the timer, is a Group 1 IRQ taken through sleh_irq().
++ *
++ * The pages are 4K, not 16K. The Cortex-A53 is Armv8.0 and implements the
++ * 4K and the 64K granule, but NOT the 16K one: that one needs FEAT_LPA2
++ * (Armv8.2), as on the A75/A76 of the original sweet board. Asking for a
++ * granule the hardware does not have is silently ignored: the kernel
++ * programs TCR_EL1.TG0 = 16K, the core reads back TG0 = 4K, and from then
++ * on the page tables are walked with the wrong shifts, so the MMU kills the
++ * kernel at the first fetch after "MSR SCTLR_EL1" (see NOTES.md).
+  */
+ 
+ #ifndef _PEXPERT_ARM64_SWEET_H
+@@ -18,10 +26,11 @@
+ #define SWEET                     1
+ 
+ /*
+- * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
+- * cpus=N is clamped here. Same ISA level (ARMv8.2), 64-byte lines, PSCI
+- * CPU_ON; the scheduler does not know the A76s are faster (no AMP/P-E
+- * clusters yet).
++ * The cores of the G4 (two Cortex-A53 and two Cortex-A72) as one
++ * homogeneous SMP cluster: cpus=N is clamped here. Same ISA level
++ * (Armv8.0), 64-byte lines, PSCI CPU_ON; the scheduler does not know the
++ * A72s are faster (no AMP/P-E clusters yet). The number of cores really
++ * comes from the device tree, this is only the upper bound.
+  */
+ #define SWEET_SMP_MAX_CPUS         8
+ 
+@@ -34,7 +43,14 @@
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
+ #define __ARM_PAN_AVAILABLE__     1
+-#define __ARM_16K_PG__            1
++/*
++ * 4 KiB pages (see the comment at the top of this file).
++ *
++ * __ARM64_PMAP_SUBPAGE_L1__ is what BCM2837, the other 4K ARM64 board
++ * XNU supports, uses: it narrows the level 1 table to 256 entries, so
++ * T0SZ_BOOT becomes 26 and the virtual address space is 38 bits wide.
++ */
++#define __ARM64_PMAP_SUBPAGE_L1__ 1
+ 
+ #define HAS_GIC_V3                1
+ 

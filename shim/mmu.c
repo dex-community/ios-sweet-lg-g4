@@ -108,14 +108,20 @@ static void zero_table(uint64_t *t)
 }
 
 /*
- * ID_AA64MMFR0_EL1.TGran1, bits [23:20]: the granule sizes the core
- * implements for TTBR1. The encoding is a bitmask, not a code:
- * 0b0001 = 4 KiB, 0b0010 = 16 KiB, 0b0100 = 64 KiB, and the bits can be
- * combined (0b0110 = 4 KiB and 16 KiB, 0b0111 = all three).
+ * ID_AA64MMFR0_EL1.TGran16, bits [23:20]: the granule sizes the core
+ * implements for the TTBR1 regime. The encoding is a bitmask, not a code:
+ * bit 0 "4 KiB implemented", bit 1 "16 KiB", bit 2 "64 KiB", and the bits
+ * can be combined (0b0110 = 4 KiB and 16 KiB, 0b0111 = all three).
  *
  * The check is "is 16 KiB implemented", i.e. bit 1 set: (v & 0x2) != 0.
  * The old test was "any of the bits set", which passes on a core that
  * only implements 4 KiB.
+ *
+ * On the G4 this is 0: the Cortex-A53 is Armv8.0 and has no 16 KiB
+ * granule (that needs FEAT_LPA2, Armv8.2, as on the A75/A76 of the sweet
+ * board), so the shim runs with the MMU off and lets XNU build its own
+ * tables. The kernel must therefore be built for the 4 KiB granule: see
+ * xnu/patches/0085-sweet-4k-granule.patch.
  */
 int mmu_granule_ok(void)
 {

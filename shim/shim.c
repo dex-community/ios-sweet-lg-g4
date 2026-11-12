@@ -1413,16 +1413,33 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	con_hex("SCTLR1", mi.sctlr_after);
 	con_hex("TCR", rsr("tcr_el1"));
 	/*
-	 * PARange is bits [3:0] of ID_AA64MMFR0_EL1 (the physical address
-	 * range), NOT a granule. The granule fields are TGran4 [15:12],
-	 * TGran16 [19:16] and TGran64 [23:20], and each is a bitmask: bit 0
-	 * means "4 KiB implemented", bit 1 "16 KiB", bit 2 "64 KiB".
+	 * ID_AA64MMFR0_EL1, field by field (ARM ARM DDI0487 and Apple's
+	 * osfmk/arm64/proc_reg.h, which draws the register):
+	 *
+	 *   [3:0]   PARange      the physical address range
+	 *   [7:4]   ASIDbits
+	 *   [11:8]  BigEnd
+	 *   [15:12] SNSMem
+	 *   [19:16] BigEndEL0
+	 *   [23:20] TGran16
+	 *   [27:24] TGran64
+	 *   [31:28] TGran4
+	 *
+	 * The granule fields are a bitmask of the granule sizes the core
+	 * implements: bit 0 "4 KiB", bit 1 "16 KiB", bit 2 "64 KiB". The
+	 * labels below used to be shifted by one field (the "16k=" of TGRAN
+	 * was really BigEndEL0), and that mislabelling is what made us
+	 * believe for a while that the G4 had a 16 KiB granule: the G4's
+	 * TGran16 is 0, the Cortex-A53 is Armv8.0 and implements the 4 KiB
+	 * and the 64 KiB granule, not the 16 KiB one (that needs FEAT_LPA2,
+	 * Armv8.2, as on the A75/A76 of the sweet board).
 	 */
-	con_hex2("PARANGE", "pa=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf),
-		 "tgran4=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 12) & 0xf));
-	con_hex2("TGRAN", "16k=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 16) & 0xf),
-		 "64k=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
-	con_hex2("GRANULE", "16k=", mmu_granule_ok() ? 1 : 0, "tg1=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
+	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));
+	con_hex2("PARANGE", "pa=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf));
+	con_hex2("TGRAN4", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 28) & 0xf));
+	con_hex2("TGRAN16", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
+	con_hex2("TGRAN64", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 24) & 0xf));
+	con_hex2("GRANULE", "16k=", mmu_granule_ok() ? 1 : 0);
 	con_skip();
 	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
 	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));

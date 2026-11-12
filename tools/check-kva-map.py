@@ -34,9 +34,16 @@ spec.loader.exec_module(rp)
 
 # ARM64 translation table descriptors (osfmk/arm64/proc_reg.h).
 TTE_VALID = 1 << 0
-TTE_TYPE_MASK = 3 << 1
-TTE_TABLE = 3 << 1
-TTE_BLOCK = 1 << 1
+# The type of a descriptor is in bits [1:0] of the entry (ARM ARM, and
+# osfmk/arm64/proc_reg.h: ARM_TTE_TYPE_MASK is 0x2, ARM_TTE_TYPE_TABLE is
+# 0x2, ARM_TTE_TYPE_BLOCK is 0x0):
+#   0b00  block at level 1 or 2
+#   0b10  table (the next level)
+#   0b11  page at level 3
+TTE_TYPE_MASK = 3
+TTE_TABLE = 2
+TTE_BLOCK = 0
+TTE_PAGE = 3
 TTE_TABLE_MASK = 0x0000FFFFFFFFF000
 TTE_BLOCK_MASK = 0x0000FFFFFFFF0000
 TTE_AF = 1 << 10
@@ -44,9 +51,19 @@ TTE_NX = 1 << 54
 TTE_PNX = 1 << 53
 
 # The granule codes of TCR_EL1 (proc_reg.h: TCR_TG0/TG1_GRANULE_*).
-TG_4KB = 0
-TG_64KB = 1
-TG_16KB = 2
+# TG0 and TG1 do NOT use the same encoding:
+#   TG0, bits [15:14]: 0b00 = 4 KiB, 0b01 = 64 KiB, 0b10 = 16 KiB
+#   TG1, bits [31:30]: 0b00 = 4 KiB, 0b01 = 16 KiB, 0b10 = 4 KiB,
+#                      0b11 = 64 KiB
+TG0_CODES = {0: "4 KB", 1: "64 KB", 2: "16 KB"}
+TG1_CODES = {0: "4 KB", 1: "16 KB", 2: "4 KB", 3: "64 KB"}
+# The shifts of the walk: L1 covers 2^39 in every case, L2 and L3 depend
+# on the granule (a 16 KiB L2 block covers 2^25).
+GRANULE_SHIFTS = {
+    "4 KB": (30, 21),
+    "16 KB": (25, 14),
+    "64 KB": (24, 16),
+}
 
 
 def read_at(pa, size):
@@ -71,20 +88,22 @@ def is_block(e):
     return bool(e & TTE_VALID) and (e & TTE_TYPE_MASK) == TTE_BLOCK
 
 
+def is_page(e):
+    return bool(e & TTE_VALID) and (e & TTE_TYPE_MASK) == TTE_PAGE
+
+
 def granule_of(tcr, high):
     """The granule of TTBR0 (low) or TTBR1 (high) and the shifts of the
     walk: L1 covers 2^39, L2 and L3 depend on the granule."""
     if high:
         code = (tcr >> 30) & 3
+        name = TG1_CODES.get(code, "?")
     else:
         code = (tcr >> 14) & 3
-    if code == TG_16KB:
-        return "16 KB", 25, 15
-    if code == TG_4KB:
-        return "4 KB", 30, 21
-    if code == TG_64KB:
-        return "64 KB", 24, 16
-    return "? (reserved code %d)" % code, 30, 21
+        name = TG0_CODES.get(code, "?")
+    if name.startswith("?"):
+        return name, 30, 21
+    return name, *GRANULE_SHIFTS[name]
 
 
 def walk(root, va, tcr, label, high):
@@ -119,8 +138,8 @@ def walk(root, va, tcr, label, high):
     l3_index = (va >> l3_shift) & 0x1FF
     l3 = entry64(l3_table + l3_index * 8)
     print(f"    L3[{l3_index:#x}] = {l3:#018x} "
-          f"{'(block)' if is_block(l3) else '(NOT A BLOCK)'}")
-    if not is_block(l3):
+          f"{'(page)' if is_page(l3) else '(block)' if is_block(l3) else '(NOT A PAGE)'}")
+    if not (is_page(l3) or is_block(l3)):
         return None
     pa = (l3 & TTE_BLOCK_MASK) | (va & ((1 << l3_shift) - 1))
     attrs = []
@@ -162,7 +181,8 @@ def main(argv):
         if head[:8] != b"SWEETXNU":
             print(f"{payload}: not a SWEETXNU payload")
             return 1
-        virt_base, entry_va, = struct.unpack_from("<Q", head, 0x10)
+        virt_base, = struct.unpack_from("<Q", head, 0x10)
+        entry_va, = struct.unpack_from("<Q", head, 0x18)
         phys_base, = struct.unpack_from("<Q", head, 0x38)
         # The entry VA is in the payload header (offset 0x18). The physical
         # address of the entry is the same offset inside the kernel image,
