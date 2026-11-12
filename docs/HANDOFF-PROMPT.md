@@ -75,6 +75,17 @@ driver eMMC per XNU, il display (MDP/DSI command mode) e l'input.
 > La **mappa fisica non cambia** (entry a PA `0x814a8488` come prima):
 > cambia solo la finestra virtuale (47 → 38 bit).
 >
+> **Attenzione: anche il limite dello spazio utente va cambiato.** La
+> prima CI a 4 KiB (`43270348148`) è morta su una `static_assert` **di
+> upstream** in `osfmk/arm/pmap/pmap.c`:
+> `(0xFFFFFC000 & ~0x3FFFFFFF) >= MACH_VM_MAX_ADDRESS`, cioè **63 GiB >=
+> 128 TiB**. Con 4 KiB il commpage è annidato in un **blocco L1 da 1 GiB a
+> 63 GiB** (`_COMM_PAGE64_NESTING_START`) e quel blocco deve stare **sopra**
+> lo spazio utente: serve quindi il limite **iOS** (63 GiB), non quello
+> macOS (128 TiB). La patch 0085 lo cambia in `osfmk/mach/arm/vm_param.h`
+> per `ARM64_BOARD_CONFIG_SWEET` — che è anche il limite giusto, perché il
+> nostro userspace è quello di iOS.
+>
 > **Da controllare nel nuovo binario**: `TCR_EL1` = `0x002a51a161a`
 > (T0SZ 26, **TG0 `0b00` = 4 KiB**, T1SZ 26, TG1 `0b10`, IPS 40 bit),
 > entry VA `0xfffffff0074a8488`, e il **marker 12** che deve comparire.

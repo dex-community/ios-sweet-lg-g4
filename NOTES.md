@@ -4480,6 +4480,43 @@ fisico di prima (`0x814a8488` per l'entry) e cambia solo la finestra
 virtuale (da 47 a 38 bit). `tools/mkpayload.py` deriva `virt_base` dal
 binario, quindi si adatta da solo.
 
+### Il limite dello spazio utente: iOS, non macOS
+
+La prima CI con il build a 4 KiB (`43270348148`) è **fallita** su una
+`static_assert` di **upstream**, non su una nostra patch:
+
+```
+osfmk/arm/pmap/pmap.c:10988: error: static assertion failed due to requirement
+'((68719460352ULL) & ~1073741823ULL) >= ((unsigned long long)140737454800896ULL)'
+```
+
+cioè `(0xFFFFFC000 & ~0x3FFFFFFF) >= MACH_VM_MAX_ADDRESS`, cioè
+**63 GiB >= 128 TiB**: falso.
+
+Il perché è nel progetto del commpage:
+
+- `_COMM_PAGE64_BASE_ADDRESS = 0x000FFFFFC000` (64 GiB) e
+  `_COMM_PAGE64_NESTING_START = 0x000FC0000000` (63 GiB) con
+  `NESTING_SIZE = 1 GiB`: con 4 KiB il commpage è annidato in un **blocco
+  di livello 1 da 1 GiB** e quel blocco è [63 GiB, 64 GiB);
+- il blocco deve stare **sopra** lo spazio utente, altrimenti le
+  mappature dell'utente ci finirebbero dentro;
+- `MACH_VM_MAX_ADDRESS` è 128 TiB per macOS e **63 GiB per tutto il resto**
+  (`osfmk/mach/arm/vm_param.h`), cioè il valore iOS.
+
+Con 16 KiB l'assert è diverso (guarda il commpage a 32 bit e usa
+`ARM_TT_L2_OFFMASK`) e passa, ma con 4 KiB **impone** il limite iOS.
+
+La correzione è in `osfmk/mach/arm/vm_param.h`: per la board SWEET si usa
+il valore iOS anche se la piattaforma di build è `MacOSX`. Non è un
+aggiramento: **il nostro userspace è quello di iOS**, quindi il limite
+giusto è quello iOS.
+
+Nota: la guardia usa `ARM64_BOARD_CONFIG_SWEET` (una `-D` che arriva con
+`MACHINE_FLAGS_ARM64_SWEET`), non `SWEET`: il macro `SWEET` vive in
+`pexpert/arm64/SWEET.h` e in `osfmk/mach/arm/vm_param.h` non è sempre
+visibile, perché `proc_reg.h` (che lo include) è a sua volta condizionato.
+
 ### Cosa controllare nel nuovo binario
 
 - `TCR_EL1` atteso: `0x002a51a161a` → T0SZ 26, **TG0 `0b00` = 4 KiB**,
