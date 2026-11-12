@@ -162,10 +162,11 @@ INFO_FIELDS = [
     (0x08, "mem_size"),
     (0x10, "TCR_EL1"),
     (0x18, "TTBR0_EL1"),
-    (0x20, "SCTLR_EL1"),
+    (0x20, "TTBR1_EL1"),
     (0x28, "CurrentEL"),
     (0x30, "MPIDR_EL1"),
     (0x38, "MIDR_EL1"),
+    (0x40, "SCTLR_EL1"),
 ]
 
 
@@ -252,10 +253,17 @@ def show_info(blob):
         print(f"  TCR_EL1: T0SZ {tcr & 0x3F:#x} TG0 {(tcr >> 15) & 3:#x} "
               f"SH0 {(tcr >> 8) & 3:#x} IRGN0 {(tcr >> 12) & 7:#x} "
               f"ORGN0 {(tcr >> 10) & 7:#x} TG1 {(tcr >> 30) & 3:#x}")
+    ttbr1 = values["TTBR1_EL1"]
+    if ttbr1:
+        print(f"  TTBR1_EL1 {ttbr1:#x} (the root of the KVA map: the kernel "
+              "text is fetched through it)")
     sctlr = values["SCTLR_EL1"]
     if sctlr:
         print(f"  SCTLR_EL1: M {sctlr & 1:#x} C {(sctlr >> 2) & 1:#x} "
               f"I {(sctlr >> 12) & 1:#x}")
+    elif not tcr:
+        print("  (the translation registers are blank: the kernel died "
+              "before marker 3)")
     return values
 
 

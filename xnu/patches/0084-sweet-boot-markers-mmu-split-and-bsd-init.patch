@@ -70,7 +70,7 @@ index f819fea..bcaf441 100644
  # These headers will be available with #include <arm64/header_file.h>
  EXPORT_MD_DIR = arm64
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 9fdd184..fc977f8 100644
+index 9fdd184..b86f680 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -129,6 +129,9 @@
@@ -83,7 +83,7 @@ index 9fdd184..fc977f8 100644
  #define SWEET_MARK_BASE		0x90003000
  #define SWEET_MARK_INFO		0x90003800
  
-@@ -973,11 +976,49 @@ common_start:
+@@ -973,11 +976,62 @@ common_start:
  	MOV64   x0, SCTLR_EL1_DEFAULT
  
  #if defined(SWEET)
@@ -100,6 +100,19 @@ index 9fdd184..fc977f8 100644
  	SWEET_MARK SWEET_MARK_BASE + 0x240, 0x5EED000A
 +	movz	x10, #((SWEET_MARK_INFO) & 0xffff)
 +	movk	x10, #((((SWEET_MARK_INFO) >> 16)) & 0xffff), lsl #16
++	/*
++	 * The translation registers, read BEFORE the switch: the kernel has
++	 * written them at markers 6 and 7, and they are readable with the MMU
++	 * off. Without them there is no way to tell a wrong granule or a
++	 * wrong TTBR1 from the RAM: the values would only be written at
++	 * marker 3, which the G4 never reaches.
++	 */
++	mrs		x11, TCR_EL1
++	str		x11, [x10, #0x10]
++	mrs		x11, TTBR0_EL1
++	str		x11, [x10, #0x18]
++	mrs		x11, TTBR1_EL1
++	str		x11, [x10, #0x20]
 +	mrs		x11, CurrentEL
 +	str		x11, [x10, #0x28]
 +	mrs		x11, MPIDR_EL1
@@ -135,6 +148,15 @@ index 9fdd184..fc977f8 100644
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
+@@ -996,7 +1050,7 @@ common_start:
+ 	mrs		x11, TTBR0_EL1
+ 	str		x11, [x10, #0x18]
+ 	mrs		x11, SCTLR_EL1
+-	str		x11, [x10, #0x20]
++	str		x11, [x10, #0x40]
+ 	dc		civac, x10
+ 	dsb		sy
+ #endif
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 index eda0626..4090bae 100644
 --- a/osfmk/arm64/sweet_early.c
