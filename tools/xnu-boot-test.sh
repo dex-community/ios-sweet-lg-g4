@@ -148,6 +148,14 @@ else
 	say "(no kernel or payload to compute the addresses: skipping the XNU log)"
 fi
 
+# The boot markers live in a page of plain RAM that the recovery does not
+# reuse, so they survive the reset: they say how far the kernel got.
+say "=== the boot markers ==="
+python3 tools/read-pram.py --marks 2>&1 | tee -a "$OUT" || true
+
+say "=== the exception probe ==="
+python3 tools/read-pram.py --exc 2>&1 | tee -a "$OUT" || true
+
 say "=== the log of the shim ==="
 python3 tools/read-shim-log.py 2>&1 | tee -a "$OUT" || true
 
