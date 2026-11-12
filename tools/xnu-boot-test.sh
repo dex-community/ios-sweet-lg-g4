@@ -30,16 +30,19 @@ COLLECT=0
 if [ "${1:-}" = "--collect" ]; then
 	COLLECT=1
 	shift
-	OUT=${1:-/tmp/xnu-boot-test-$(date +%Y%m%d-%H%M%S).txt}
+	OUT=${1:-$ROOT/work/xnu-boot-test-$(date +%Y%m%d-%H%M%S).txt}
 	RUN_ID=
 	TAG=g4
 else
 	RUN_ID=${1:-}
 	TAG=${2:-g4}
-	OUT=/tmp/xnu-boot-test-$(date +%Y%m%d-%H%M%S).txt
+	OUT=$ROOT/work/xnu-boot-test-$(date +%Y%m%d-%H%M%S).txt
 fi
 
-TWRP_IMG=${TWRP_IMG:-/tmp/device-test-boot.img}
+# The custom TWRP with /dev/mem lives in the project: /tmp is cleaned by the
+# system and without it the RAM of the phone cannot be read.
+TWRP_IMG=${TWRP_IMG:-$ROOT/work/device-test-boot.img}
+[ -f "$TWRP_IMG" ] || TWRP_IMG=/tmp/device-test-boot.img
 SHIM_IMG=shim/out/shim-boot-$TAG.img
 PAYLOAD=shim/out/$TAG.bin
 KERNEL=${KERNEL:-}
