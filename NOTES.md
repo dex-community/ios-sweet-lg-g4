@@ -1,6 +1,6 @@
 # iOS 16 on LG G4 (H815) - working notes
 
-Last update: 2026-11-11 04:10 CET
+Last update: 2026-11-12 02:40 CET
 
 ## HANDOFF 2026-11-11 04:10 - Test ciclo boot completo
 
@@ -3964,3 +3964,148 @@ MAIR, VBAR) funzionano.
   spenta (fisico) e accesa (V=P): funziona in entrambi i mondi.
 - `tools/read-pram.py --marks` decodifica ESR (classe EC, fault status DFSC,
   read/write) e stampa FAR/ELR/SPSR.
+
+## Layout dei marker di boot e decoder aggiornato (2026-11-12)
+
+### Il layout nuovo (albero di lavoro `/tmp/gicbase`)
+I marker non cambiano idea di fondo (una pagina di DRAM, `0x90003000`, che la
+recovery non riusa) ma crescono: ora sono **11**, e coprono anche la
+biforcazione fra "solo MMU" e "MMU + cache", che è il punto in cui il G4
+muore.
+
+| indirizzo | valore | quando |
+| --- | --- | --- |
+| `0x90003000` | `0x5EED0001` | `_start` raggiunto (MMU del bootloader ancora attiva) |
+| `0x90003040` | `0x5EED0002` | tabelle bootstrap costruite |
+| `0x90003100` | `0x5EED0005` | `common_start` entrato, MMU ancora spenta |
+| `0x90003140` | `0x5EED0006` | `TCR_EL1` scritto da `sysreg_restore` |
+| `0x90003180` | `0x5EED0007` | `TTBR0/TTBR1` scritti |
+| `0x900031c0` | `0x5EED0008` | `MAIR_EL1` scritto, TLB invalidato |
+| `0x90003200` | `0x5EED0009` | `VBAR_EL1` = tabella dei vettori di eccezione |
+| `0x90003240` | `0x5EED000A` | sta per scrivere `SCTLR_EL1` (MMU + cache) |
+| `0x900032c0` | `0x5EED000B` | `SCTLR_EL1` con **M=1** scritto (MMU on, cache ancora off) |
+| `0x90003080` | `0x5EED0003` | primo fetch con MMU **e cache** attive |
+| `0x900030c0` | `0x5EED0004` | sta per tornare in `arm_init` |
+
+- **Il marker 11 è nuovo**: il kernel scrive prima `SCTLR_EL1` con `M=1` e le
+  cache spente, poi quello vero. Quindi "marker 11 presente, marker 3
+  assente" = **la traduzione va bene, è l'accensione delle cache che
+  uccide la CPU**; "marker 10 presente, marker 11 assente" = è la
+  scrittura di `SCTLR_EL1` stessa a fare fault.
+- Blocco **INFO a `0x90003800`**, 8 parole da `0x00`:
+  `phys_base`, `mem_size`, `TCR_EL1`, `TTBR0_EL1`, `SCTLR_EL1`, e ora anche
+  `CurrentEL` (`0x28`), `MPIDR_EL1` (`0x30`), `MIDR_EL1` (`0x38`).
+  `phys_base`/`mem_size` sono post-slide: la loro somma deve fare
+  `0xdff00000`.
+- **Probe delle eccezioni**: `0x90005000` = `ESR_EL1`, `FAR_EL1`, `ELR_EL1`,
+  `SPSR_EL1`; il vettore che ha girato è in `0x90003300` = `0x5EED0B00|slot`
+  (slot 0..15 = le 16 entry di `sweet_exc_vectors`).
+
+### Il decoder (`tools/read-pram.py`)
+Aggiornato al layout sopra:
+- `--marks` decodifica **tutti e 11** i marker, in ordine di esecuzione
+  (non in ordine di offset: 1, 2, 5, 6, 7, 8, 9, 10, 11, 3, 4).
+- Decodifica il blocco INFO campo per campo, e in più interpreta:
+  `CurrentEL` (EL1 vs EL2 — a EL2 XNU **non** accende la propria
+  traduzione e restano le tabelle del bootloader), `MPIDR_EL1`
+  (Aff3/Aff2/Aff1/Aff0), `MIDR_EL1` (nome della CPU: `0x41d0b000` =
+  Cortex-A53), i campi di `TCR_EL1` (T0SZ, TG0, SH0, IRGN0, ORGN0, TG1) e di
+  `SCTLR_EL1` (M, C, I).
+- **Verdetto automatico** in fondo: il marker mancante dice *dove* è morto
+  (niente marker 1 = il salto nel kernel è sbagliato; 10 senza 11 = la
+  scrittura di `SCTLR_EL1` fa fault; 11 senza 3 = le cache; 3 senza 4 = dopo
+  la MMU, prima di `arm_init`; 4 = arriva in `arm_init` e il dettaglio è
+  nella early console).
+- Se una parola `0x5EED00xx` appare fuori dagli offset noti, lo dice: è il
+  segnale che il layout è cambiato ancora.
+- Nuovo `--exc`: stampa solo i registri della probe (ESR con classe EC e
+  fault status DFSC, read/write, FAR, ELR, SPSR).
+- Collaudato offline con pagine sintetiche (nessun telefono serve):
+  `python3 /tmp/test_marks.py` (caso "arriva ad arm_init", "muore sulle
+  cache", "muore con M=1", "nessun marker").
+
+### Nota sul canale di lettura
+- Il buffer early (`sweet_early_buf`) sta in BSS e veniva scritto **con la
+  cache write-back**: un reset non la pulisce, quindi il testo non
+  arrivava in DRAM e la lettura dal recovery dava un buffer vuoto anche se
+  il kernel aveva scritto. La patch `0083` pulisce con `dc civac` le
+  linee del buffer a ogni mark: adesso il testo arriva in RAM. Finché la
+  patch non è nel kernel giusto, **"buffer early vuoto" non vuol dire
+  "il kernel non è partito"**.
+- I marker invece sono puliti a mano (`dc civac` dopo ogni `str`), quindi
+  sono affidabili anche senza la 0083.
+
+## 0012 riscritta e 0084: i marker fino a `bsd_init` (2026-11-12)
+
+### La 0012 era una patch **superata**, non un mismatch
+`tools/check-xnu-patch-chain.sh` segnalava `0012-sweet-keep-debug-console-after-ttbr0.patch`
+come non applicabile. Non era un problema di contesto: la 0012 appartiene al
+**primo design** della early console, quello che disegnava sul framebuffer
+(`SWEET_EARLY_FB_VA`, `sweet_early_map_final`, `sweet_early_relocate`,
+`EARLY_FB` come puntatore). Dal 0010 la console è un **buffer di testo in
+BSS**, quindi il file su cui la 0012 faceva patch non esiste più in quella
+forma.
+
+La sua *intenzione* però è ancora giusta — «tenere la console viva dopo il
+teardown del TTBR0 bootstrap» — e per il design attuale si traduce in un
+punto preciso: **`sweet_early_disable()` veniva chiamato proprio quando il
+TTBR0 bootstrap andava via, e spegneva la console**. Per questo i marchi
+arrivavano solo fino all'8, e il resto del boot era muto.
+
+La 0012 riscritta (rigenerata sull'albero reale, non a mano):
+- **non chiama più `sweet_early_disable()`** al teardown del TTBR0: il buffer
+  è in BSS, il TTBR1 finale lo mappa, quindi continua a funzionare;
+- aggiunge i marchi **10..14** in `arm_vm_init` (TTBR0 spento, puntatori
+  physmap riequilibrati, `pmap_bootstrap`, page table I/O) e **15, 16, 19,
+  20** in `arm_init` (`arm_vm_init` tornata, `serial_init`, `kprintf` pronto),
+  **17 e 18** in `pe_serial` (mapping del fbcon);
+- il limite di stadio di `sweet_early_mark` passa da 8 a **24**, altrimenti
+  i marchi 10..20 verrebbero scartati;
+- **niente alias del framebuffer**: è il lavoro sul display, e aspetta che
+  XNU arrivi a `bsd_init`.
+
+Nota: la 0012 non tocca `start.s`, quindi non è in conflitto con 0083 (che
+pulisce la cache del buffer early): la catena resta interamente applicabile.
+
+### La 0084: marker 11, info a 8 campi, e i marchi del rootfs
+`xnu/patches/0084-sweet-boot-markers-mmu-split-and-bsd-init.patch`, tre cose
+nello stesso esperimento:
+
+1. **Marker 11** (`0x5EED000B` a `0x900032c0`): il kernel scrive prima
+   `SCTLR_EL1` **con M=1 e le cache spente** (`SCTLR_EL1_M_ONLY`), poi quello
+   vero. Quindi:
+   - marker 10 presente, **11 assente** → è la scrittura di `SCTLR_EL1` a fare
+     fault;
+   - **11 presente, 3 assente** → la traduzione funziona e sono **le cache**
+     a uccidere la CPU.
+2. **Info a 8 campi** (`0x90003800`): oltre a `phys_base`, `mem_size`,
+   `TCR_EL1`, `TTBR0_EL1`, `SCTLR_EL1` ora ci sono `CurrentEL` (`+0x28`),
+   `MPIDR_EL1` (`+0x30`) e `MIDR_EL1` (`+0x38`). `CurrentEL` dice a che
+   livello è entrato il kernel: **a EL2 XNU non accende la propria
+   traduzione** e restano le tabelle del bootloader.
+3. **I marchi del rootfs**:
+   - `sweet_mark()` in `sweet_early.c`: scrive un marker nella **stessa
+     pagina** dei marker dell'assembly (`0x90003000`), con lo stesso
+     `dc civac`, così la recovery lo rilegge dopo il reset del watchdog;
+   - **marker 12** (`0x5EED000C` a `0x90003340`) in `IOKitBSDInit`: il kernel
+     ha superato `bsd_init` e sta cercando il device root;
+   - **marker 13** (`0x5EED000D` a `0x90003380`) in `bsd_init`, subito prima
+     di `vfs_mountroot()`: **sta per montare il rootfs, cioè per fare la
+     lettura HFS+**.
+
+L'ordine è quello reale: `bsd_autoconf()` → `IOKitBSDInit` (riga 801 di
+`bsd_init.c`) avviene **prima** di `vfs_mountroot()` (riga 882), quindi 12
+precede 13.
+
+`sweet_early.h` ha ricevuto la guardia `extern "C"`: il marchio di
+`IOKitBSDInit` è scritto da un file **C++** (`iokit/bsddev/IOKitBSDInit.cpp`)
+e senza la guardia i simboli avrebbero il nome mangled.
+
+### Stato della catena
+`tools/check-xnu-patch-chain.sh`: **89 applicate, 0 fallite** (prima erano 87
+applicate e 1 fallita).
+
+Lo script è stato anche corretto: resettava l'albero a `HEAD` invece che al
+**primo commit**, quindi un albero usato per scrivere una patch (che porta un
+commit della catena già applicata) faceva fallire tutte le patch. Ora fa
+`git reset --hard` sul commit radice.
