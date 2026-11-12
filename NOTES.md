@@ -4133,3 +4133,99 @@ binario, e il log va letto.
 La lezione operativa: **le patch che non si applicano nascondono i loro
 errori di compilazione**. Una catena con patch "saltate" sembra verde e
 semplicemente non fa quello che dice.
+
+## Misura 3 — il kernel muore DENTRO la `MSR SCTLR_EL1` (CI 43138710276)
+
+Immagine `shim/out/shim-boot-g4-mmu.img` (sha256 `2ec47328…0706`), kernel
+della CI `43138710276` (commit `a25aaff`), **solo `fastboot boot`, niente
+flash**.
+
+```
++0x0000  0x5eed0001  OK   _start raggiunto
++0x0040  0x5eed0002  OK   tabelle bootstrap costruite
++0x0100  0x5eed0005  OK   common_start entrato
++0x0140  0x5eed0006  OK   TCR_EL1 scritto
++0x0180  0x5eed0007  OK   TTBR0/TTBR1 scritti
++0x01c0  0x5eed0008  OK   MAIR_EL1 scritto, TLB flush
++0x0200  0x5eed0009  OK   VBAR_EL1 = probe delle eccezioni
++0x0240  0x5eed000a  OK   prima di MSR SCTLR_EL1
++0x02c0  0xfffbfffb  ---  marker 11 (SCTLR_EL1 con M=1)   <-- non arriva
++0x0080  0xffffffff  ---  primo fetch con MMU e cache
++0x00c0  0xdffffff7  ---  ritorno a arm_init
+info: phys_base 0x81004000  mem_size 0x5effc000  end 0xe0000000
+      CurrentEL 0x4 (EL1)  MPIDR_EL1 0x80000000  MIDR_EL1 0x410fd033 (Cortex-A53)
+      TCR/TTBR0/SCTLR = spazzatura (scritti solo al marker 3, mai raggiunto)
+```
+
+- Il telefono è tornato in recovery a **t+10 s** (watchdog).
+- **`emmc_log_buf`: 0 byte** — il driver eMMC non è mai partito.
+- **La probe delle eccezioni è tutta spazzatura** (`ESR_EL1 0xffffffffffffffff`,
+  `FAR_EL1 0xffd7ffffffffffff`, `ELR_EL1 0xfbffdefbfff7fffb`,
+  `SPSR_EL1 0xfffffffffff7fbef`): **non è stata presa alcuna eccezione**.
+  Non è un fault di traduzione: è uno **stop del bus**.
+
+### La conclusione, e perché è nuova
+Il blocco del marker 10 scrive `CurrentEL`, `MPIDR_EL1` e `MIDR_EL1` **dopo**
+il marker, e i tre valori sono **veri** (EL1, CPU 0, Cortex-A53) → la CPU
+era viva e funzionante fino alla fine di quel blocco. Fra quel punto e il
+marker 3 c'è solo:
+
+```
+MOV64   x0, SCTLR_EL1_M_ONLY
+MSR_SCTLR_EL1_X0
+isb     sy
+SWEET_MARK ... 0x2c0, 0x5EED000B     <- mai scritto
+MOV64   x0, SCTLR_EL1_DEFAULT
+MSR_SCTLR_EL1_X0
+isb     sy
+SWEET_MARK ... 0x80, 0x5EED0003      <- mai scritto
+```
+
+Quindi **la morte è dentro la `MSR SCTLR_EL1` (o nell'`isb` subito dopo)**,
+non prima. Prima non si poteva dirlo: il marker 10 era scritto *prima* del
+blocco con le `mrs`, e senza quei valori reali il confine era ambiguo.
+
+### L'esperimento successivo: due marker ai lati della MSR
+La 0084 (seconda revisione) mette un marker **prima** e uno **dopo** la
+scrittura con M=1:
+
+| offset | valore | quando |
+| --- | --- | --- |
+| `0x900032c0` | `0x5EED000B` | sta per scrivere `SCTLR_EL1` con M=1 |
+| `0x900032c4` | `0x5EED000C` | `SCTLR_EL1` con M=1 scritto |
+
+- 11 presente, 12 assente → **la scrittura è il killer**;
+- 11 e 12 presenti, 3 assente → **sono le cache**;
+- 11 assente → la morte è prima, nel blocco del marker 10.
+
+### Due CI fallite, due cause reali
+1. **`arm64/sweet_early.h file not found`** in `pexpert/arm/pe_serial.c` e in
+   `iokit/bsddev/IOKitBSDInit.cpp`: l'header era raggiungibile solo da
+   `osfmk/arm` e `osfmk/arm64` (che compilano con l'albero dei sorgenti sul
+   path degli include); gli altri directory vedono gli header installati.
+   Serve `EXPORT_MD_LIST` in `osfmk/arm64/Makefile`, come `proc_reg.h`.
+   **L'errore era nascosto dalla 0012**, che non si applicava e conteneva la
+   stessa include.
+2. La CI "verde" non vuol dire "il kernel c'è": i passi di raccolta girano
+   anche con `if: always()`. Il run fallito produce un artifact **vuoto**
+   (`SHA256SUMS` da 0 byte). Il kernel va verificato sul binario:
+   `grep -c "#0x5eed"`, il simbolo `sweet_exc_vectors`, e il codice del
+   marker 11 (`mov x10, #0x32c0` + `movk x10, #0x9000, lsl #16`).
+
+### Il lettore della RAM aveva un bug, e ha fatto hangare il telefono
+`read-xnu-early.py` e `read-xnu-log.py` leggevano con `skip=pa//PAGE`:
+se il simbolo **non** è allineato alla pagina, tornano i byte dell'inizio
+della pagina, non quelli del simbolo. La lunghezza letta è quindi spazzatura
+e il lettore chiede **gigabyte**: la lettura finisce nei **buchi** della mappa
+di memoria e il telefono si blocca sul bus AXI (schermo nero, USB muto).
+- Ora l'indirizzo viene tradotto dentro la pagina, e una lunghezza che non
+  è credibile (> 1 MiB) viene rifiutata.
+- **Conseguenza**: la lettura `emmc_log_buf = 0 byte` di questa misura
+  **non è attendibile** (era una lettura disallineata). Va rimessa.
+
+### Le risorse non stanno in /tmp
+`/tmp` è stato ripulito dal sistema e ha portato via l'albero XNU usato per
+scrivere le patch, la cache dei sorgenti Apple staged e gli script di lavoro.
+Ora stanno **dentro il progetto**: `work/xnu-patchtest` (worktree del
+sorgente `xnu-8796.141.3`) e `work/xnu-stage-cache`, entrambi in
+`.gitignore`. `tools/check-xnu-patch-chain.sh` usa quei percorsi.
