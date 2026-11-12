@@ -25,7 +25,37 @@ Stato macro del progetto: lo shim bare-metal gira sul telefono e XNU arriva al
 suo entry point (11 segmenti Mach-O caricati, jump a `__start`); manca il
 driver eMMC per XNU, il display (MDP/DSI command mode) e l'input.
 
-## 2. Stato attuale (al 2026-11-11, sera)
+## 2. Stato attuale (al 2026-11-12)
+
+> **AGGIORNAMENTO 2026-11-12 — DOVE SI FERMA XNU: SULL'ACCENSIONE DELLA MMU.**
+>
+> Misurato sul telefono con i marker in RAM (patch `0082`, `tools/read-pram.py
+> --marks`): il kernel arriva a **`common_start`**, scrive `TCR_EL1`,
+> `TTBR0/TTBR1`, `MAIR_EL1`, `VBAR_EL1` (marker 5→9) e **muore sulla
+> scrittura di `SCTLR_EL1` o sul primo fetch dopo** (marker 10 presente,
+> marker 3 assente). Le tabelle bootstrap sono state **lette dalla RAM e
+> verificate corrette** (47 block entry, AF=1, attrindx 0 write-back,
+> coprono sia l'entry del kernel sia la pagina dei marker). Dettaglio in
+> NOTES.md, sezione "Misura 2" e "Le tabelle bootstrap sono corrette".
+>
+> **Il layout dei marker è cresciuto** (albero di lavoro `/tmp/gicbase`, non
+> ancora trasformato in patch nel repo):
+> - 11 marker invece di 10: il nuovo **marker 11 (`0x900032c0`,
+>   `0x5EED000B`)** dice che `SCTLR_EL1` è stato scritto **con M=1 e le
+>   cache ancora spente** — distingue "la traduzione fa fault" da "sono le
+>   cache a uccidere la CPU".
+> - Blocco INFO a `0x90003800` con 8 parole: `phys_base`, `mem_size`,
+>   `TCR_EL1`, `TTBR0_EL1`, `SCTLR_EL1`, `CurrentEL`, `MPIDR_EL1`, `MIDR_EL1`.
+> - Probe delle eccezioni: `ESR/FAR/ELR/SPSR` a `0x90005000`, vettore in
+>   `0x90003300` (`0x5EED0B00|slot`).
+>
+> **Il decoder è aggiornato**: `tools/read-pram.py --marks` decodifica tutti i
+> marker, il blocco INFO (campo per campo, con `MIDR` → nome della CPU) e la
+> probe delle eccezioni, e chiude con un **verdetto** ("muore con M=1", "muore
+> sulle cache", "muore dopo la MMU prima di arm_init", …). Nuovo
+> `tools/read-pram.py --exc` per i soli registri della probe.
+> `--marks` resta l'unico modo sicuro di leggere la RAM: la guardia sui
+> window RAM del G4 rifiuta le letture fuori dalla DRAM (hang del bus AXI).
 
 > **AGGIORNAMENTO 2026-11-11 — IL KERNEL XNU ORA È COMPILABILE PER LA CPU DEL G4.**
 >
@@ -386,6 +416,7 @@ gh run download <run-id> -n kernel-h815-hfsplus-devmem -D /tmp/kci
 | `tools/pack-twrp-kernel.sh` | kernel + ramdisk TWRP + dt.img → boot.img |
 | `tools/boot-test-kernel.sh` | pack + boot + check automatici |
 | `tools/read-shim-log.py` | legge 0x50000000 via adb |
+| `tools/read-pram.py` | **leggere la RAM del telefono in modo sicuro**: `--marks` decodifica i marker di boot (11), il blocco INFO a `0x90003800` e la probe delle eccezioni a `0x90005000`, e dice dove è morto il kernel; `--exc` per i soli registri; la guardia rifiuta le letture fuori dalle window RAM del G4 (hang del bus) |
 | `tools/local-pretest.sh` | **pre-test locale**: ricompila in locale le TU toccate dalle patch con le flag del CI e conta le LSE (0 = ok) |
 | `tools/check-xnu-patch-chain.sh` | applica tutta la catena `xnu/patches/` su un xnu-8796 pulito e dice quali patch NON si applicano (la CI non lo segnala!) |
 | `docs/LSE-PAN-FIX-2026-11-11.md` | **la raccolta del 2026-11-11**: LSE/PAN, le patch, il firehose, il pre-test, la procedura completa |

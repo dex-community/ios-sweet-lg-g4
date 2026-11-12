@@ -17,3 +17,8 @@ kdz/
 tools/lglaf/
 tools/kdztools/
 .venv/
+
+# the XNU tree used to write and check the patch chain, and the cache of the
+# staged Apple sources. /tmp is cleaned by the system and these are needed
+# again at every cycle, so they live in the project.
+work/

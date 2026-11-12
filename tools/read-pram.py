@@ -146,11 +146,12 @@ MARKERS = [
     (0x1c0, 8, "MAIR_EL1 written, TLB invalidated"),
     (0x200, 9, "VBAR_EL1 points at the exception probe"),
     (0x240, 10, "about to write SCTLR_EL1 (MMU + caches)"),
-    (0x2c0, 11, "SCTLR_EL1 with M=1 written (MMU on, caches still off)"),
+    (0x2c0, 11, "about to write SCTLR_EL1 with M=1 (MMU on, caches off)"),
+    (0x2c4, 12, "SCTLR_EL1 with M=1 written"),
     (0x080, 3, "first fetch with the MMU and the caches on"),
     (0x0c0, 4, "returning into arm_init"),
-    (0x340, 12, "IOKitBSDInit entered (matching the root device)"),
-    (0x380, 13, "about to mount the root filesystem (HFS+)"),
+    (0x340, 13, "IOKitBSDInit entered (matching the root device)"),
+    (0x380, 14, "about to mount the root filesystem (HFS+)"),
 ]
 
 # The info block: what the kernel computed for itself, 8 words at 0x90003800.
@@ -196,6 +197,7 @@ def decode_midr(midr):
     part = (midr >> 4) & 0xFFF
     known = {
         0xB00: "Cortex-A53",
+        0xD03: "Cortex-A53",
         0xD04: "Cortex-A35",
         0xD05: "Cortex-A55",
         0xD01: "Cortex-A57",
@@ -337,22 +339,27 @@ def verdict(seen):
     if 10 not in seen:
         return "died between VBAR_EL1 and the SCTLR_EL1 write"
     if 11 not in seen:
-        return ("marker 10 only: the SCTLR_EL1 write with M=1 faults, the "
-                "MMU itself is the problem")
+        return ("marker 10 only: the CPU died in the last instructions "
+                "before the switch (the mrs of the info block or the cache "
+                "clean that follows it)")
+    if 12 not in seen:
+        return ("marker 11 only: the write of SCTLR_EL1 with M=1 (or the isb "
+                "right after it) is what kills the CPU: the kernel does not "
+                "even get to fault, the bus stops")
     if 3 not in seen:
-        return ("marker 11 only: the MMU is on and the translation works, "
+        return ("marker 12 only: the MMU is on and the translation works, "
                 "the full SCTLR_EL1 (the caches) kills the CPU")
     if 4 not in seen:
         return ("marker 3 only: the kernel runs with the MMU on and dies "
                 "before returning into arm_init")
-    if 12 not in seen:
+    if 13 not in seen:
         return ("marker 4: the kernel reached arm_init, but not IOKitBSDInit "
                 "(the early console in the BSS has the details: "
                 "tools/read-xnu-early.py)")
-    if 13 not in seen:
-        return ("marker 12: the kernel reached IOKitBSDInit, and died "
+    if 14 not in seen:
+        return ("marker 13: the kernel reached IOKitBSDInit, and died "
                 "before mounting the root filesystem")
-    return ("marker 13: the kernel reached the mount of the root filesystem "
+    return ("marker 14: the kernel reached the mount of the root filesystem "
             "(the HFS+ read). See the early console for what happens next")
 
 

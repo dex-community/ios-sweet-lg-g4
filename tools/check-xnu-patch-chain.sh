@@ -12,9 +12,16 @@
 # The dxb setup edits (sed) are reproduced, because they change the files the
 # patches are applied to.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
 
-TREE=${1:-/tmp/xnu-patchtest}
+# TREE is a clean checkout of xnu-8796 (a git worktree of the xnu source:
+#   git -C /Users/io/Dev/ios/xnu-build/xnu-8796 worktree add --detach \
+#       <TREE> 1b191cb
+# ).
+# It lives in the project (work/), not in /tmp: the system cleans /tmp and
+# this tree is needed again at every cycle.
+TREE=${1:-$ROOT/work/xnu-patchtest}
 PATCHES=xnu/patches
 
 if [ ! -d "$TREE/bsd" ]; then
@@ -47,7 +54,9 @@ failed_list=()
 # They stage the Apple sources (hfs, libpthread, bearssl) into the tree, so the
 # patch chain only applies when they ran. The staged trees are cached: they are
 # a git clone each and the check is run many times.
-STAGE_CACHE=${STAGE_CACHE:-/tmp/xnu-stage-cache}
+# The staged Apple sources are cached in the project too: they are a git
+# clone each and the fetch is slow.
+STAGE_CACHE=${STAGE_CACHE:-$ROOT/work/xnu-stage-cache}
 STAGED_DIRS="bsd/sweet_hfs bsd/pthread/sweet_libpthread libkern/crypto/sweet_bearssl"
 
 if [ "${CHECK_KEEP_TREE:-0}" != "1" ]; then

@@ -68,15 +68,25 @@ def payload_header(path):
 
 
 def read_phone(pa, size):
-    skip = pa // PAGE
-    count = (size + PAGE - 1) // PAGE
+    """Read `size` bytes at the physical address `pa`.
+
+    A symbol is not page aligned in general, so the page that contains it is
+    read and the wanted bytes are cut out. With a plain "skip=pa//PAGE" the
+    bytes of the page start would be returned instead, and a length read at
+    the wrong offset can be garbage: the caller would then ask for
+    gigabytes, the read would run into the holes of the memory map and the
+    phone would hang on the AXI bus.
+    """
+    base = pa & ~(PAGE - 1)
+    offset = pa - base
+    count = (offset + size + PAGE - 1) // PAGE
     cmd = ["adb", "exec-out",
-           f"dd if=/dev/mem bs={PAGE} skip={skip} count={count} 2>/dev/null"]
+           f"dd if=/dev/mem bs={PAGE} skip={base // PAGE} count={count} 2>/dev/null"]
     data = subprocess.run(cmd, capture_output=True).stdout
-    if len(data) < PAGE:
-        sys.exit(f"read {len(data)} bytes: no /dev/mem, or the kernel is "
-                 "without CONFIG_DEVMEM?")
-    return data[:size]
+    if len(data) < offset + size:
+        sys.exit(f"read {len(data)} bytes at PA {pa:#x}: no /dev/mem, or the "
+                 "kernel is without CONFIG_DEVMEM?")
+    return data[offset:offset + size]
 
 
 def main(argv):
@@ -114,6 +124,12 @@ def main(argv):
     length = 8192
     if len_va is not None:
         length, = struct.unpack_from("<I", fetch(len_va, 4), 0)
+        # The length comes from the RAM: if it is garbage, reading it would
+        # run into the holes of the memory map and hang the phone. The
+        # buffer is 8 KiB, so anything bigger is wrong.
+        if length > 1 << 20:
+            sys.exit(f"the early console length {length} is not believable: "
+                     "the RAM was reused, or the kernel never ran")
     text = fetch(buf_va, max(length, 1))[:length].decode("ascii", "replace")
 
     print(f"sweet_early_buf  va 0x{buf_va:x}  pa 0x{to_pa(buf_va):x}  {length} byte")

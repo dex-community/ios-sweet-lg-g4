@@ -4109,3 +4109,27 @@ Lo script è stato anche corretto: resettava l'albero a `HEAD` invece che al
 **primo commit**, quindi un albero usato per scrivere una patch (che porta un
 commit della catena già applicata) faceva fallire tutte le patch. Ora fa
 `git reset --hard` sul commit radice.
+
+### La CI è fallita due volte, e i due errori erano reali
+La CI **non** è "verde = successo": nel log la build fallisce e i passi di
+raccolta girano lo stesso (`if: always()`), quindi l'artifact può esistere
+**vuoto**. La prova: run `43136993214` → `conclusion: failure`, `SHA256SUMS`
+da 0 byte, nessun kernel. Il kernel va sempre verificato con i check sul
+binario, e il log va letto.
+
+1. **Run `43136993214` — `arm64/sweet_early.h file not found`** in
+   `pexpert/arm/pe_serial.c` e in `iokit/bsddev/IOKitBSDInit.cpp`.
+   - Il nuovo header esisteva solo per `osfmk/arm` e `osfmk/arm64`, che
+     compilano con l'albero dei sorgenti sul path degli include. Gli altri
+     directory vedono gli header **installati**.
+   - Il fix: `sweet_early.h` va in `EXPORT_MD_LIST` in
+     `osfmk/arm64/Makefile`, come `proc_reg.h`.
+   - **L'errore era nascosto** dalla 0012, che non si applicava e conteneva
+     la stessa include. Ora che la 0012 è riscritta, l'include c'è e
+     l'errore è visibile.
+2. **Run `43136622836`** — superato dal fix successivo (non è fallito, è
+   stato cancellato dalla concorrenza).
+
+La lezione operativa: **le patch che non si applicano nascondono i loro
+errori di compilazione**. Una catena con patch "saltate" sembra verde e
+semplicemente non fa quello che dice.

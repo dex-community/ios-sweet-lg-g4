@@ -78,15 +78,25 @@ def macho_symbols(path):
 
 
 def read_phone(pa, size):
-    skip = pa // PAGE
-    count = (size + PAGE - 1) // PAGE
+    """Read `size` bytes at the physical address `pa`.
+
+    The address is not page aligned in general (a symbol can sit anywhere in
+    its page), so the page that contains it is read and the wanted bytes are
+    cut out. Reading with a plain "skip=pa//PAGE" would silently return the
+    bytes of the page start, and a length read at the wrong offset can be
+    garbage: the caller would then ask for gigabytes, the read would run
+    into the holes of the memory map and the phone would hang on the AXI bus.
+    """
+    base = pa & ~(PAGE - 1)
+    offset = pa - base
+    count = (offset + size + PAGE - 1) // PAGE
     cmd = ["adb", "exec-out",
-           f"dd if=/dev/mem bs={PAGE} skip={skip} count={count} 2>/dev/null"]
+           f"dd if=/dev/mem bs={PAGE} skip={base // PAGE} count={count} 2>/dev/null"]
     data = subprocess.run(cmd, capture_output=True).stdout
-    if len(data) < PAGE:
-        sys.exit(f"read {len(data)} bytes: no /dev/mem, or the kernel is "
-                 "without CONFIG_DEVMEM?")
-    return data
+    if len(data) < offset + size:
+        sys.exit(f"read {len(data)} bytes at PA {pa:#x}: no /dev/mem, or the "
+                 "kernel is without CONFIG_DEVMEM?")
+    return data[offset:offset + size]
 
 
 def main(argv):
@@ -123,6 +133,13 @@ def main(argv):
     if "emmc_log_buf" in syms and "emmc_log_len" in syms:
         _, _, lenv = fetch("emmc_log_len", 4)
         length, = struct.unpack_from("<I", lenv, 0)
+        # The length comes from the RAM: if it is garbage, reading it would
+        # run into the holes of the memory map and hang the phone. The
+        # buffer is 8 KiB, so anything bigger is wrong.
+        if length > 1 << 20:
+            print(f"(the eMMC log length {length} is not believable: the RAM "
+                  "was reused, or the kernel never ran)")
+            length = 0
         _, _, buf = fetch("emmc_log_buf", max(length, 1))
         text = buf[:length].decode("ascii", "replace")
         print(f"=== the eMMC driver ({length} bytes) ===")
