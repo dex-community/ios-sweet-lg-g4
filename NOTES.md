@@ -4376,3 +4376,126 @@ if ((hfsmp->hfs_flags & HFS_READ_ONLY) == 0 && (hfsmp->jnl == NULL &&
 ```
 
 In sola lettura questo controllo non scatta.
+
+## La grana 16 KiB non esiste sul G4: il kernel va compilato a 4 KiB (2026-11-12)
+
+Questa è la **causa** della morte del kernel al `MSR SCTLR_EL1`, e non è un
+bug del codice: è una **carenza dell'hardware**. Il G4 ha un Cortex-A53
+(Armv8.0), che implementa la grana **4 KiB** e **64 KiB**, ma **non** la
+16 KiB: quella richiede `FEAT_LPA2`, che è Armv8.2 (A75/A76, la board sweet
+originale).
+
+### La prova: il binario e il runtime non concordano sul solo TG0
+
+Il kernel compilato scrive un `TCR_EL1` che **chiede** 16 KiB; il core
+**risponde** 4 KiB. La differenza è un solo bit:
+
+| | valore | T0SZ | TG0 | T1SZ | TG1 | IPS |
+|---|---|---|---|---|---|---|
+| binario (`_sysreg_restore`) | `0x226511a511` | 17 | `0b10` = 16 KiB | 17 | `0b01` = 16 KiB | 40 bit |
+| letto a runtime | `0x2265112511` | 17 | `0b00` = **4 KiB** | 17 | `0b01` = 16 KiB | 40 bit |
+
+`0xa511 - 0x2511 = 0x8000`: **solo** il bit 15, cioè il campo `TG0`. Tutti
+gli altri campi coincidono. Il codice scrive 16 KiB, l'hardware lo riscrive
+a 4 KiB.
+
+L'encoding è verificato su fonti indipendenti (è la trappola classica:
+`TG0` e `TG1` hanno tabelle diverse):
+
+- **ARM ARM** DDI0487 `TCR_EL1`: `TG0` `[15:14]` → `0b00` 4 KiB, `0b01`
+  64 KiB, `0b10` 16 KiB; `TG1` `[31:30]` → `0b01` 16 KiB, `0b10` 4 KiB,
+  `0b11` 64 KiB.
+- **`osfmk/arm64/proc_reg.h` di Apple** (xnu-8796.141.3):
+  `TCR_TG0_GRANULE_4KB = 0<<14`, `_64KB = 1<<14`, `_16KB = 2<<14`;
+  `TCR_TG1_GRANULE_16KB = 1<<30`, `_4KB = 2<<30`, `_64KB = 3<<30`.
+- **Linux** (`arch/arm64/include/asm/pgtable-hwdef.h`,
+  `drivers/iommu/io-pgtable-arm.h`,
+  `tools/testing/selftests/kvm/include/arm64/processor.h`): stessi valori.
+
+Cosa dice l'ARM ARM quando si programma una grana che l'hardware non
+implementa: il comportamento è **implementation-defined**. Il G4 sceglie
+il 4 KiB, e da lì in poi la passeggiata delle tabelle usa gli shift
+sbagliati.
+
+### Perché non c'è nemmeno un'eccezione
+
+Le tabelle bootstrap sono costruite per 16 KiB (`ARM_16K_TT_L*_SHIFT`,
+`PGBYTES = 0x4000`), ma il walk avviene con la grana 4 KiB: gli indirizzi
+fisici che si ottengono sono spazzatura, e il primo fetch dopo
+`MSR SCTLR_EL1` va in bus hang. Il **vettore di eccezione** è mappato
+dalle stesse tabelle rotte, quindi l'eccezione non può essere presa: niente
+marker 12, niente record di eccezione, `emmc_log_buf` a zero byte. È
+esattamente il quadro che si vede sul telefono (marker 11 presente, 12
+assente).
+
+### Correzione della nota storica su ID_AA64MMFR0
+
+La nota "ID_AA64MMFR0 = ...101122: 16K granule YES" era una
+**mis-decodifica**, e la causa è un bug nelle diagnostiche dello shim: le
+etichette dei campi erano **spostate di un campo**. La mappa vera
+(ARM ARM DDI0487 e il disegno in `osfmk/arm64/proc_reg.h`) è:
+
+```
+[3:0] PARange   [7:4] ASIDbits  [11:8] BigEnd  [15:12] SNSMem
+[19:16] BigEndEL0  [23:20] TGran16  [27:24] TGran64  [31:28] TGran4
+```
+
+mentre lo shim stampava `TGRAN 16k=` con il campo `[19:16]` (= BigEndEL0,
+che vale 1) e `TGRAN 64k=` con `[23:20]` (= TGran16). Il "16k=1" che
+avevamo letto era BigEndEL0. Il `TGran16` vero del G4 è **0**.
+
+Le diagnostiche ora stampano il registro grezzo e i campi giusti
+(`TGRAN4`, `TGRAN16`, `TGRAN64`). Da notare che la funzione
+`mmu_granule_ok()` di `shim/mmu.c` era **giusta** (chiedeva il bit 1 di
+`TGran16`, cioè "16 KiB implementato"): è lei che faceva saltare la MMU
+dello shim sul G4, e il kernel partiva con la MMU spenta.
+
+Linux, per confronto, usa lo stesso campo per la feature:
+`system_supports_16kb_granule()` legge `ID_AA64MMFR0_EL1_TGRAN16_SHIFT` e
+`ID_AA64MMFR0_EL1_TGRAN_LPA2` (che è la stessa cosa di `FEAT_LPA2`).
+
+### Il fix: patch 0085, il kernel a 4 KiB
+
+`xnu/patches/0085-sweet-4k-granule.patch`:
+
+1. **`SWEET.h`**: via `#define __ARM_16K_PG__ 1`, dentro
+   `#define __ARM64_PMAP_SUBPAGE_L1__ 1` (è quello che usa **BCM2837**, l'unica
+   altra board ARM64 a 4 KiB che XNU supporta: con il subpage L1 la tabella
+   di livello 1 ha 256 voci, `T0SZ_BOOT = 26` e lo spazio virtuale è di 38
+   bit).
+2. **`MakeInc.def`**: per `CURRENT_MACHINE_CONFIG = SWEET`,
+   `LARGE_MEMORY_DEFINE = -UARM_LARGE_MEMORY` e
+   `ARM64_LINK_ADDR = 0xfffffff007004000`.
+
+Il punto 2 è **obbligatorio**, non una scelta: con 4 KiB `T0SZ_BOOT` è 25 o
+26 (39 o 38 bit), mentre il layout `ARM_LARGE_MEMORY` (quello di default per
+`PLATFORM=MacOSX`) mette il kernel in uno spazio a 48 bit, con il link
+address `0xfffffe0007004000` **fuori** dallo spazio raggiungibile. Il
+layout a 37 bit (`VM_MIN_KERNEL_ADDRESS = 0xffffffe000000000`, link
+`0xfffffff007004000`) è quello di BCM2837.
+
+La mappa fisica **non cambia**: `virt_base` scende a `0xfffffff000000000` e
+`phys_base` resta `0x80000000`, quindi il kernel sta allo stesso indirizzo
+fisico di prima (`0x814a8488` per l'entry) e cambia solo la finestra
+virtuale (da 47 a 38 bit). `tools/mkpayload.py` deriva `virt_base` dal
+binario, quindi si adatta da solo.
+
+### Cosa controllare nel nuovo binario
+
+- `TCR_EL1` atteso: `0x002a51a161a` → T0SZ 26, **TG0 `0b00` = 4 KiB**,
+  T1SZ 26, TG1 `0b10` = 4 KiB, IPS 40 bit.
+- entry del kernel: VA `0xfffffff0074a8488`, PA `0x814a8488` (invariato).
+- i marker 11 e 12: con la MMU che si accende correttamente, il 12 deve
+  comparire.
+
+### Cosa resta aperto
+
+- Lo shim costruisce ancora le sue tabelle per 16 KiB: **non è un problema**
+  sul G4, perché `mmu_granule_ok()` è falso e il shim salta l'accensione
+  della MMU (e comunque il loader salta al **PA** del kernel con la MMU
+  spenta: le tabelle le fa XNU).
+- **SMP**: `SWEET_SMP_MAX_CPUS` è 8 (la board sweet ne aveva 8), il G4 ne ha
+  4 (2 A53 + 2 A72); il numero vero viene dal device tree, ma il commento
+  del file è stato corretto.
+- **PSCI è rotto** sull'H815 (`enable-method = "qcom,8994-arm-cortex-acc"`),
+  quindi l'avvio dei secondari è un problema ancora aperto.

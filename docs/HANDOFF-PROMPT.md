@@ -27,6 +27,60 @@ driver eMMC per XNU, il display (MDP/DSI command mode) e l'input.
 
 ## 2. Stato attuale (al 2026-11-12)
 
+> **AGGIORNAMENTO 2026-11-12 (tardo) — LA CAUSA È LA GRANA DELLE PAGINE:
+> IL G4 NON HA LA 16 KiB, IL KERNEL VA COMPILATO A 4 KiB.**
+>
+> La morte all'accensione della MMU **non è un bug del codice**: è una
+> **carenza dell'hardware**. Il Cortex-A53 del G4 è Armv8.0 e implementa la
+> grana **4 KiB** e **64 KiB**, ma **non** la **16 KiB** (servirebbe
+> `FEAT_LPA2`, che è Armv8.2, come sull'A75/A76 della board sweet
+> originale).
+>
+> **La prova, dal binario e dal runtime:**
+>
+> | | valore | T0SZ | TG0 | T1SZ | TG1 |
+> |---|---|---|---|---|---|
+> | binario (`_sysreg_restore`) | `0x226511a511` | 17 | `0b10` = 16 KiB | 17 | `0b01` |
+> | letto a runtime sul telefono | `0x2265112511` | 17 | `0b00` = **4 KiB** | 17 | `0b01` |
+>
+> Differenza = `0x8000`: **solo il campo TG0**. Il kernel *chiede* 16 KiB,
+> il core *risponde* 4 KiB (comportamento implementation-defined dell'ARM
+> ARM: DDI0487, `TCR_EL1`). Da lì le tabelle bootstrap, costruite per 16
+> KiB (`ARM_16K_TT_L*_SHIFT`, `PGBYTES = 0x4000`), vengono percorse con
+> gli shift sbagliati → indirizzo fisico spazzatura → il primo fetch dopo
+> `MSR SCTLR_EL1` va in bus hang. E **non c'è eccezione**, perché il
+> vettore è mappato dalle stesse tabelle rotte: da qui marker 11
+> presente, 12 assente, `emmc_log_buf` a zero byte.
+>
+> **Correzione di una nota storica**: la riga "ID_AA64MMFR0 = ...101122:
+> 16K granule YES" era una **mis-decodifica**. Nelle diagnostiche dello
+> shim le etichette dei campi erano **spostate di un campo**: la mappa
+> vera è `TGran4 [31:28]`, `TGran64 [27:24]`, `TGran16 [23:20]`, e la
+> "TGRAN 16k=" che avevamo letto era in realtà **BigEndEL0**. Il
+> `TGran16` vero del G4 è **0**. (Le diagnostiche e il decoder sono
+> corretti; `mmu_granule_ok()` nello shim era invece **giusto**, ed è lei
+> che faceva saltare la MMU dello shim sul G4.)
+>
+> **Il fix è `xnu/patches/0085-sweet-4k-granule.patch`**:
+> 1. `SWEET.h`: via `__ARM_16K_PG__`, dentro `__ARM64_PMAP_SUBPAGE_L1__`
+>    (è la configurazione di **BCM2837**, l'unica altra board ARM64 a
+>    4 KiB che XNU supporta): `T0SZ_BOOT = 26`, spazio virtuale di 38 bit.
+> 2. `MakeInc.def`: per `CURRENT_MACHINE_CONFIG = SWEET`,
+>    `-UARM_LARGE_MEMORY` e `ARM64_LINK_ADDR = 0xfffffff007004000`.
+>    **Obbligatorio**: con 4 KiB `T0SZ_BOOT` è 25/26 (39/38 bit) e il
+>    layout `ARM_LARGE_MEMORY` (48 bit, link `0xfffffe0007004000`)
+>    metterebbe il kernel **fuori** dallo spazio raggiungibile. Si passa al
+>    layout a 37 bit, quello di BCM2837.
+>
+> La **mappa fisica non cambia** (entry a PA `0x814a8488` come prima):
+> cambia solo la finestra virtuale (47 → 38 bit).
+>
+> **Da controllare nel nuovo binario**: `TCR_EL1` = `0x002a51a161a`
+> (T0SZ 26, **TG0 `0b00` = 4 KiB**, T1SZ 26, TG1 `0b10`, IPS 40 bit),
+> entry VA `0xfffffff0074a8488`, e il **marker 12** che deve comparire.
+> Dettaglio completo in NOTES.md, sezione "La grana 16 KiB non esiste
+> sul G4".
+
 > **AGGIORNAMENTO 2026-11-12 — DOVE SI FERMA XNU: SULL'ACCENSIONE DELLA MMU.**
 >
 > Misurato sul telefono con i marker in RAM (patch `0082`, `tools/read-pram.py

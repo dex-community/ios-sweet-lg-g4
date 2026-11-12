@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 PAGE = 4096
-DEFAULT_VIRT_BASE = 0xfffffe0006000000
+DEFAULT_VIRT_BASE = 0xfffffff000000000
 DEFAULT_PHYS_BASE = 0x80000000
 
 

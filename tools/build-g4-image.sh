@@ -61,4 +61,5 @@ python3 tools/unpack_bootv2.py "shim/out/shim-boot-$TAG.img" "shim/out/check-$TA
 cmp "shim/out/check-$TAG/ramdisk" "shim/out/$TAG.bin" && echo "ramdisk == payload: ok"
 shasum -a 256 "shim/out/shim-boot-$TAG.img"
 echo
-echo "To flash:  fastboot flash boot shim/out/shim-boot-$TAG.img && fastboot reboot"
+echo "To boot (temporary, nothing is written to the phone):"
+echo "  fastboot boot shim/out/shim-boot-$TAG.img"
