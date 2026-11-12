@@ -114,10 +114,18 @@ index 9fdd184..9e01a49 100644
  	isb		sy
  
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index eda0626..6a823a8 100644
+index eda0626..4090bae 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -50,6 +50,29 @@ sweet_early_putc(char c)
+@@ -26,6 +26,7 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <kern/misc_protos.h>
++#include <vm/pmap.h>
+ 
+ #define EARLY_LOG_SIZE 8192
+ /* Cache line of the CPUs this runs on (Cortex-A53 and the sweet's A76/A55):
+@@ -50,6 +51,35 @@ sweet_early_putc(char c)
  	sweet_early_buf[sweet_early_len] = '\0';
  }
  
@@ -136,8 +144,14 @@ index eda0626..6a823a8 100644
 +void
 +sweet_mark(unsigned int off, uint32_t value)
 +{
-+	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)
-+	    (SWEET_MARK_BASE_PA + off);
++	/*
++	 * The physical address is not a kernel virtual address: the markers
++	 * written by the assembly live in the bootstrap V=P map, which is gone
++	 * by now. From C the only way to reach that page is the physical map,
++	 * so the address is translated first.
++	 */
++	volatile uint32_t *p = (volatile uint32_t *)
++	    phystokv(SWEET_MARK_BASE_PA + off);
 +
 +	*p = value;
 +	__asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
