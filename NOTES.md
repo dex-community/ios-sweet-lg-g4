@@ -4257,3 +4257,122 @@ scrivere le patch, la cache dei sorgenti Apple staged e gli script di lavoro.
 Ora stanno **dentro il progetto**: `work/xnu-patchtest` (worktree del
 sorgente `xnu-8796.141.3`) e `work/xnu-stage-cache`, entrambi in
 `.gitignore`. `tools/check-xnu-patch-chain.sh` usa quei percorsi.
+
+## Il bug del TG0 nello shim: l'encoding era invertito (2026-11-12)
+
+La segnalazione diceva giusto: l'encoding di `TCR_EL1.TG0` era letto al
+contrario, e la "correzione" che ne era seguita aveva **rotto** lo shim.
+
+Verifica su due fonti indipendenti e autorevoli:
+
+- **ARM ARM** (DDI0487, `TCR_EL1`; confermato anche da DDI0595):
+  `TG0` bit `[15:14]` → `0b00` = 4 KiB, `0b01` = **64 KiB**, `0b10` = **16 KiB**.
+  `TG1` bit `[31:30]` → `0b00` = 4 KiB, `0b01` = **16 KiB**, `0b10` = 4 KiB,
+  `0b11` = 64 KiB.
+- **`osfmk/arm64/proc_reg.h` di Apple** (xnu-8796.141.3):
+  ```c
+  #define TCR_TG0_GRANULE_4KB   (0ULL << 14)
+  #define TCR_TG0_GRANULE_64KB  (1ULL << 14)
+  #define TCR_TG0_GRANULE_16KB  (2ULL << 14)
+  ```
+
+Quindi la nota che diceva "0 = 4K, 1 = 16K, 2 = 64K" era l'inverso, e il
+cambio `2 → 1` ha **programmato un granulo da 64 KiB** su page table
+costruite per 16 KiB (`PG_SHIFT 14`, `BLK_SHIFT 25`, 2048 voci per
+tabella). Con 64 KiB la passeggiata parte dal livello sbagliato: il blocco
+L2 copre 128 MiB con la base a bit 29, mentre le tabelle memorizzano blocchi
+da 32 MiB con la base a bit 25.
+
+Il valore originale `2` era **giusto**. Il bug era autoprodotto: la
+verifica era stata fatta sul modello delle page table, non sull'encoding
+del registro.
+
+Correzioni applicate:
+
+- `shim/mmu.c`: `TG0` torna a `2` (16 KiB). `TG1` resta a `1`, che è 16 KiB.
+- `shim/mmu.c`: `mmu_granule_ok()` chiedeva "un bit qualunque di TGran1 è
+  diverso da zero", ma TGran1 è una **bitmask** (bit 0 = 4 KiB, bit 1 =
+  16 KiB, bit 2 = 64 KiB): ora chiede il bit 1, "16 KiB è implementato".
+- `shim/shim.c`: la riga `PARANGE` stampava il campo PARange (indirizzi
+  fisici) con il nome `tg0`; i campi del granulo sono ora `TGRAN`, con le
+  loro maschere.
+- `tools/read-pram.py`: decodifica TG0 e TG1 con l'encoding vero e avvisa
+  se TG0 non è 16 KiB.
+- `tools/check-kva-map.py` (nuovo): percorre le mappe bootstrap che il
+  kernel costruisce, attraverso TTBR1 (la mappa KVA da cui viene
+  prelevato il testo del kernel) e TTBR0, e confronta il risultato con
+  l'indirizzo fisico dell'entry.
+
+Il documento del kernel (`fffffe00074ab4d4` nel binario della CI
+`43213558347`) contiene già la misura: `mrs x11, TCR_EL1` /
+`TTBR0_EL1` / `TTBR1_EL1` scritti nel blocco INFO a `0x90003800` **prima**
+dell'accensione della MMU, con i marker 11 (`0x900032c0`) e 12
+(`0x900032c4`) ai due lati della `MSR SCTLR_EL1`.
+
+### Anche il DTB del pacchetto TWRP era sopra il kernel
+
+`/tmp/device-test-boot.img` era sparito (il sistema pulisce `/tmp`) e
+l'ho ricostruito: `tools/pack-twrp-kernel.sh` metteva il tags address a
+`0x100`, come l'immagine stock di LG, dove il DTB (307200 byte) finisce
+**sopra** il kernel a `0x8000`. LG sopravvive perché il suo LK ignora gli
+indirizzi dell'header, ma il pacchetto ora sceglie una mappa senza
+sovrapposizioni:
+
+```
+kernel  0x00008000 .. 0x00094e80b
+dtb     0x01000000 .. 0x0104b100
+ramdisk 0x02200000 ..
+```
+
+(`tools/verify_bootimg.py` lo dice: prima `FAIL`, ora tutti `ok`.)
+
+## Il driver HFS di Apple accetta il volume HFSX da 4096 su un device da 512
+
+La domanda aperta ("verificare che il driver HFS accetti il volume HFSX
+4096-byte su un device da 512-byte") è **risolta leggendo il sorgente**
+del driver staged (`work/xnu-stage-cache/bsd/sweet_hfs/core/`).
+
+`hfs_vfsutils.c`, `hfs_ValidateHFSPlusVolumeHeader()`:
+
+```c
+/* Block size must be at least 512 and a power of 2 */
+blockSize = SWAP_BE32(vhp->blockSize);
+if (blockSize < 512 || !powerof2(blockSize)) { ... return (EINVAL); }
+
+if (blockSize < hfsmp->hfs_logical_block_size) { ... return (EINVAL); }
+```
+
+- 4096 ≥ 512 ✔ (il volume passa il primo controllo);
+- 4096 ≥ `hfs_logical_block_size` (512, il block size del device) ✔
+  (passa anche il secondo).
+
+Il verso giusto del confronto è quello del driver: il block size **del
+volume** deve essere ≥ quello **del device**, non il contrario. Un volume
+da 4096 su un device da 512 è la combinazione normale (è quella di un
+iPhone), e il driver la gestisce:
+
+- `hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE,
+  hfsmp->hfs_logical_block_size)` adatta la dimensione di I/O al volume;
+- `vcb->blockSize = blockSize` (4096) è l'unità di allocazione del
+  filesystem, indipendente dai 512 byte del device;
+- `hfs.h`: `HFS_PRI_SECTOR(blksize) = 1024 / blksize` e
+  `HFS_PRI_OFFSET(blksize) = (blksize > 1024 ? 1024 : 0)`. Con un device
+  da 512 il VH sta al settore 2 e l'offset dentro il blocco letto è 0:
+  esattamente dove lo abbiamo trovato (offset 1024 della partizione);
+- `hfs_vfsops.c`: se il block size del volume è **minore** di quello
+  fisico il driver si riadatta; il caso oposto (volume 4096, device 512)
+  non richiede nulla.
+
+Una cosa da tenere presente: il mount **read-only** è imposto dal nostro
+driver e il volume iOS non ha un backup volume header, quindi non si
+possono scrivere i `lastMountedVersion` senza backup. Il driver lo
+controlla esplicitamente:
+
+```c
+if ((hfsmp->hfs_flags & HFS_READ_ONLY) == 0 && (hfsmp->jnl == NULL &&
+    (SWAP_BE32(vhp->attributes) & kHFSVolumeUnmountedMask) == 0) {
+    ... return (EINVAL);   /* cannot mount dirty non-journaled volumes */
+}
+```
+
+In sola lettura questo controllo non scatta.
