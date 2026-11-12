@@ -250,9 +250,24 @@ def show_info(blob):
         print(f"  CPU: {decode_midr(midr)}")
     tcr = values["TCR_EL1"]
     if tcr:
-        print(f"  TCR_EL1: T0SZ {tcr & 0x3F:#x} TG0 {(tcr >> 15) & 3:#x} "
+        # The granule encoding is per the ARM ARM (DDI0487, TCR_EL1) and
+        # Apple's osfmk/arm64/proc_reg.h:
+        #   TG0 bits [15:14]: 0b00 = 4KB, 0b01 = 64KB, 0b10 = 16KB
+        #   TG1 bits [31:30]: 0b00 = 4KB, 0b01 = 16KB, 0b10 = 4KB,
+        #                      0b11 = 64KB
+        tg0 = (tcr >> 14) & 3
+        tg1 = (tcr >> 30) & 3
+        gran0 = {0: "4KB", 1: "64KB", 2: "16KB"}.get(tg0, "reserved")
+        gran1 = {0: "4KB", 1: "16KB", 2: "4KB", 3: "64KB"}.get(tg1, "reserved")
+        print(f"  TCR_EL1: T0SZ {tcr & 0x3F:#x} TG0 {(tcr >> 14) & 3:#x} "
+              f"({gran0}) "
               f"SH0 {(tcr >> 8) & 3:#x} IRGN0 {(tcr >> 12) & 7:#x} "
-              f"ORGN0 {(tcr >> 10) & 7:#x} TG1 {(tcr >> 30) & 3:#x}")
+              f"ORGN0 {(tcr >> 10) & 7:#x} TG1 {(tcr >> 30) & 3:#x} "
+              f"({gran1})")
+        if gran0 != "16KB":
+            print("    ! TG0 is not the 16 KiB granule: the kernel was "
+                  "compiled for 16 KiB pages, so the translation walk "
+                  "uses the wrong level")
     ttbr1 = values["TTBR1_EL1"]
     if ttbr1:
         print(f"  TTBR1_EL1 {ttbr1:#x} (the root of the KVA map: the kernel "

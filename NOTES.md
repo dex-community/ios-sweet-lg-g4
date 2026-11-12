@@ -244,8 +244,11 @@ parte da tre proprietà irrilevanti (`qcom,idle-timeout`, i due `pm-qos-*`,
    clonata per `msm8992`, e la patch SMP via PSCI (0065) va esclusa perche'
    **l'H815 non ha PSCI** (`enable-method = "qcom,8994-arm-cortex-acc"`).
 4. Il granolo pagina: il kernel Android del G4 gira a 4 KiB, XNU vuole 16
-   KiB. Cortex-A53/A57 implementano LPA, quindi 16 KiB dovrebbe esistere,
-   ma va confermato: il shim stampa `ID_AA64MMFR0_EL1.TGran1`.
+   KiB. **LPA non c'entra**: LPA riguarda gli indirizzi fisici estesi, non
+   il granulo della passeggiata. Se il core implementa il granulo da 16
+   KiB lo dice `ID_AA64MMFR0_EL1.TGran1` (bit 1 della bitmask), e va letto
+   sul telefono: il shim lo stampa (`TGRAN 16k=…`), e la patch 0084 registra
+   anche il `TCR_EL1` che XNU scrive per sé.
 
 
 ---
@@ -334,9 +337,11 @@ DTB pointer exactly like ABL. `shim/start.S` was left alone.
   (Qualcomm's SCF/ACC path). The AOSP port reserves the ARM spin-table
   handover slot at 0x06000000.
 - The G4's Android kernel runs **4 KiB** pages; sweet's XNU is built for
-  **16 KiB**. Cortex-A53/A57 implement LPA so 16 KiB should exist, but it
-  has to be confirmed on the device: the shim prints
-  `ID_AA64MMFR0_EL1.TGran1`.
+  **16 KiB**. LPA is about extended physical addresses and says nothing
+  about the granule: what counts is `ID_AA64MMFR0_EL1.TGran1` (bit 1 of a
+  bitmask = 16 KiB), which has to be read on the device. The shim prints it
+  (`TGRAN 16k=…`), and patch 0084 records the `TCR_EL1` that XNU writes for
+  itself, right before the MMU is enabled.
 
 ### Attempts and what they taught
 
@@ -984,21 +989,44 @@ non deve piu' indovinare nulla: `tools/run-shim.sh` ha la tabella.
 Un crash ha una base separata (500 s) e dentro c'e' l'offset dell'ELR in
 unita' da 32 byte, cosi' i due formati non si sovrappongono.
 
-### Bug 1 — `TG0` era 2 (64K) invece di 1 (16K)
+### Bug 1 — `TG0`: la "correzione" era un errore, l'encoding era invertito
 
 `shim/mmu.c`:
 
 ```c
-#define TCR_VAL  (28UL | ... | (2UL << 14) | ...)   /* TG0 = 2 = 64K */
+#define TCR_VAL  (28UL | ... | (2UL << 14) | ...)   /* TG0 = 2 */
 ```
 
-I bit `[15:14]` di TCR_EL1 sono TG0: 0 = 4K, 1 = 16K, **2 = 64K**. Le
-page table invece sono costruite per 16K (L2 = blocchi da 32MB con la
-base a bit 25, L3 = pagine da 16K). Con TG0 = 2 la passeggiata parte dal
-livello sbagliato: la base di un blocco L2 deve stare a bit 29 e ogni
-blocco copre 128MB, non 32MB. Tutte le traslazioni erano sbagliate e il
-primo accesso dopo `mmu_enable()` faultava — esattamente dove finiva
-l'ELR.
+**Correzione 2026-11-12.** I bit `[15:14]` di TCR_EL1 sono TG0. L'encoding
+vero, dall'ARM ARM (DDI0487, TCR_EL1) e dal `osfmk/arm64/proc_reg.h` di
+Apple, è:
+
+| TG0 (bit 15:14) | granulo |
+| --- | --- |
+| `0b00` | 4 KiB |
+| `0b01` | **64 KiB** |
+| `0b10` | **16 KiB** |
+
+Quindi la nota che diceva "0 = 4K, 1 = 16K, 2 = 64K" era **l'inverso**, e
+la "correzione" da `2` a `1` ha **programmato 64 KiB** su page table
+costruite per 16 KiB (L2 = blocchi da 32MB con la base a bit 25, L3 =
+pagine da 16K, 2048 voci per tabella). Con 64 KiB la passeggiata parte
+dal livello sbagliato: il blocco L2 copre 128MB con la base a bit 29,
+mentre le tabelle memorizzano blocchi da 32MB con la base a bit 25.
+
+**Stato attuale: `TG0 = 2` (16 KiB)**, che è il valore corretto e
+originario. Il bug era autoprodotto: la verifica era stata fatta sul
+modello delle page table, non sull'encoding del registro.
+
+L'encoding di **TG1** (bit `[31:30]`) è diverso: `0b01` = 16 KiB,
+`0b10` = 4 KiB, `0b11` = 64 KiB. `TG1 = 1` nel codice è dunque 16 KiB
+(corretto per combinazione).
+
+Anche `mmu_granule_ok()` era debole: `ID_AA64MMFR0_EL1.TGran1` è una
+**bitmask**, non un codice (bit 0 = 4 KiB, bit 1 = 16 KiB, bit 2 = 64 KiB).
+Il test era "un qualunque bit è diverso da zero", che passa anche su un
+core che implementa solo 4 KiB. Ora è `(v & 0x2) != 0`, cioè "16 KiB è
+implementato".
 
 ### Bug 2 — la dcache invalidava le page table appena scritte
 

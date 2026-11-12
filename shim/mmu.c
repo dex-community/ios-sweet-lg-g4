@@ -42,13 +42,28 @@
 /*
  * TCR: T0SZ=28, IRGN0/ORGN0=WBWA, SH0=inner, TG0=16K, TG1=16K, IPS=36 bit.
  *
- * TG0 is bits [15:14]: 0 = 4K, 1 = 16K, 2 = 64K. It was 2 (64K) while the
- * page tables are built for 16K, so every translation walked the wrong
- * level: with TG0=2 the level 2 block covers 128MB and its base address
- * starts at bit 29, while the table stores 32MB blocks starting at bit 25.
- * The first store after mmu_enable() therefore faulted.
+ * TG0 is bits [15:14] and the encoding is NOT the one this file used to
+ * claim. Per the ARM ARM (DDI0487, TCR_EL1) and Apple's own
+ * osfmk/arm64/proc_reg.h:
+ *
+ *   TG0: 0b00 = 4KB, 0b01 = 64KB, 0b10 = 16KB
+ *   TG1: 0b00 = 4KB (IMPLEMENTATION DEFINED), 0b01 = 16KB, 0b10 = 4KB,
+ *        0b11 = 64KB
+ *
+ * The value here is TG0 = 0b10 (16 KiB), which is what the tables below
+ * are built for: PG_SHIFT 14 (16 KiB pages), BLK_SHIFT 25 (32 MiB L2
+ * blocks) and 2048 entries per table. TG1 = 0b01 is 16 KiB as well.
+ *
+ * A previous revision of this file believed the encoding was
+ * "0 = 4K, 1 = 16K, 2 = 64K" and "fixed" TG0 from 2 to 1. That belief was
+ * inverted: the original 2 was already the correct 16 KiB, and the change
+ * to 1 programmed a 64 KiB granule. With TG0 = 64 KiB the walk starts at
+ * the wrong level: the level 2 block covers 128 MiB with its base address
+ * at bit 29, while the tables store 32 MiB blocks starting at bit 25, so
+ * every translation is wrong and the first store after mmu_enable()
+ * faults. That is the bug this file had introduced in itself.
  */
-#define TCR_VAL		(28UL | (1UL << 8) | (1UL << 10) | (3UL << 12) | (1UL << 14) | \
+#define TCR_VAL		(28UL | (1UL << 8) | (1UL << 10) | (3UL << 12) | (2UL << 14) | \
 			 (28UL << 16) | (1UL << 23) | (1UL << 30) | (1UL << 32))
 
 #define SCTLR_M		(1UL << 0)
@@ -92,9 +107,19 @@ static void zero_table(uint64_t *t)
 		t[i] = 0;
 }
 
+/*
+ * ID_AA64MMFR0_EL1.TGran1, bits [23:20]: the granule sizes the core
+ * implements for TTBR1. The encoding is a bitmask, not a code:
+ * 0b0001 = 4 KiB, 0b0010 = 16 KiB, 0b0100 = 64 KiB, and the bits can be
+ * combined (0b0110 = 4 KiB and 16 KiB, 0b0111 = all three).
+ *
+ * The check is "is 16 KiB implemented", i.e. bit 1 set: (v & 0x2) != 0.
+ * The old test was "any of the bits set", which passes on a core that
+ * only implements 4 KiB.
+ */
 int mmu_granule_ok(void)
 {
-	return ((rsr("id_aa64mmfr0_el1") >> 20) & 0xf) != 0;
+	return ((rsr("id_aa64mmfr0_el1") >> 20) & 0x2) != 0;
 }
 
 int mmu_enable(struct mmu_info *info)
@@ -109,7 +134,8 @@ int mmu_enable(struct mmu_info *info)
 	/*
 	 * These page tables are 16K-granule (the sweet configuration, and
 	 * what XNU wants). ID_AA64MMFR0_EL1.TGran1 says whether the core
-	 * supports it: 0 = 4K only, 1 = 4K+16K, 2 = 4K+16K+64K.
+	 * supports it: the field is a bitmask where bit 1 is 16 KiB
+	 * (0b0010 = 16 KiB only, 0b0110 = 4 KiB and 16 KiB, 0b0111 = all).
 	 * The G4 has Cortex-A53/A57, so 16K is expected; check rather than
 	 * assume, because a wrong granule walks into a fault storm.
 	 */
@@ -122,7 +148,7 @@ int mmu_enable(struct mmu_info *info)
 	info->sctlr_after = 0;
 	info->n_l3 = 0;
 
-	if (tgran1 == 0) {
+	if ((tgran1 & 0x2) == 0) {
 		info->n_l3 = -1;
 		return -2;	/* no 16K granule */
 	}

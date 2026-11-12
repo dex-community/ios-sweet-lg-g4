@@ -385,12 +385,36 @@ fastboot reboot
 
 ### 10.1 I tre bug corretti in questa sessione
 
-**1. `TG0` sbagliato nel TCR (`shim/mmu.c`).** I bit `[15:14]` di
-`TCR_EL1` sono TG0: `0` = 4K, `1` = 16K, **`2` = 64K**. Il codice aveva
-`2` (64K) mentre le page table sono costruite per 16K (L2 = blocchi da
-32MB con la base a bit 25, L3 = pagine da 16K). Con TG0 = 2 la
-passeggiata parte dal livello sbagliato e ogni traslazione e' sbagliata:
-il primo accesso dopo `mmu_enable()` faultava. Ora e' `1`.
+**1. `TG0` nel TCR (`shim/mmu.c`) — la "correzione" era sbagliata, ed è stata
+invertita indietro.** I bit `[15:14]` di `TCR_EL1` sono TG0. L'encoding
+reale, secondo l'ARM ARM (DDI0487, TCR_EL1) e il `osfmk/arm64/proc_reg.h`
+di Apple, è:
+
+| TG0 | granulo |
+| --- | --- |
+| `0b00` | 4 KiB |
+| `0b01` | **64 KiB** |
+| `0b10` | **16 KiB** |
+
+La versione precedente di questa nota affermava `0 = 4K, 1 = 16K,
+2 = 64K`: è **l'inverso**. Il codice aveva `2`, che è esattamente il
+**16 KiB** giusto per le page table che costruisce (L2 = blocchi da 32 MB
+con la base a bit 25, L3 = pagine da 16 KiB, 2048 voci per tabella).
+
+La "correzione" da `2` a `1` ha quindi **programmato un granulo da 64 KiB**
+su page table costruite per 16 KiB: la passeggiata parte dal livello
+sbagliato (con 64 KiB il blocco L2 copre 128 MB con la base a bit 29,
+mentre le tabelle memorizzano blocchi da 32 MB con la base a bit 25), ogni
+traduzione è sbagliata e il primo accesso dopo `mmu_enable()` faultava.
+
+**Stato attuale: `TG0 = 2` (16 KiB)**, corretto alla luce dell'ARM ARM.
+Il bug era **autoprodotto**: la verifica iniziale era fatta sul *modello*
+delle page table, non sull'encoding del registro.
+
+Nota: l'encoding di **TG1** (bit `[31:30]`) è diverso —
+`0b01` = 16 KiB, `0b10` = 4 KiB, `0b11` = 64 KiB. Il codice usa
+`TG1 = 1`, che è 16 KiB: corretto per combinazione, non per il ragionamento
+segnato sopra.
 
 **2. La dcache invalidava le page table appena scritte (`shim/mmu.c`).**
 Le page table stanno nel `.bss`, dentro l'immagine: `dc ivac` (invalidate

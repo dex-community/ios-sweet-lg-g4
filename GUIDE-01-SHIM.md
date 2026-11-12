@@ -217,7 +217,8 @@ through a memory-backend file. Expected output:
 SHIM    diagnostics
 IMAGE   lo=40200000 hi=40238000
 MMU     rc=FFFFFFFE l3=FFFFFFFF      <- -2: QEMU's cortex-a53 has no 16K granule
-PARANGE tg0=00000002 tg1=00000000
+PARANGE pa=00000002 tgran4=00000000
+TGRAN   16k=00000000 64k=00000000
 GRANULE 16k=00000000 tg1=00000000
 ```
 
@@ -225,6 +226,13 @@ GRANULE 16k=00000000 tg1=00000000
 `ID_AA64MMFR0_EL1.TGran1` before it builds 16 KiB page tables and skips the
 MMU test when the granule is unavailable. **On the real phone this line is
 the answer to the page-size question** that Phase 2 depends on.
+
+Note on the labels: `PARANGE pa=` is the physical-address-range field
+(bits [3:0]), **not** a granule. The granule fields are `TGran4`
+(bits [15:12]), `TGran16` (bits [19:16]) and `TGran64` (bits [23:20]), and
+each is a **bitmask**: bit 0 = 4 KiB, bit 1 = 16 KiB, bit 2 = 64 KiB. So
+`TGRAN 16k=00000002` means "16 KiB only", `00000006` means "4 KiB and
+16 KiB", `00000007` means "all three".
 
 ## 8. Testing on the phone
 

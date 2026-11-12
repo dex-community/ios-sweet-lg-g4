@@ -1412,8 +1412,16 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	con_hex("SCTLR0", mi.sctlr_before);
 	con_hex("SCTLR1", mi.sctlr_after);
 	con_hex("TCR", rsr("tcr_el1"));
-	con_hex2("PARANGE", "tg0=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf),
-		 "tg1=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
+	/*
+	 * PARange is bits [3:0] of ID_AA64MMFR0_EL1 (the physical address
+	 * range), NOT a granule. The granule fields are TGran4 [15:12],
+	 * TGran16 [19:16] and TGran64 [23:20], and each is a bitmask: bit 0
+	 * means "4 KiB implemented", bit 1 "16 KiB", bit 2 "64 KiB".
+	 */
+	con_hex2("PARANGE", "pa=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf),
+		 "tgran4=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 12) & 0xf));
+	con_hex2("TGRAN", "16k=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 16) & 0xf),
+		 "64k=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
 	con_hex2("GRANULE", "16k=", mmu_granule_ok() ? 1 : 0, "tg1=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
 	con_skip();
 	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
