@@ -25,11 +25,12 @@ fi
 cd "$TREE" || exit 1
 
 # Start from a clean tree every time: the chain is order dependent, so a
-# partially applied tree gives meaningless results.
-if [ "${CHECK_KEEP_TREE:-0}" != "1" ]; then
-	git checkout -- . 2>/dev/null
-	git clean -fdq 2>/dev/null
-fi
+# partially applied tree gives meaningless results. The tree is reset to its
+# first commit (the pristine xnu-8796 import), not just to HEAD: a tree that
+# was used to write a patch may carry a commit of the already applied chain.
+BASE=$(git rev-list --max-parents=0 HEAD | tail -1)
+git reset --hard "$BASE" >/dev/null 2>&1
+git clean -fdq 2>/dev/null
 
 # the same edits the CI build script makes before patching
 sed -i '' 's|^AVAILABILITY_PL="${SDKROOT}/${DRIVERKITROOT}|AVAILABILITY_PL="${FAKEROOT_DIR}|g' \
