@@ -11,7 +11,20 @@
 # Every header field is copied from the image that was booting on the phone
 # (twrp-nethunter.img), so that the only difference is the kernel:
 #
-#   kernel 0x8000, ramdisk 0x2200000, tags 0x100, page size 4096
+#   kernel 0x8000, ramdisk 0x2200000, page size 4096
+#
+# The tags address holds the DTB that LK copies for the kernel: the H815's
+# DTB entry is 307200 bytes (0x4b000). It must not overlap the kernel nor
+# the ramdisk. The kernel is the CI H815 one, about 9.2 MB (0x8ce80b), so
+# from 0x8000 it reaches 0x94e80b: 0x100 (what the stock LG image uses)
+# and 0x400000 (the shim's layout, sized for a 2 MB kernel) would both land
+# on top of it. LG's own image overlaps the kernel and still boots (its LK
+# overrides the header addresses), but this packer picks a layout that is
+# safe even if the addresses are honoured:
+#
+#   kernel  0x00008000 .. 0x00094e80b
+#   dtb     0x01000000 .. 0x0104b100   (tags_addr)
+#   ramdisk 0x02200000 ..
 #
 # Usage:
 #   tools/pack-twrp-kernel.sh <Image> <out.img>
@@ -42,7 +55,7 @@ python3 "$ROOT/tools/mkbootimg_lg.py" \
 	--dt-img "$DTIMG" \
 	--kernel-addr 0x8000 \
 	--ramdisk-addr 0x2200000 \
-	--tags-addr 0x100 \
+	--tags-addr 0x1000000 \
 	--page-size 4096 \
 	--cmdline "$CMDLINE" \
 	--name twrp-nh \
