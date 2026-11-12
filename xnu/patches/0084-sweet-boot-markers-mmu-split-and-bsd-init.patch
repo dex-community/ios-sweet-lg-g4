@@ -1,0 +1,201 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..95f5992 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -102,6 +102,7 @@
+ #include <sys/codesign.h>
+ 
+ #include <kern/startup.h>
++#include <arm64/sweet_early.h>
+ #include <kern/thread.h>
+ #include <kern/task.h>
+ #include <kern/ast.h>
+@@ -879,6 +880,15 @@ bsd_init(void)
+ #endif
+ 
+ 		bsd_init_kprintf("vfs_mountroot\n");
++#if defined(SWEET)
++		/*
++		 * The root filesystem is about to be mounted: this is the HFS+
++		 * read the whole boot is for. Mark it in the RAM the recovery
++		 * reads back after the watchdog reset.
++		 */
++		sweet_mark(SWEET_MARK_ROOTFS, 0x5EED000D);
++		sweet_early_mark(22, "about to mount the root filesystem");
++#endif
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+ 		}
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index c301443..bbe33bc 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -33,6 +33,7 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IONVRAM.h>
+ #include <IOKit/IOPlatformExpert.h>
++#include <arm64/sweet_early.h>
+ #include <IOKit/IOUserClient.h>
+ #include <libkern/c++/OSAllocation.h>
+ 
+@@ -109,6 +110,16 @@ thread_call_t corefile_open_call = NULL;
+ kern_return_t
+ IOKitBSDInit( void )
+ {
++#if defined(SWEET)
++	/*
++	 * The kernel got past the MMU switch and the VM bootstrap and is now
++	 * matching the root device: this is the last stage before the root
++	 * filesystem is read. Mark it in the RAM the recovery reads back.
++	 */
++	sweet_mark(SWEET_MARK_BSD_INIT, 0x5EED000C);
++	sweet_early_mark(21, "IOKitBSDInit entered");
++#endif
++
+ 	IOService::publishResource("IOBSD");
+ 
+ #if IOPOLLED_COREFILE
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 9fdd184..9e01a49 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -129,6 +129,9 @@
+  * x9 and x10 are scratch here: nothing between the start of start_first_cpu
+  * and the return to arm_init depends on them.
+  */
++/* Diagnostic: the MMU alone, no caches. */
++#define SCTLR_EL1_M_ONLY	1
++
+ #define SWEET_MARK_BASE		0x90003000
+ #define SWEET_MARK_INFO		0x90003800
+ 
+@@ -973,11 +976,41 @@ common_start:
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 
+ #if defined(SWEET)
+-	/* Marker 10: about to write SCTLR_EL1. If this appears without marker 3,
+-	 * the write itself, or the first fetch after it, is what kills the CPU. */
++	/*
++	 * Marker 10: about to write SCTLR_EL1. If this appears without marker 3,
++	 * the write itself, or the first fetch after it, is what kills the CPU.
++	 * Along with it, the state that decides which MMU is in charge: the
++	 * exception level the kernel was entered at, the core, and the part
++	 * number. A kernel entered at EL2 does not enable its own translation
++	 * here at all; a kernel entered at EL1 does.
++	 */
+ 	SWEET_MARK SWEET_MARK_BASE + 0x240, 0x5EED000A
++	movz	x10, #((SWEET_MARK_INFO) & 0xffff)
++	movk	x10, #((((SWEET_MARK_INFO) >> 16)) & 0xffff), lsl #16
++	mrs		x11, CurrentEL
++	str		x11, [x10, #0x28]
++	mrs		x11, MPIDR_EL1
++	str		x11, [x10, #0x30]
++	mrs		x11, MIDR_EL1
++	str		x11, [x10, #0x38]
++	dc		civac, x10
++	dsb		sy
+ #endif
+ 
++	/*
++	 * Diagnostic split of the switch: first the MMU alone (M=1, caches
++	 * still off), then the caches on top of it. On the G4 the kernel dies
++	 * with the full SCTLR_EL1_DEFAULT, and these two markers say whether it
++	 * is the translation itself (no 0x2c0) or the cache enable (0x2c0 but
++	 * no marker 3).
++	 */
++#if defined(SWEET)
++	MOV64   x0, SCTLR_EL1_M_ONLY
++	MSR_SCTLR_EL1_X0
++	isb		sy
++	SWEET_MARK SWEET_MARK_BASE + 0x2c0, 0x5EED000B
++	MOV64   x0, SCTLR_EL1_DEFAULT
++#endif
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index eda0626..6a823a8 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -50,6 +50,29 @@ sweet_early_putc(char c)
+ 	sweet_early_buf[sweet_early_len] = '\0';
+ }
+ 
++/*
++ * Write a boot marker.
++ *
++ * The assembly writes the marks of the early boot into a page of plain RAM
++ * at 0x90003000, cleaning the cache line after every word so it lands in
++ * DRAM whatever the cache state is. The recovery reads that page back after
++ * the watchdog reset, so a mark written from C has to be written the same
++ * way: same page, same clean. The page is above the kernel, in the upper
++ * DRAM bank, which the recovery does not reuse.
++ */
++#define SWEET_MARK_BASE_PA 0x90003000
++
++void
++sweet_mark(unsigned int off, uint32_t value)
++{
++	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)
++	    (SWEET_MARK_BASE_PA + off);
++
++	*p = value;
++	__asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ /*
+  * Push the text out to memory.
+  *
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index fbbc827..6288be7 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -1,15 +1,30 @@
+-/* Early screen diagnostics, valid only while the bootstrap TTBR0 is live. */
++/* Early screen diagnostics, in a buffer in the BSS. */
+ #ifndef _ARM64_SWEET_EARLY_H_
+ #define _ARM64_SWEET_EARLY_H_
+ 
+ #include <pexpert/arm64/board_config.h>
+ #include <stdarg.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * The boot markers written from C go into the same page the assembly writes
++ * (0x90003000), at these offsets. The recovery reads that page back after
++ * the watchdog reset, so a mark written from C has to be written the same
++ * way: same page, same cache clean.
++ */
++#define SWEET_MARK_BSD_INIT     0x340
++#define SWEET_MARK_ROOTFS       0x380
+ 
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_disable(void);
++void sweet_mark(unsigned int off, uint32_t value);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+@@ -17,6 +32,15 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_mark(unsigned int off, uint32_t value)
++{
++	(void)off;
++	(void)value;
++}
++#endif
++
++#ifdef __cplusplus
++}
+ #endif
+ 
+ #endif
