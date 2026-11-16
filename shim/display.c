@@ -1944,33 +1944,11 @@ void disp_boot_step(const char *name)
 	con_hex1("STEP", "n=", n);
 }
 
-/* The hold loop: one small bar repaint + one hardware frame, no DCS. */
-static void __attribute__((unused)) gpu_console_beat(unsigned beat)
-{
-	uint32_t y = 1300;
-
-	/* One frame every 2 s, not every 500 ms: fewer kicks, no visible
-	 * refresh flutter between step updates. */
-	if (beat & 3u)
-		return;
-	disp_gpu_wait_idle();
-	uint32_t w = 40 + (beat & 1) * 600;
-	uint32_t r = (beat & 1) ? 0xff : 0x20;
-	uint32_t g = (beat & 1) ? 0x20 : 0xff;
-
-	for (unsigned row = y; row < y + 16; row++) {
-		volatile uint8_t *p = (volatile uint8_t *)
-			(DD_FB_BASE + (uintptr_t)row * DD_FB_STRIDE);
-		for (unsigned x = 0; x < w; x++) {
-			p[3 * x + 0] = (uint8_t)r;
-			p[3 * x + 1] = (uint8_t)g;
-			p[3 * x + 2] = 0x20;
-		}
-	}
-	disp_cache_clean(DD_FB_BASE + (uintptr_t)y * DD_FB_STRIDE,
-			 16 * DD_FB_STRIDE);
-	disp_gpu_try(s_gpu_kick_mode, "BEATFR");
-}
+/* No hold-loop bar. 2026-11-16: a second green bar at y=1300 was a
+ * leftover heartbeat from the DCS era; it grew a few pixels then stopped,
+ * looked like a stuck loader and confused the diagnostics. The ONLY
+ * progress indicator is fb_progress() at DD_PROGRESS_Y, driven by the
+ * step count. The hold loop now repaints nothing and kicks no frame. */
 
 /*
  * Render the on-screen console into a full-size RGB888 buffer: HELLO, the
@@ -2217,7 +2195,8 @@ void disp_screen_beat(unsigned beat)
 	 * a DCS pixel packet pushed straight into the panel GRAM. If the
 	 * probe failed there is nothing to blink, so stay quiet. */
 	if (SHIM_DISPLAY_MODE == 13) {
-		gpu_console_beat(beat);
+		/* Log-only heartbeat: the glass keeps the last boot step,
+		 * no extra frame and no second green bar. */
 		con_hex1("BEAT", "n=", beat);
 		return;
 	}

@@ -18,6 +18,16 @@
 #include "log.h"
 #include "trail.h"
 
+/* Mode 13 boot diagnostics: the loader runs AFTER the last
+ * shim_checkpoint(), so without these steps the glass freezes at "02"
+ * even while the shim is still copying the XNU payload and jumping. */
+#if SHIM_DISPLAY_MODE == 13
+extern void disp_boot_step(const char *name);
+#define LOAD_STEP(name)	disp_boot_step(name)
+#else
+#define LOAD_STEP(name)	((void)0)
+#endif
+
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
 
@@ -107,6 +117,7 @@ const char *loader_boot(uintptr_t dtb)
 	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
 		return "no initrd in /chosen";
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
+	LOAD_STEP("PAYLOAD found");
 
 	const struct payload *p = (const struct payload *)rd_start;
 	if (!magic_ok(p->magic))
@@ -131,6 +142,7 @@ const char *loader_boot(uintptr_t dtb)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
 	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
+	LOAD_STEP("XNU segments copied");
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
@@ -158,10 +170,13 @@ const char *loader_boot(uintptr_t dtb)
 		ba->CommandLine[i] = p->cmdline[i];
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
+	LOAD_STEP("boot args / ADT placed");
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
+	/* LAST visible step: XNU's fbcon clears the glass after this. */
+	LOAD_STEP("JUMP XNU 4K");
 
 #if SHIM_HW_DIAG
 	/*

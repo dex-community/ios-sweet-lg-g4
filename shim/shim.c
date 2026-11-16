@@ -81,7 +81,9 @@ void emmc_model_finish(void);
  * normal shim never touches the display. When it is ON, the shim brings
  * the panel up, paints a picture and STOPS there: it never jumps to XNU.
  */
-#if SHIM_DISPLAY_TEST && SHIM_HW_DIAG
+/* Mode 13 is BOOT DIAGNOSTICS, not the display test: it must also be
+ * available when SHIM_DISPLAY_TEST=0 (the build that really jumps to XNU). */
+#if (SHIM_DISPLAY_TEST && SHIM_HW_DIAG) || SHIM_DISPLAY_MODE == 13
 #include "display.h"
 #endif
 
