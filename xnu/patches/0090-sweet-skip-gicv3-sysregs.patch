@@ -1,0 +1,37 @@
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -220,6 +220,14 @@
+ #endif /* SWEET */
+ 
+ 	sweet_early_mark(49, "SGI/PPI block done");
++#if defined(SWEET)
++	/* The G4 has a GICv2 (qcom,msm-qgic2): the ICC_* EL1 system
++	 * registers are GICv3-only and are NOT implemented on this
++	 * Cortex-A53. The first MRS ICC_SRE_EL1 never returns and the
++	 * kernel froze inside PE_init_cpu(). The CPU interface is
++	 * memory-mapped (GICC) and the bootloader already set it up. */
++	sweet_early_mark(53, "SWEET GICv2: ICC_* sysregs skipped");
++#else
+ 	// Enable system register access
+ 	uint64_t icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
+ 	icc_sre |= ICC_SRE_SRE;
+@@ -240,6 +248,7 @@
+ 	icc_ctlr &= ~ICC_CTLR_EOIMODE;
+ 	__builtin_arm_wsr64("ICC_CTLR_EL1", icc_ctlr);
+ 	sweet_early_mark(51, "ICC_CTLR_EL1 done");
++#endif /* SWEET */
+ 
+ #if defined(SWEET)
+ 	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
+@@ -260,8 +269,8 @@
+ 		else
+ 			sweet_early_mark(45, "GICD_CTLR RWP cleared");
+ 	}
+-	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
+-	__builtin_arm_isb(ISB_SY);
++	/* GICv2: no ICC_IGRPEN1_EL1 either. */
++	sweet_early_mark(54, "GICD_CTLR programmed");
+ 	sweet_early_mark(46, "pe_init_fiq done");
+ #else
+ 	// Enable the forwarding of the vtimer interrupt

@@ -371,3 +371,18 @@ la causa: il blocco è **prima** di `gicd_read32(GICD_CTLR)`, tra la
 mappatura GIC e i registri ICC_*/GICD. Patch `0089` aggiunge 6 mark
 (47 `find_gicr_pe_base`, 48 WAKER, 49 SGI/PPI, 50 `ICC_SRE_EL1`,
 51 `ICC_CTLR_EL1`, 52 prima della lettura GICD). Catena 94/0.
+
+### Quinto boot device (patch 0089, run CI 43796074804)
+
+`_: find_gicr_pe_base done`, `` `: GICR WAKER block done ``,
+`a: SGI/PPI block done`. Manca `b: ICC_SRE_EL1 done`.
+**Causa finale**: `pexpert/pexpert/arm64/SWEET.h` dichiara
+`HAS_GIC_V3 1`, ma il G4 ha un **GICv2** (`qcom,msm-qgic2`) su
+Cortex-A53 Armv8.0: i registri `ICC_SRE_EL1` / `ICC_CTLR_EL1` /
+`ICC_IGRPEN1_EL1` sono GICv3-only e non esistono. Il primo
+`MRS ICC_SRE_EL1` blocca il kernel dentro `pe_init_fiq()`.
+
+Patch `0090-sweet-skip-gicv3-sysregs.patch`: su SWEET salta tutto il
+blocco `ICC_*` (l'interfaccia CPU è memory-mapped GICC, già inizializzata
+da LK) e rimuove `ICC_IGRPEN1_EL1`; resta solo la programmazione
+memory-mapped di `GICD_CTLR`. Mark 53/54. Catena 95/0.
