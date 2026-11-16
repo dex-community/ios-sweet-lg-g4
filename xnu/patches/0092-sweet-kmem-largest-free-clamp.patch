@@ -1,0 +1,38 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3534,8 +3534,19 @@
+ {
+ 	vm_map_size_t largest_free_size = 0, total_claims = 0;
+ 
++#if defined(SWEET)
++	/* 2026-11-16: with 4 KiB pages / 38-bit KVA the kernel map has
++	 * entries whose vme_start precedes min_offset, so vm_map_sizes()
++	 * computes "vme_start - prev" with an unsigned underflow and
++	 * returns a largest-free value near 2^64. That inflated every
++	 * kmem claim and made vm_map_locate_space() fail. Use the real
++	 * span of the map instead. */
++	largest_free_size = trunc_page(kernel_map->max_offset -
++	    kernel_map->min_offset);
++#else
+ 	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
+ 	largest_free_size = trunc_page(largest_free_size);
++#endif
+ 
+ 	/*
+ 	 * kasan and configs w/o *TRR need to have just one ptr range due to
+@@ -3551,7 +3563,14 @@
+ 		total_claims += kmem_claims[i].kc_size;
+ 	}
+ 	assert((total_claims & PAGE_MASK) == 0);
++#if defined(SWEET)
++	if (total_claims < largest_free_size)
++		largest_free_size -= total_claims;
++	else
++		largest_free_size = 0;
++#else
+ 	largest_free_size -= total_claims;
++#endif
+ #if defined(SWEET)
+ 	sweet_kmem_largest_free = largest_free_size;
+ 	sweet_kmem_total_claims = total_claims;

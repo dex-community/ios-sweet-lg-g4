@@ -410,3 +410,19 @@ Nuovo blocker: layout VA dei `kmem_range` con pagine 4 KiB / KVA a
 38 bit, non più hardware. Patch `0091` stampa nel panic
 `size / start / map=[min,max] / largest / claims / data / ptr`
 per il fix mirato. Catena 96/0.
+
+### Settimo boot device (patch 0091, run CI 43799340850) — numeri
+
+```
+kmem_range_init: claim kmem_ptr_range size=0x7ff34d260000
+start=0xfffffff6c0808000 map=[0xffffffe000000000,0xfffffffbffffffff]
+largest=0xffffffe5323ec000 claims=0x262ba10000
+data=0xffff7febb6d88000 ptr=0x3ffffff94c8fc000
+```
+
+`largest` è ~2^64 → **underflow**: `vm_map_sizes()` calcola
+`vme_start - prev` con entry che precedono `min_offset` nel layout
+4 KiB / KVA 38 bit. I claim diventano 69–140 TB e
+`vm_map_locate_space()` non può soddisfarli. Patch `0092`: su SWEET
+`largest_free_size` deriva da `max_offset - min_offset` e la
+sottrazione di `total_claims` ha un guard. Catena 97/0.
