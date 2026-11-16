@@ -1,0 +1,45 @@
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -159,6 +159,7 @@
+ 
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
++	sweet_early_mark(47, "find_gicr_pe_base done");
+ 
+ 	// Mark this PE to be awake. The WAKER register is in the
+ 	// redistributor frame, so there is nothing to do on a board without
+@@ -199,6 +200,7 @@
+ 	 * no SGI/PPI block to program: the bootloader already enabled the
+ 	 * timer PPI, so only enable the SGI when there is a real frame.
+ 	 */
++	sweet_early_mark(48, "GICR WAKER block done");
+ 	if (gicr_size >= GICR_SGI_PPI_END) {
+ 		gicr_write32(GICR_IGROUPR0, 0xFFFFFFFF);
+ 		for (unsigned int i = 0; i < 32; i += 4) {
+@@ -217,11 +219,13 @@
+ 	gicr_write32(GICR_ISENABLER0, (1 << 27));
+ #endif /* SWEET */
+ 
++	sweet_early_mark(49, "SGI/PPI block done");
+ 	// Enable system register access
+ 	uint64_t icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
+ 	icc_sre |= ICC_SRE_SRE;
+ 	__builtin_arm_wsr64("ICC_SRE_EL1", icc_sre);
+ 	__builtin_arm_isb(ISB_SY);
++	sweet_early_mark(50, "ICC_SRE_EL1 done");
+ 
+ #if defined(SWEET)
+ 	__builtin_arm_wsr64("ICC_BPR1_EL1", 0);
+@@ -235,9 +239,11 @@
+ 	uint64_t icc_ctlr = __builtin_arm_rsr64("ICC_CTLR_EL1");
+ 	icc_ctlr &= ~ICC_CTLR_EOIMODE;
+ 	__builtin_arm_wsr64("ICC_CTLR_EL1", icc_ctlr);
++	sweet_early_mark(51, "ICC_CTLR_EL1 done");
+ 
+ #if defined(SWEET)
+ 	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
++	sweet_early_mark(52, "before first GICD_CTLR read");
+ 	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
+ 	sweet_early_mark(43, "before GICD_CTLR write");
+ 	gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;

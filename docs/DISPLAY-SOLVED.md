@@ -362,3 +362,12 @@ senza uscita. Patch `0088-sweet-gic-rwp-timeout.patch`: poll limitato a
 100000 iterazioni con mark `44 RWP stuck, continuing` / `45 RWP cleared`,
 più mark 41/42/43/46 dentro `pe_init_fiq()` e capstage 40 -> 64.
 Catena patch: 93 applicate, 0 fallite.
+
+### Quarto boot device (patch 0088, run CI 43794569557)
+
+`Y: pe_init_fiq entered` e `Z: GIC DT + ml_io_map done` presenti,
+`[: before GICD_CTLR write` assente. Il poll RWP limitato NON è ancora
+la causa: il blocco è **prima** di `gicd_read32(GICD_CTLR)`, tra la
+mappatura GIC e i registri ICC_*/GICD. Patch `0089` aggiunge 6 mark
+(47 `find_gicr_pe_base`, 48 WAKER, 49 SGI/PPI, 50 `ICC_SRE_EL1`,
+51 `ICC_CTLR_EL1`, 52 prima della lettura GICD). Catena 94/0.
