@@ -499,3 +499,25 @@ un KVA 4 KiB da 112 GiB.
 Patch `0095`: su SWEET `ZONE_MAP_MAX=2 GiB` e
 `ZONE_MAP_VA_SIZE=16 GiB`. I claim scendono sotto i 112 GiB della
 mappa e `kmem_range_init()` torna ad avere spazio. Catena 100/0.
+
+### Undicesimo boot device (patch 0095, run CI 43808900044)
+
+```
+pre_cap:  sane=0x5db0b000 span=0x1bffffffff claims=0xa24a10000
+          free=0x11db5ec000          (prima: claims=0x262ba10000, free=0)
+post_cap: cap=0x176c2c000 free=0x176c2c000
+ptr_set:  ptr=0x5db0c000 spray=0x2ed88000 ranges=1
+ptr_out:  org=0x5db0c000 ptr=0x5dac0000 meta=0x48000 chunks=0x2ed6
+PANIC: claim kmem_data_range size=0xea39c000
+       start=0xfffffffb452a0000 map=[0xffffffe000000000,0xfffffffbffffffff]
+```
+
+**0095 funziona**: i claim passano da 152,68 a 40,57 GiB,
+`largest_free_size` non è più zero (71,43 GiB),
+`kmem_add_ptr_claims()` non va più in underflow e il suo assert passa.
+Nuovo, diverso blocker: `vm_map_locate_space()` non trova spazio per
+`kmem_data_range` perché il cursore `start` parte da
+`kmem_fuzz_start()` (`kmem_alloc(KMA_VAONLY)`) a
+`0xfffffffb452a0000`, cioè ~2,9 GiB sotto `max_offset`, mentre il
+claim ne chiede 3,66. Prossimo fix: su SWEET ancorare `start` a
+`kernel_map->min_offset` (si perde il fuzz ASLR, si guadagna il boot).
