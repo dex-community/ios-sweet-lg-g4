@@ -15,9 +15,9 @@ ipotesi superate e descrizioni di codice che non esiste più.
 | Shim | gira sul telefono, log in pstore / RAM `0x50000000` / IMEM | `NOTES.md`, `shim/log.h` |
 | eMMC | CMD2 risolto (`C2OK v=00000009`), rootfs HFS+ montato ro da Linux | `NOTES.md`, `docs/test-2026-11-10-hfs-mount.txt` |
 | XNU | **MMU 4 KiB OK** (marker 1..12, `SCTLR_EL1 M=1`), GIC risolto, boot fino a `kernel_bootstrap`. Si ferma in `kmem_range_init()` → `vm_kern.c:3497` | `docs/DISPLAY-SOLVED.md §boot device` |
-| Fix XNU | 0085 (grana 4 KiB) → 0086/87/88/89 (bisection) → 0090 (GICv3→GICv2) → 0091/92/93 (kmem) → 0094 (diagnostica early + guard underflow) | `xnu/patches/` — catena 99/0 |
+| Fix XNU | 0085 (grana 4 KiB) → 0086/87/88/89 (bisection) → 0090 (GICv3→GICv2) → 0091/92/93 (kmem) → 0094 (diagnostica early + guard underflow) → 0095 (zone map VA) | `xnu/patches/` — catena 100/0 |
 | Kernel 4 KiB | **VERIFICATO**: `TCR_EL1 0x022a51a251a` (T0SZ 26, TG0 0b00), `__TEXT 0xfffffff007004000`, zero LSE. Il vecchio FAIL era un bug del checker (costante TCR hardcoded) | `tools/check-xnu-binary.sh` |
-| Blocker aperto | `kmem_add_ptr_claims()`: `ptr_range_size` azzerato → underflow a 64 bit (`0x7ffa00460000`) → assert. Patch 0094 logga i numeri nel buffer early e blocca l'underflow | `docs/DISPLAY-SOLVED.md`, run CI `43802642760` / `43806734134` |
+| Blocker aperto | **Root cause trovato**: claim statici 152,68 GiB (`zones` = 128 GiB da `XNU_PLATFORM_MacOSX`) > `kernel_map` 112 GiB. Patch 0095 riduce `ZONE_MAP_VA_SIZE` a 16 GiB; 0094 logga i numeri nel buffer early | `docs/DISPLAY-SOLVED.md`, run CI `43806734134` |
 | **Display** | **RISOLTO il 16/11, mode 13**: frame spinto da MDP/DSI DMA (hardware), istantaneo, log boot step-by-step a schermo, `GPU verdict=HW`. HELLO rimosso. Dati in `shim/display-data.h` | **`docs/DISPLAY-SOLVED.md`**, `shim/display.c` |
 | Causa dello stallo | finestra DCS a 640 colonne su pannello da 720: ogni riga sfalsata di 240 byte → static deterministico. Non era MDP, non era SMMU, non era formato pixel | `docs/DISPLAY-SOLVED.md §3` |
 | Causa del mancato boot | **non è il display** | `NOTES.md`, `HANDOFF-PROMPT.md` |

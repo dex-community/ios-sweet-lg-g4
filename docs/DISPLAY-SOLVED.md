@@ -471,3 +471,31 @@ log di `pre_cap / post_cap / ptr_set / ptr_in / ptr_out`; cap con
 floor di 256 MiB e fallback se `sane_size == 0`; guardia in
 `kmem_add_ptr_claims()` per non moltiplicare un range nullo.
 Catena 99/0.
+
+### Decimo boot device (patch 0094, run CI 43806734134) — la causa vera
+
+I numeri scritti nel buffer early:
+
+```
+SWEET KMEM94 pre_cap: sane=0x5db0b000 span=0x1bffffffff
+                      claims=0x262ba10000 free=0x0
+SWEET KMEM94 post_cap: cap=0x176c2c000 free=0x0
+SWEET KMEM94 ptr_set: ptr=0x0 spray=0x0 ranges=1
+SWEET KMEM94 ptr_in: org=0x0
+SWEET EARLY PANIC: kmem_range_init: claim zones size=0x2000000000 ...
+```
+
+`span` = 112 GiB, `claims` = 152,68 GiB, di cui **`zones` da solo
+128 GiB**. Il guard di 0092 (`total_claims < largest_free_size`) azzera
+`largest_free_size`, e da lì tutto il resto (`ptr=0`, underflow,
+assert, claim non piazzabili). Non era un problema di cap: era una
+**richiesta di VA più grande della mappa**.
+
+`zones` viene da `ZONE_MAP_VA_SIZE` in `osfmk/kern/zalloc.c`: il board
+config SWEET eredita `XNU_PLATFORM_MacOSX`, quindi 128 GiB di VA per la
+zone map, pensati per un Mac, non per un telefono con 1,5 GiB di RAM e
+un KVA 4 KiB da 112 GiB.
+
+Patch `0095`: su SWEET `ZONE_MAP_MAX=2 GiB` e
+`ZONE_MAP_VA_SIZE=16 GiB`. I claim scendono sotto i 112 GiB della
+mappa e `kmem_range_init()` torna ad avere spazio. Catena 100/0.
