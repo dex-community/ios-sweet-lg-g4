@@ -1,0 +1,22 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3580,6 +3580,18 @@
+ 	 * includes the kmem_sprayqtn range). Given that we have 4 total
+ 	 * ranges divide the available VA by 8.
+ 	 */
++#if defined(SWEET)
++	/* 2026-11-16: with 4 KiB pages the 38-bit KVA is ~28 TB. Sizing
++	 * the kmem ranges on the whole VA makes ptr_range_size huge:
++	 * kmem_add_ptr_claims() multiplies it by KMEM_CHUNK_SIZE_MIN and
++	 * its assertion fails. Size the ranges on RAM instead. */
++	vm_map_size_t kmem_cap = round_page(sane_size * 4);
++	if (largest_free_size > kmem_cap)
++		largest_free_size = kmem_cap;
++	kprintf("SWEET kmem: sane=0x%llx cap=0x%llx free=0x%llx\n",
++	    (uint64_t)sane_size, (uint64_t)kmem_cap,
++	    (uint64_t)largest_free_size);
++#endif
+ 	ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
+ 	sprayqtn_range_size = ptr_range_size;
+ 

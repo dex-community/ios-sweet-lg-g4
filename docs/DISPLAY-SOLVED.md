@@ -426,3 +426,17 @@ data=0xffff7febb6d88000 ptr=0x3ffffff94c8fc000
 `vm_map_locate_space()` non può soddisfarli. Patch `0092`: su SWEET
 `largest_free_size` deriva da `max_offset - min_offset` e la
 sottrazione di `total_claims` ha un guard. Catena 97/0.
+
+### Ottavo boot device (patch 0092, run CI 43800977709)
+
+Il clamp rimuove l'underflow ma il kernel ora si ferma su
+
+```
+vm_kern.c:3497 Assertion failed: kmem_meta_size + ptr_range_size <= org_ptr_range_size
+```
+
+`kmem_add_ptr_claims()` moltiplica `ptr_range_size` per
+`KMEM_CHUNK_SIZE_MIN`; dimensionare i range su tutto il KVA da ~28 TB
+li rende ingestibili con pagine 4 KiB. Patch `0093`: su SWEET
+`largest_free_size` è limitato a `round_page(sane_size * 4)` (RAM,
+non VA) e stampa `sane / cap / free` nel console ring. Catena 98/0.
