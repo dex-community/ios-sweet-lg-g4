@@ -22,11 +22,14 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# The TCR_EL1 the 4 KiB build must contain:
-#   T0SZ = 26, TG0 = 0b00 (4 KiB), T1SZ = 26, TG1 = 0b10 (4 KiB),
-#   IPS = 40 bit, SH0/1 outer, IRGN/ORGN write-back.
-WANT_TCR=0x002a51a161a
-# The TCR_EL1 of the old 16 KiB build: it must NOT be there any more.
+# The 4 KiB TCR_EL1 is NOT a fixed literal: the shareability, TBI and
+# E0PD bits change with the board config, so matching one magic constant
+# gives a FALSE NEGATIVE on a kernel that is in fact correct.
+# Measured 2026-11-16 on the CI artifact 43313974215:
+#   4 KiB build -> 0x022a51a251a   (T0SZ 26, TG0 0b00, T1SZ 26, TG1 0b10)
+#   old 16 KiB  -> 0x0226511a511   (T0SZ 17, TG0 0b10)
+# The checker therefore DECODES the fields instead of guessing the whole
+# word. The old value is still rejected explicitly.
 OLD_TCR=0x0226511a511
 
 if [ $# -ge 1 ]; then
@@ -44,33 +47,49 @@ echo "kernel: $K"
 fail=0
 
 # ---------------------------------------------------------------- granule
-# Search the whole file for the 8 byte little endian constant.
-have_want=$(python3 - "$K" "$WANT_TCR" <<'PY'
-import sys
+# Find every 8-byte constant that looks like a TCR_EL1 and decode its
+# fields. A 4 KiB build needs T0SZ=26, TG0=0b00, T1SZ=26, TG1=0b10.
+granule=$(python3 - "$K" "$OLD_TCR" <<'PY'
+import sys, struct
 data = open(sys.argv[1], 'rb').read()
-val = int(sys.argv[2], 16)
-pat = val.to_bytes(8, 'little')
-print(data.count(pat))
+old = int(sys.argv[2], 16)
+found = {}
+has_old = 0
+# A TCR_EL1 constant lives in an 8-byte-aligned data slot, NOT in an
+# unaligned instruction stream. Scanning every byte offset produced 55
+# false positives (A64 opcodes); aligned + high-bits-zero + IPS=40bit
+# leaves exactly the real TCR.
+for i in range(0, len(data) - 8, 8):
+    w = struct.unpack_from('<Q', data, i)[0]
+    if w == old:
+        has_old += 1
+    if (w >> 40) != 0 or ((w >> 32) & 7) != 2:
+        continue
+    if (w & 0x3f) != 26 or ((w >> 16) & 0x3f) != 26:
+        continue
+    if ((w >> 14) & 3) != 0 or ((w >> 30) & 3) != 2:
+        continue
+    found[w] = found.get(w, 0) + 1
+print('old=%d' % has_old)
+for w, n in sorted(found.items()):
+    print('tcr=0x%016x count=%d T0SZ=%d TG0=%d T1SZ=%d TG1=%d IPS=%d' %
+          (w, n, w & 0x3f, (w >> 14) & 3, (w >> 16) & 0x3f,
+           (w >> 30) & 3, (w >> 32) & 7))
 PY
 )
-have_old=$(python3 - "$K" "$OLD_TCR" <<'PY'
-import sys
-data = open(sys.argv[1], 'rb').read()
-val = int(sys.argv[2], 16)
-pat = val.to_bytes(8, 'little')
-print(data.count(pat))
-PY
-)
-if [ "$have_want" -ge 1 ]; then
-	echo "ok    TCR_EL1 $WANT_TCR (4 KiB granule) found $have_want time(s)"
+echo "$granule" | grep '^tcr=' || true
+n_tcr=$(printf '%s\n' "$granule" | grep -c '^tcr=' || true)
+n_old=$(printf '%s\n' "$granule" | sed -n 's/^old=\([0-9]*\)$/\1/p')
+if [ "${n_tcr:-0}" -ge 1 ]; then
+	echo "ok    4 KiB TCR_EL1 found ($n_tcr distinct value(s))"
 else
-	echo "FAIL  TCR_EL1 $WANT_TCR (4 KiB granule) NOT in the binary"
+	echo "FAIL  no TCR_EL1 with TG0=0b00 / T0SZ=26 in the binary"
 	fail=1
 fi
-if [ "$have_old" -eq 0 ]; then
+if [ "${n_old:-1}" -eq 0 ]; then
 	echo "ok    the 16 KiB TCR_EL1 $OLD_TCR is gone"
 else
-	echo "FAIL  the 16 KiB TCR_EL1 $OLD_TCR is still in the binary ($have_old time(s))"
+	echo "FAIL  the 16 KiB TCR_EL1 $OLD_TCR is still in the binary ($n_old time(s))"
 	fail=1
 fi
 

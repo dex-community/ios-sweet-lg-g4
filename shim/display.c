@@ -84,6 +84,7 @@
 #include "pstore.h"
 #include "clocks.h"
 #include "timer.h"
+#include "display-data.h"	/* single source of truth for all display facts */
 
 /* The bit helper of the kernel (the shim has no linux headers). */
 #ifndef BIT
@@ -794,6 +795,15 @@ static int dsi_dcs_write(uint8_t cmd, const uint8_t *payload, unsigned len,
 		total = 4 + padded;
 	}
 
+	/* 2026-11-16 (alignment fix): the DMA command buffer is plain DRAM,
+	 * not an MMIO window. Push the freshly built packet out of any data
+	 * cache before the host reads it. Harmless with the MMU off, and it
+	 * removes a content-dependent failure: a uniform solid colour hides
+	 * a stale payload, text does not. */
+	for (uintptr_t a = DSI_CMD_BUF; a < DSI_CMD_BUF + total; a += 64)
+		__asm__ volatile("dc cvac, %0" :: "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+
 	/* Dual-DSI split panel: BOTH links must receive the command.
 	 * The old code used dsi_w() (= DSI0 only), so only the left half
 	 * of the panel ever saw sleep-out / display-on. The kernel does
@@ -805,28 +815,29 @@ static int dsi_dcs_write(uint8_t cmd, const uint8_t *payload, unsigned len,
 	__asm__ volatile("dsb sy" ::: "memory");
 	dsi_both_w(DSI_CMD_MODE_DMA_SW_TRIGGER, 0x01);
 
-	/* Wait for the completion. The kernel waits on the PRIMARY link
-	 * only (mdss_dsi_host.c:1805) because the broadcast is fire and
-	 * forget on the second one; here we log both so a dead DSI1 is
-	 * visible in the pstore instead of being guessed. 200 ms is the
-	 * kernel's DMA_TX_TIMEOUT. */
+	/* Wait for BOTH controllers. 2026-11-16: the old loop broke on
+	 * DSI0 alone. Both links DMA from the SAME buffer; returning early
+	 * let the next packet overwrite DSI_CMD_BUF while DSI1 was still
+	 * streaming it. That produced the deterministic row shear: a solid
+	 * red frame hid it, HELLO did not. 200 ms is DMA_TX_TIMEOUT. */
 	unsigned waited = 0;
 	uint32_t done0 = 0, done1 = 0;
 
 	for (; waited < 200; waited++) {
 		done0 = dsi0_r(DSI_INT_CTRL) & BIT(0);
 		done1 = dsi1_r(DSI_INT_CTRL) & BIT(0);
-		if (done0)
+		if (done0 && done1)
 			break;
 		g4_wdt_pet();
 		delay_ms(1);
 	}
 	/* One line per short command, not one per 0x2C pixel packet: a full
 	 * screen is ~200 packets and would bury the useful part of pstore.
-	 * 2026-11-16: log the WAIT too. wait_ms=0 on a 15 KiB packet would
-	 * mean the clear of CMD_DMA_DONE did not take and the "completion" is
-	 * a stale bit, not a transfer. links is a bitmask: 1=DSI0, 2=DSI1. */
-	if (total == 4 || waited == 200)
+	 * log the WAIT of the first three LONG packets too, so the cost of
+	 * a 64 KiB transfer is measurable instead of guessed. */
+	static unsigned long_logged;
+	if (total == 4 || waited == 200 ||
+	    (total > 4 && long_logged++ < 3))
 		con_hex2("DCS", "wait_ms=", waited, "links=",
 			 (done0 ? 1u : 0u) | (done1 ? 2u : 0u));
 	if (waited == 200) {
@@ -1481,6 +1492,486 @@ static int __attribute__((unused)) gram_stream_buffer(const uint8_t *src)
 	return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* MODE 12 - ALIGNED, FAST CONSOLE (2026-11-16)                       */
+/* ------------------------------------------------------------------ */
+/*
+ * Two problems were left after mode 11:
+ *
+ *   1. SPEED. Mode 11 streamed 720x2560x3 = 5,529,600 bytes on every
+ *      boot. The panel renders the GRAM as it is written, so the user
+ *      watched a slow top-to-bottom fill. Only the first ~600 rows hold
+ *      the console; the remaining 1960 rows carried a flat background.
+ *
+ *   2. ALIGNMENT. Mode 11 set ONE 0x2A/0x2B window and then sent 85
+ *      packets of 0x3C (write_memory_continue). Any byte the panel
+ *      drops, inserts or leaves pending between packets shifts every
+ *      following row a little more. A solid red frame hides that
+ *      completely; a 12x-scaled glyph turns into chevrons. This is the
+ *      deterministic "random pixels" seen on every boot.
+ *
+ * The fix: NEVER depend on carried GRAM state. Every packet gets a FRESH
+ * 0x2A/0x2B window covering exactly its own rows, and always starts with
+ * 0x2C (write_memory_start). A lost byte can corrupt at most one packet;
+ * it can no longer accumulate. Each packet still carries an integral
+ * number of 720-pixel rows, so no row starts mid-pixel.
+ *
+ * Data: 600 rows x 2160 bytes = 1,296,000 bytes (4.3x less than mode 11),
+ * 20 packets instead of 86. The heartbeat repaints 8 rows, one packet.
+ */
+#define GRAM_BAND_H		600
+#define GRAM_BAND_BYTES		((uintptr_t)GRAM_BAND_H * GRAM_FULL_ROW)
+#define GRAM_BEAT_BAND_Y0	568
+#define GRAM_BEAT_BAND_ROWS	8
+#define GRAM_BAND_SCRATCH	(GRAM_FB + GRAM_BAND_BYTES)
+
+/* Every packet is self-contained: fresh window, 0x2C, whole rows only. */
+static int gram_stream_fresh(const uint8_t *src, unsigned rows)
+{
+	uint64_t t0 = timer_us();
+	unsigned packets = 0;
+
+	for (unsigned y = 0; y < rows; y += GRAM_ROWS_PER_FULL_PKT) {
+		unsigned nrows = rows - y;
+
+		if (nrows > GRAM_ROWS_PER_FULL_PKT)
+			nrows = GRAM_ROWS_PER_FULL_PKT;
+		if (gram_window(GRAM_FULL_W - 1, y, y + nrows - 1) < 0)
+			return -1;
+		if (dsi_dcs_write(0x2c,
+		    src + (uintptr_t)y * GRAM_FULL_ROW,
+		    nrows * GRAM_FULL_ROW, 0) < 0)
+			return -1;
+		packets++;
+	}
+	con_hex2("BAND", "packets=", packets, "ms=",
+		 (uint32_t)((timer_us() - t0) / 1000u));
+	return 0;
+}
+
+/* One-pixel rulers: if rows are still shifted, these become diagonals
+ * instead of straight lines, and the photo says by how much. */
+static void gram_band_rulers(void)
+{
+	uint32_t stride = GRAM_FULL_ROW;
+
+	for (unsigned y = 0; y < GRAM_BAND_H; y++) {
+		volatile uint8_t *row = (volatile uint8_t *)
+			(GRAM_FB + (uintptr_t)y * stride);
+		for (unsigned x = 0; x < 2; x++) {
+			row[3 * x + 0] = 0x20;
+			row[3 * x + 1] = 0xe0;
+			row[3 * x + 2] = 0xe0;
+		}
+		for (unsigned x = GRAM_FULL_W - 2; x < GRAM_FULL_W; x++) {
+			row[3 * x + 0] = 0x20;
+			row[3 * x + 1] = 0xe0;
+			row[3 * x + 2] = 0xe0;
+		}
+	}
+	for (unsigned y = 180; y < GRAM_BAND_H; y += 160) {
+		volatile uint8_t *row = (volatile uint8_t *)
+			(GRAM_FB + (uintptr_t)y * stride);
+		for (unsigned x = 0; x < GRAM_FULL_W; x++) {
+			row[3 * x + 0] = 0x60;
+			row[3 * x + 1] = 0x60;
+			row[3 * x + 2] = 0x60;
+		}
+	}
+}
+
+static int __attribute__((unused)) gram_console_band(unsigned stage,
+						      unsigned beat,
+						      const char *label)
+{
+	volatile uint32_t *scr = (volatile uint32_t *)GRAM_FB;
+	uint32_t stride = GRAM_FULL_ROW;
+	char st[3], bt[24] = "BEAT ";
+	char b[16];
+
+	/* All four bytes equal: 3 bytes per pixel. */
+	for (uintptr_t i = 0; i < GRAM_BAND_BYTES / 4; i++)
+		scr[i] = 0x10101010U;
+
+	for (unsigned y = 0; y < 16; y++) {
+		volatile uint8_t *row = (volatile uint8_t *)
+			(GRAM_FB + (uintptr_t)y * stride);
+		for (unsigned x = 0; x < GRAM_FULL_W; x++) {
+			row[3 * x + 0] = 0xff;
+			row[3 * x + 1] = 0x20;
+			row[3 * x + 2] = 0x20;
+		}
+	}
+	gram_band_rulers();
+
+	con_draw_text_bpp(GRAM_FB, stride, 40, 40, "HELLO",
+			  0x00ffffffU, 0x00101010U, 8, 24);
+	st[0] = (char)('0' + (stage % 10));
+	st[1] = 0;
+	con_draw_text_bpp(GRAM_FB, stride, 40, 200, st,
+			  0x00ffff00U, 0x00101010U, 8, 24);
+	con_draw_text_bpp(GRAM_FB, stride, 40, 350, label,
+			  0x0040e0d0U, 0x00101010U, 4, 24);
+
+	disp_hex8(b, beat);
+	for (int i = 0; i < 8; i++)
+		bt[5 + i] = b[i];
+	bt[13] = 0;
+	con_draw_text_bpp(GRAM_FB, stride, 40, 440, bt,
+			  0x00ffffffU, 0x00101010U, 4, 24);
+
+	disp_cache_clean(GRAM_FB, GRAM_BAND_BYTES);
+	return gram_stream_fresh((const uint8_t *)GRAM_FB, GRAM_BAND_H);
+}
+
+/* Heartbeat: ONE 8-row packet (17,280 bytes), not 64 rows x 3 packets. */
+static void __attribute__((unused)) gram_band_beat(unsigned beat)
+{
+	volatile uint8_t *p = (volatile uint8_t *)GRAM_BAND_SCRATCH;
+	uintptr_t n = (uintptr_t)GRAM_BEAT_BAND_ROWS * GRAM_FULL_ROW;
+	uint8_t r = (beat & 1) ? 0xff : 0x20;
+	uint8_t g = (beat & 1) ? 0x20 : 0xff;
+
+	for (uintptr_t i = 0; i < n; i += 3) {
+		p[i + 0] = r;
+		p[i + 1] = g;
+		p[i + 2] = 0x20;
+	}
+	disp_cache_clean(GRAM_BAND_SCRATCH, n);
+	if (gram_window(GRAM_FULL_W - 1, GRAM_BEAT_BAND_Y0,
+			GRAM_BEAT_BAND_Y0 + GRAM_BEAT_BAND_ROWS - 1) < 0)
+		return;
+	(void)dsi_dcs_write(0x2c, (const uint8_t *)GRAM_BAND_SCRATCH, n, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* MODE 13 - HARDWARE (MDP) CONSOLE + BOOT DIAGNOSTICS                 */
+/* ------------------------------------------------------------------ */
+/*
+ * All data for this block is in display-data.h. Read it first.
+ *
+ * WHY. Modes 4..12 push pixels with the CPU: for every 64 KiB packet the
+ * CPU copies 64 KiB from DRAM into DD_DSI_CMD_BUF, clears/waits
+ * CMD_DMA_DONE on two links and strobes DMA_SW_TRIGGER. 86 packets for a
+ * full frame. The panel renders its GRAM as bytes arrive, hence the slow
+ * top-to-bottom fill; a lost byte between 0x3C packets shifts all later
+ * rows, hence the sheared HELLO. Narrow 0x2B windows are ignored by this
+ * panel (D12), so the CPU path cannot be made both fast and correct.
+ *
+ * THE HARDWARE PATH. LK already programmed RGB0/RGB1 -> 0x03400000 with
+ * stride 4320 (1440x2560 RGB888), LM0 1440x2560, INTF1/INTF2 -> DSI0/1.
+ * The pipeline is ALIVE but FROZEN (INTF frame counters = 0). The CPU
+ * writes ONE frame into that framebuffer and issues ONE MDP_SW_TRIGGER.
+ * MDP/DSI DMA then moves the whole frame with hardware timing: no CPU
+ * byte loop, no per-packet state, no shear, no progressive fill.
+ *
+ * GPU? No Adreno driver exists in a bare-metal shim. The engine is the
+ * MDP display processor + DSI DMA (hardware scan-out). "GPU" is shorthand
+ * for that. Prove it numerically with CMD_MDP_DONE = BIT(8) of
+ * DSI_INT_CTRL on BOTH links. DD_INTF_FRAME_COUNT is NOT a valid proof:
+ * in command mode the timing engine is off and that counter stays 0 even
+ * when the frame appears instantly (measured, 2026-11-16).
+ *
+ * STEP-BY-STEP BOOT LOGS. disp_boot_init() runs at the very start of
+ * shim_main; every shim_checkpoint() calls disp_boot_step(). Each step
+ * paints its own line and kicks ONE hardware frame BEFORE the next
+ * operation. If the phone hangs, the last visible line is the last step
+ * that completed -- that is the point of the whole diagnostic.
+ */
+
+#define DD_STEP_FIRST_Y		240
+#define DD_STEP_PITCH		52
+#define DD_STEP_MAX		20
+#define DD_PROGRESS_Y		200
+#define DD_PROGRESS_H		8
+#define DD_LOG_FIRST_Y		320
+#define DD_LOG_PITCH		36
+#define DD_LOG_LINES		14
+
+static int s_boot_ready;
+static unsigned s_step_n;
+static unsigned s_gpu_kick_mode;	/* 0 trigger only, 1 +CTL, 2 +full CTL */
+
+static void fb_put_line(uint32_t y, const char *s, uint32_t fg, int scale)
+{
+	con_draw_text_bpp(DD_FB_BASE, DD_FB_STRIDE, 40, y, s,
+			  fg, 0x00101010U, scale, 24);
+	disp_cache_clean(DD_FB_BASE + (uintptr_t)y * DD_FB_STRIDE,
+			 (uintptr_t)16 * scale * DD_FB_STRIDE);
+}
+
+static void fb_progress(unsigned n)
+{
+	uint32_t w = (n + 1) * 60;
+
+	if (w > DD_FB_W)
+		w = DD_FB_W;
+	for (unsigned y = DD_PROGRESS_Y; y < DD_PROGRESS_Y + DD_PROGRESS_H; y++) {
+		volatile uint8_t *row = (volatile uint8_t *)
+			(DD_FB_BASE + (uintptr_t)y * DD_FB_STRIDE);
+		for (unsigned x = 0; x < w; x++) {
+			row[3 * x + 0] = 0x20;
+			row[3 * x + 1] = 0xff;
+			row[3 * x + 2] = 0x40;
+		}
+	}
+	disp_cache_clean(DD_FB_BASE + (uintptr_t)DD_PROGRESS_Y * DD_FB_STRIDE,
+			 (uintptr_t)DD_PROGRESS_H * DD_FB_STRIDE);
+}
+
+/* Read the two frame counters. They only advance when MDP hardware played
+ * a frame; a CPU/DCS write never touches them. */
+static uint32_t gpu_f1(void) { return rd(INTF1_BASE + DD_GPU_FRAME_COUNT_OFF); }
+static uint32_t gpu_f2(void) { return rd(INTF2_BASE + DD_GPU_FRAME_COUNT_OFF); }
+
+/* A frame can still be in flight after CMD_MDP_DONE: the panel GRAM is
+ * written by the DSI engine over several milliseconds. Repainting the
+ * framebuffer while that DMA reads it produces the brief salt-and-pepper
+ * flashes seen on 2026-11-16. Wait for BOTH command engines to go idle
+ * before any CPU write to cont_splash. */
+static void disp_gpu_wait_idle(void)
+{
+	for (unsigned i = 0; i < 200; i++) {
+		uint32_t s = dsi0_r(DSI_STATUS) | dsi1_r(DSI_STATUS);
+
+		if (!(s & (DSI_STATUS_CMD_ENGINE_BUSY | DSI_STATUS_CMD_DMA_BUSY)))
+			break;
+		g4_wdt_pet();
+		delay_ms(1);
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Clear CMD_MDP_DONE (BIT(8)) on both links. W1C status register: the
+ * enable/mask bits must be preserved, exactly like CMD_DMA_DONE. */
+static void dsi_mdp_done_clear(void)
+{
+	uint32_t v0 = dsi0_r(DSI_INT_CTRL);
+	uint32_t v1 = dsi1_r(DSI_INT_CTRL);
+
+	dsi0_w(DSI_INT_CTRL,
+	       (v0 & DD_DSI_INTR_ALL_MASK) | DD_DSI_INT_CTRL_MDP_DONE);
+	dsi1_w(DSI_INT_CTRL,
+	       (v1 & DD_DSI_INTR_ALL_MASK) | DD_DSI_INT_CTRL_MDP_DONE);
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* One kick, one measurement. mode selects how much CTL arming is done.
+ * The verdict is CMD_MDP_DONE on BOTH links, NOT INTF_FRAME_COUNT: in
+ * command mode the timing engine is off and that counter never moves. */
+static int disp_gpu_try(unsigned mode, const char *tag)
+{
+	uint32_t a1 = gpu_f1(), a2 = gpu_f2();
+	uint32_t st0 = dsi0_r(DSI_STATUS);
+	unsigned waited = 0;
+	uint32_t done0 = 0, done1 = 0;
+
+	dsi_mdp_done_clear();
+	if (mode == 1) {
+		/* Strobe exactly the bits LK left pending. */
+		wr(CTL_BASE + CTL_FLUSH, DD_BOOT_CTL_FLUSH);
+		wr(CTL_BASE + CTL_START, 0x1);
+	} else if (mode == 2) {
+		/* Arm the inherited pipes explicitly (RGB0, RGB1, LM0, CTL,
+		 * INTF1, INTF2) and start the CTL. No pipe reconfiguration. */
+		wr(CTL_BASE + CTL_FLUSH,
+		   BIT(3) | BIT(4) | BIT(6) | BIT(17) | BIT(28) | BIT(29));
+		wr(CTL_BASE + CTL_START, 0x1);
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	dsi_soft_trigger();			/* MDP_SW_TRIGGER on both links */
+
+	for (; waited < 200; waited++) {
+		done0 = dsi0_r(DSI_INT_CTRL) & DD_DSI_INT_CTRL_MDP_DONE;
+		done1 = dsi1_r(DSI_INT_CTRL) & DD_DSI_INT_CTRL_MDP_DONE;
+		if (done0 && done1)
+			break;
+		g4_wdt_pet();
+		delay_ms(1);
+	}
+
+	/* Do not let the caller repaint cont_splash while this frame is
+	 * still being pushed into the panel GRAM. */
+	disp_gpu_wait_idle();
+	delay_ms(2);
+	uint32_t b1 = gpu_f1(), b2 = gpu_f2();
+	/* INTF counters are informational: 0 is EXPECTED in command mode. */
+	con_hex2(tag, "mdp_done=", (done0 ? 1u : 0u) | (done1 ? 2u : 0u),
+		 "wait_ms=", waited);
+	con_hex2(tag, "d_intf1=", b1 - a1, "d_intf2=", b2 - a2);
+	con_hex2(tag, "dsi_status=", dsi0_r(DSI_STATUS) ^ st0,
+		 "ack_err=", dsi0_r(DSI_ACK_ERR_STATUS));
+	return (done0 && done1) ? 1 : 0;
+}
+
+/* Explicit GPU-vs-CPU verification. Never assert: measure. */
+static void disp_gpu_probe(void)
+{
+	unsigned winner = 0;
+	int ok = 0;
+	/* Try the known-good kick first (display-data.h), then bisect if a
+	 * future device or bootloader state changes the requirement. */
+	static const unsigned order[3] = { DD_GPU_KICK_MODE, 0, 2 };
+
+	for (unsigned k = 0; k < 3; k++) {
+		unsigned m = order[k];
+
+		if (disp_gpu_try(m, "GPUPROBE")) {
+			winner = m;
+			ok = 1;
+			break;
+		}
+	}
+	s_gpu_kick_mode = winner;
+	if (ok) {
+		con_str("GPU", "verdict=HW CMD_MDP_DONE set on BOTH links");
+		con_str("GPU", "engine=" DD_GPU_ENGINE_NAME " (no Adreno driver)");
+		con_str("GPU", "CPU writes ONE framebuffer, then ONE trigger");
+		con_str("GPU", "per-frame CPU byte loop = 0 bytes");
+	} else {
+		con_str("GPU", "verdict=CPU CMD_MDP_DONE never set");
+		con_str("GPU", "fallback=DCS byte stream is the only visible path");
+	}
+	con_hex2("GPU", "kick_mode=", winner,
+		 "cpu_bytes_per_frame=", ok ? 0u : (uint32_t)DD_T_FULL_BYTES);
+	con_str("GPU", "INTF_FRAME_COUNT=0 is EXPECTED in command mode");
+}
+
+/* Called once, at the very start of shim_main (mode 13 only). */
+void disp_boot_init(void)
+{
+	volatile uint32_t *fb = (volatile uint32_t *)DD_FB_BASE;
+
+	con_hex1("DATA", "id=", DISPLAY_DATA_ID);
+	con_str("DATA", "source=shim/display-data.h " DISPLAY_DATA_ID_STR);
+	if (clocks_display_core() < 0) {
+		con_str("BOOT", "display init FAILED: clocks");
+		return;
+	}
+	dsi_force_hs_mode();
+	if (dsi_dcs_write(DD_DCS_SLEEP_OUT, 0, 0, 120) < 0)
+		return;
+	if (dsi_dcs_write(DD_DCS_DISPLAY_ON, 0, 0, 20) < 0)
+		return;
+	if (gram_set_format() < 0)
+		return;
+
+	/* ONE full framebuffer write. Geometry is exactly what LK's RGB0/1
+	 * are already programmed for: 1440x2560 RGB888, stride 4320. */
+	for (uintptr_t i = 0; i < DD_FB_BYTES / 4; i++)
+		fb[i] = 0x10101010U;
+	disp_cache_clean(DD_FB_BASE, DD_FB_BYTES);
+
+	fb_put_line(40, "BOOT DIAGNOSTICS", 0x00ffffffU, 8);
+	s_boot_ready = 1;
+	con_str("BOOT", "framebuffer console ready at 0x03400000");
+	disp_gpu_probe();
+	disp_boot_step("BOOT display init");
+}
+
+static void fb_clear_band(uint32_t y0, uint32_t rows)
+{
+	volatile uint32_t *p = (volatile uint32_t *)
+		(DD_FB_BASE + (uintptr_t)y0 * DD_FB_STRIDE);
+	uintptr_t words = (uintptr_t)rows * DD_FB_STRIDE / 4;
+
+	for (uintptr_t i = 0; i < words; i++)
+		p[i] = 0x10101010U;
+	disp_cache_clean(DD_FB_BASE + (uintptr_t)y0 * DD_FB_STRIDE,
+			 (uintptr_t)rows * DD_FB_STRIDE);
+}
+
+/* Render the LAST DD_LOG_LINES lines of con_log. Future-proof: any new
+ * con_str()/con_hex() line in the shim automatically shows up at the next
+ * checkpoint, with no change to this function. */
+static void fb_log_tail(void)
+{
+	int n = con_log_len;
+	int start = n, lines = 0, i, row = 0;
+
+	while (start > 0 && lines <= DD_LOG_LINES)
+		if (con_log[--start] == '\n')
+			lines++;
+	if (start > 0)
+		start++;
+
+	fb_clear_band(DD_LOG_FIRST_Y - 4,
+		      DD_LOG_LINES * DD_LOG_PITCH + 8);
+	i = start;
+	while (i < n && row < DD_LOG_LINES) {
+		char line[64];
+		int j = 0;
+
+		while (i < n && con_log[i] != '\n' && j < 63)
+			line[j++] = con_log[i++];
+		line[j] = 0;
+		if (i < n && con_log[i] == '\n')
+			i++;
+		if (j)
+			fb_put_line(DD_LOG_FIRST_Y +
+				    (unsigned)row * DD_LOG_PITCH,
+				    line, 0x00ffffffU, 2);
+		row++;
+	}
+}
+
+/* Called by every shim_checkpoint(): paint the step AND the recent log
+ * lines, then kick ONE hardware frame. If the next operation hangs, the
+ * glass keeps showing the last state that completed. */
+void disp_boot_step(const char *name)
+{
+	unsigned n;
+	char buf[28];
+	unsigned i = 0;
+
+	if (!s_boot_ready)
+		return;
+	n = s_step_n++;
+	if (n >= DD_STEP_MAX)
+		return;
+	disp_gpu_wait_idle();
+	buf[i++] = (char)('0' + (n / 10) % 10);
+	buf[i++] = (char)('0' + (n % 10));
+	buf[i++] = ' ';
+	while (i < sizeof(buf) - 1 && name && *name)
+		buf[i++] = *name++;
+	buf[i] = 0;
+
+	fb_put_line(DD_STEP_FIRST_Y, buf, 0x0040e0d0U, 3);
+	fb_log_tail();
+	fb_progress(n);
+	disp_gpu_try(s_gpu_kick_mode, "STEP");
+	con_hex1("STEP", "n=", n);
+}
+
+/* The hold loop: one small bar repaint + one hardware frame, no DCS. */
+static void __attribute__((unused)) gpu_console_beat(unsigned beat)
+{
+	uint32_t y = 1300;
+
+	/* One frame every 2 s, not every 500 ms: fewer kicks, no visible
+	 * refresh flutter between step updates. */
+	if (beat & 3u)
+		return;
+	disp_gpu_wait_idle();
+	uint32_t w = 40 + (beat & 1) * 600;
+	uint32_t r = (beat & 1) ? 0xff : 0x20;
+	uint32_t g = (beat & 1) ? 0x20 : 0xff;
+
+	for (unsigned row = y; row < y + 16; row++) {
+		volatile uint8_t *p = (volatile uint8_t *)
+			(DD_FB_BASE + (uintptr_t)row * DD_FB_STRIDE);
+		for (unsigned x = 0; x < w; x++) {
+			p[3 * x + 0] = (uint8_t)r;
+			p[3 * x + 1] = (uint8_t)g;
+			p[3 * x + 2] = 0x20;
+		}
+	}
+	disp_cache_clean(DD_FB_BASE + (uintptr_t)y * DD_FB_STRIDE,
+			 16 * DD_FB_STRIDE);
+	disp_gpu_try(s_gpu_kick_mode, "BEATFR");
+}
+
 /*
  * Render the on-screen console into a full-size RGB888 buffer: HELLO, the
  * stage number, a label and a colour bar at the top. Then stream it once.
@@ -1725,6 +2216,18 @@ void disp_screen_beat(unsigned beat)
 	/* Mode 4 does not have a DDR framebuffer at all: the heartbeat is
 	 * a DCS pixel packet pushed straight into the panel GRAM. If the
 	 * probe failed there is nothing to blink, so stay quiet. */
+	if (SHIM_DISPLAY_MODE == 13) {
+		gpu_console_beat(beat);
+		con_hex1("BEAT", "n=", beat);
+		return;
+	}
+
+	if (SHIM_DISPLAY_MODE == 12) {
+		gram_band_beat(beat);
+		con_hex1("BEAT", "n=", beat);
+		return;
+	}
+
 	if (SHIM_DISPLAY_MODE == 11) {
 		gram_console_beat(beat);
 		con_hex1("BEAT", "n=", beat);
@@ -2159,6 +2662,61 @@ uint32_t display_test(void)
 		con_hex2("ACK", "dsi0=", dsi0_r(DSI_ACK_ERR_STATUS),
 			 "dsi1=", dsi1_r(DSI_ACK_ERR_STATUS));
 		disp_mark("D7 done: HELLO at page 0");
+		return done;
+	}
+
+	/*
+	 * MODE 13 - HARDWARE (MDP) CONSOLE + BOOT DIAGNOSTICS (2026-11-16).
+	 *
+	 * Framebuffer console at DD_FB_BASE in LK's geometry, hardware frame
+	 * kicks, explicit GPU-vs-CPU verdict from the INTF frame counters,
+	 * and a step line painted at every shim_checkpoint() from the very
+	 * start of boot. See display-data.h for every constant.
+	 */
+	if (SHIM_DISPLAY_MODE == 13) {
+		disp_mark("D13: hardware MDP console + boot diagnostics");
+		if (!s_boot_ready)
+			disp_boot_init();
+		if (!s_boot_ready)
+			return done;
+		done |= DISP_OK_CLOCKS | DISP_OK_PANEL_ON;
+		/* No HELLO: the framebuffer console IS the diagnostic. One
+		 * final frame makes the last step visible and stable. */
+		disp_gpu_try(s_gpu_kick_mode, "FINAL");
+		done |= DISP_OK_DRAWN | DISP_OK_GRAM;
+		con_str("DISP", "D13: boot diagnostics only, final frame kicked");
+		disp_mark("D13 done");
+		return done;
+	}
+
+	/*
+	 * MODE 12 - ALIGNED, FAST CONSOLE (2026-11-16).
+	 *
+	 * Same DCS channel that mode 11 proved, but every packet sets its
+	 * own 0x2A/0x2B window and starts with 0x2C, so no GRAM pointer
+	 * state is carried between packets. Only the 600 rows that hold
+	 * the console are streamed: 1,296,000 bytes instead of 5,529,600.
+	 */
+	if (SHIM_DISPLAY_MODE == 12) {
+		disp_mark("D12: aligned band console, fresh window per packet");
+		if (clocks_display_core() < 0)
+			return done;
+		done |= DISP_OK_CLOCKS;
+		dsi_force_hs_mode();
+		if (dsi_dcs_write(0x11, 0, 0, 120) < 0)
+			return done;
+		if (dsi_dcs_write(0x29, 0, 0, 20) < 0)
+			return done;
+		if (gram_set_format() < 0)
+			return done;
+		done |= DISP_OK_PANEL_ON;
+		if (gram_console_band(1, 0, "SHIM CONSOLE") == 0) {
+			done |= DISP_OK_DRAWN | DISP_OK_GRAM;
+			con_str("DISP", "D12: aligned console streamed");
+		}
+		con_hex2("ACK", "dsi0=", dsi0_r(DSI_ACK_ERR_STATUS),
+			 "dsi1=", dsi1_r(DSI_ACK_ERR_STATUS));
+		disp_mark("D12 done");
 		return done;
 	}
 

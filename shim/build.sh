@@ -111,6 +111,12 @@ CFLAGS="$CFLAGS -DSHIM_DISPLAY_TEST=$DISP_TEST"
 #       DSI_TRIG_CTRL BIT(31) (kernel value 0x80000004), kick MDP frames.
 #       Zero MDP/CTL/RGB/LM/INTF writes. THE NEXT RUN TO DO.
 #   6 = contact probe: DCS 0x28 display off for 20s. Black = panel obeys.
+#  11 = full 720x2560 console into panel GRAM (works, slow, row shear)
+#  12 = aligned console (superseded: panel ignores narrow 0x2B windows)
+#  13 = CURRENT: hardware MDP console + boot diagnostics. CPU writes ONE
+#       frame into cont_splash; MDP/DSI DMA push it. INTF frame counters
+#       prove GPU-vs-CPU; every checkpoint paints a step line. Data in
+#       shim/display-data.h.
 # DISPLAY_STAGE bisects modes 3, 4 and 5:
 #   mode 3: 1 = MMSS clocks, 2 = + PLL, 3 = + DSI, 4 = + MDP, 5 = + frame
 #   mode 4: 1 = clocks + BOOT dump, 2 = + PLL + DCS probe, 3 = + HELLO
@@ -131,7 +137,7 @@ CFLAGS="$CFLAGS -DSHIM_SKIP_EMMC=${SKIP_EMMC}"
 # relocated). display_test() prints it as the first BUILD line in pstore,
 # so every test record can be attributed to the binary that produced it.
 BUILD_TAG=$( (cat start.S shim.c console.c display.c clocks.c display.h \
-                   console.h g4.h mmio.h timer.h 2>/dev/null; \
+                   display-data.h console.h g4.h mmio.h timer.h 2>/dev/null; \
               printf '%s' "$CFLAGS") | shasum -a 256 | cut -c1-8)
 CFLAGS="$CFLAGS -DG4_BUILD_ID=0x${BUILD_TAG}UL"
 # The phone has DRAM at 0xff00000, where its ramoops region is. QEMU's

@@ -1,6 +1,6 @@
 # Indice della documentazione — stato di verità
 
-**Aggiornato: 2026-11-16.** Questo file è il punto di ingresso. Prima di usare
+**Aggiornato: 2026-11-16 (mode 13, hardware).** Questo file è il punto di ingresso. Prima di usare
 un documento, controlla qui il suo stato: nel progetto convivono misure vere,
 ipotesi superate e descrizioni di codice che non esiste più.
 
@@ -14,8 +14,8 @@ ipotesi superate e descrizioni di codice che non esiste più.
 | eMMC | CMD2 risolto (`C2OK v=00000009`), rootfs HFS+ montato ro da Linux | `NOTES.md`, `docs/test-2026-11-10-hfs-mount.txt` |
 | XNU | **arriva a `common_start` e muore dentro `MSR SCTLR_EL1`**: il Cortex-A53 non ha la grana 16 KiB | `NOTES.md:4165-4214` |
 | Fix XNU | `xnu/patches/0085-sweet-4k-granule.patch` + limite utente iOS (`23f0de5`) | ultimo commit `4418684`, 2026-11-12 |
-| Boot del kernel 4 KiB | **non ancora provato sul device**. Artefatto CI `43313974215` recuperato il 16/11: `__TEXT` corretto, 16 KiB rimosso, ma `TCR_EL1 0x002a51a161a` non presente come costante | `docs/DISPLAY-SOLVED.md §6` |
-| **Display** | **RISOLTO il 16/11**: HELLO + stage + label + heartbeat visibili, scritti dritti nella GRAM del pannello via DCS, senza MDP/SMMU | **`docs/DISPLAY-SOLVED.md`**, `shim/display.c` mode 11 |
+| Kernel 4 KiB | **VERIFICATO corretto** il 16/11: artefatto CI `43313974215`, `TCR_EL1 0x022a51a251a` (TG0=4 KiB), `__TEXT 0xfffffff007004000`, zero LSE. Il vecchio FAIL era un bug del checker. **Boot device ancora da eseguire** | `tools/check-xnu-binary.sh`, `docs/DISPLAY-SOLVED.md` |
+| **Display** | **RISOLTO il 16/11, mode 13**: frame spinto da MDP/DSI DMA (hardware), istantaneo, log boot step-by-step a schermo, `GPU verdict=HW`. HELLO rimosso. Dati in `shim/display-data.h` | **`docs/DISPLAY-SOLVED.md`**, `shim/display.c` |
 | Causa dello stallo | finestra DCS a 640 colonne su pannello da 720: ogni riga sfalsata di 240 byte → static deterministico. Non era MDP, non era SMMU, non era formato pixel | `docs/DISPLAY-SOLVED.md §3` |
 | Causa del mancato boot | **non è il display** | `NOTES.md`, `HANDOFF-PROMPT.md` |
 | Test display | mode 0..11; **11 è la soluzione**, 0..10 sono la bisection storica | `docs/DISPLAY-TEST.md` |

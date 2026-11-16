@@ -72,6 +72,12 @@ case "${MODE:-unknown}" in
           "No text, no MDP kicks." ;;
     11) echo "D11 CONSOLE: HELLO + stage + label + blinking top bar." \
           "Written straight into panel GRAM at 720 columns." ;;
+    12) echo "D12 ALIGNED CONSOLE: fresh 0x2A/0x2B window per packet, 600" \
+          "rows only. FAILED: panel ignores narrow 0x2B windows." ;;
+    13) echo "D13 HARDWARE CONSOLE: CPU writes ONE frame, MDP/DSI DMA push it." \
+          "CMD_MDP_DONE on both links is the proof (INTF counters stay 0 in cmd mode)." \
+          "Step-by-step boot log lines visible from the first checkpoint." \
+          "Look for GPU verdict=HW in the pstore log below." ;;
     *) echo "Unknown display mode: check shim/out/run-manifest.txt." ;;
 esac
 echo "Then the phone will automatically reset into TWRP recovery."

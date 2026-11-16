@@ -63,6 +63,19 @@
  *   6  CONTACT PROBE: sends DCS 0x28 (display off) in HS mode and holds
  *      the panel off for 20 s. A BLACK screen proves the panel obeys DCS;
  *      a logo that stays proves the packets never leave the host.
+ *  11  full 720x2560 console streamed with 0x2C + 85x 0x3C packets.
+ *      WORKS, but slow (5.5 MiB) and the carried GRAM pointer shears rows.
+ *  12  ALIGNED CONSOLE (superseded). Only 600 rows (1.3 MiB) and a fresh
+ *      0x2A/0x2B window per packet. FAILED: this panel ignores narrow
+ *      0x2B windows, so every 0x2C landed at row 0. Kept as a measurement.
+ *  13  CURRENT. HARDWARE MDP CONSOLE + BOOT DIAGNOSTICS. CPU writes ONE
+ *      frame into cont_splash in LK's geometry (1440x2560 RGB888, stride
+ *      4320); MDP/DSI DMA push the frame. CMD_MDP_DONE (BIT(8) of
+ *      DSI_INT_CTRL) on both links proves hardware did it; INTF frame
+ *      counters stay 0 and are NOT a valid command-mode proof. Every
+ *      shim_checkpoint() paints the step header plus the last 14 log
+ *      lines and kicks a frame, so a hang leaves the last completed step
+ *      on the glass. All constants live in display-data.h.
  */
 #ifndef SHIM_DISPLAY_MODE
 #define SHIM_DISPLAY_MODE	1
@@ -113,6 +126,12 @@
 
 /* Run the whole test. Returns the bitmap above. */
 uint32_t display_test(void);
+
+/* Mode 13 boot diagnostics. disp_boot_init() runs at the very start of
+ * shim_main; disp_boot_step() is called by every shim_checkpoint() and
+ * paints one line + kicks one hardware frame. No-op in every other mode. */
+void disp_boot_init(void);
+void disp_boot_step(const char *name);
 
 /* Kick one frame out (DSI software trigger on both links). */
 void disp_mdp_kick(void);

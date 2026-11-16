@@ -268,3 +268,39 @@ Quindi il link address è corretto e il vecchio TCR 16 KiB è sparito, ma il
 valore atteso del TCR 4 KiB non compare come costante: va verificato se la
 patch 0085 lo costruisce a runtime. Poi un `fastboot boot` e
 `tools/read-pram.py --marks`: go = marker 12 presente.
+
+---
+
+## Aggiornamento 16/11 — mode 13, via hardware (stabile)
+
+`DISPLAY_MODE=13`. Il frame non viene più copiato byte per byte dalla CPU:
+la CPU scrive **una sola volta** il framebuffer `0x03400000` nella geometria
+che LK ha già programmato (1440x2560 RGB888, stride 4320), poi
+`CTL_FLUSH=0x40000000` + `CTL_START=1` + `MDP_SW_TRIGGER` su entrambi i link.
+Il frame viene spinto da **MDP/DSI DMA** (hardware), non dalla CPU e non da
+Adreno (nessun driver GPU esiste in bare metal).
+
+Prova numerica: `CMD_MDP_DONE = BIT(8)` di `DSI_INT_CTRL` su DSI0 e DSI1,
+`wait_ms=12`, `cpu_bytes_per_frame=0`. `INTF_FRAME_COUNT` resta 0 ed è
+**atteso** in command mode (timing engine spento): usarlo come prova dà un
+falso negativo. Dati e provenienze in **`shim/display-data.h`** (file dati
+dedicato, `DATA id=` stampato nel pstore).
+
+Log step-by-step: `disp_boot_init()` all'inizio di `shim_main()` e
+`disp_boot_step()` in ogni `shim_checkpoint()` dipingono l'intestazione,
+le ultime 14 righe di `con_log` e una barra di avanzamento, poi kikkano UN
+frame. Se il boot si blocca, sul vetro resta l'ultimo step completato.
+Stabilità: `disp_gpu_wait_idle()` prima di ogni ripittura + 2 ms dopo il
+frame; heartbeat ridotto a un frame ogni 2 s. HELLO rimosso.
+
+### Correzione XNU (stesso giorno)
+
+Il kernel 4 KiB **esiste ed è corretto**: artefatto CI `43313974215` in
+`xnu/out-43313974215/`. Il vecchio `FAIL` era un bug di
+`tools/check-xnu-binary.sh`, che cercava la costante magica
+`0x002a51a161a`. Il TCR reale nel binario è **`0x022a51a251a`**
+(T0SZ 26, TG0 `0b00` = 4 KiB, T1SZ 26, TG1 `0b10`, IPS 40 bit): i bit di
+shareability/TBI cambiano con la board. Il checker ora **decodifica i campi**
+invece di indovinare la parola intera. Risultato: 4 KiB PASS, vecchio
+16 KiB FAIL. `__TEXT vmaddr = 0xfffffff007004000`, `sweet_mark` presente,
+30 marker `0x5eed`, zero atomics LSE. Prossimo: boot device.

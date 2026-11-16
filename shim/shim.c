@@ -393,6 +393,11 @@ static void shim_flush_logs(void)
 static void shim_checkpoint(const char *name)
 {
 	con_str("CHECK", name);
+#if SHIM_DISPLAY_MODE == 13
+	/* Paint the step and kick a hardware frame BEFORE the next phase.
+	 * If the phone hangs there, the glass keeps showing this line. */
+	disp_boot_step(name);
+#endif
 	shim_flush_logs();
 	g4_wdt_pet();
 }
@@ -1319,6 +1324,13 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	con_log_only("SHIM", "the shim is alive: the first line, before anything else");
 	pstore_early_write(con_log, (unsigned)con_log_len);
 
+#if SHIM_DISPLAY_MODE == 13
+	/* Boot diagnostics are armed HERE, after the watchdog and after the
+	 * first pstore write, so a hung display access resets instead of
+	 * bricking. From this point every checkpoint paints a step line. */
+	disp_boot_init();
+#endif
+
 	shim_t0 = now();
 	PHASE(1); stage = "boot";
 	con_hex2("TIMER", "hz=", timer_hz(), "ticks=", (uint32_t)timer_ticks());
@@ -1544,6 +1556,10 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	con_str("SHIM", "display test: D9 DCS only, no MDP kicks, holding 20s");
 #elif SHIM_DISPLAY_MODE == 10
 	con_str("SHIM", "display test: D10 full GRAM red, holding 20s");
+#elif SHIM_DISPLAY_MODE == 13
+	con_str("SHIM", "display test: D13 hardware MDP console + boot steps, holding 20s");
+#elif SHIM_DISPLAY_MODE == 12
+	con_str("SHIM", "display test: D12 aligned band console, holding 20s");
 #elif SHIM_DISPLAY_MODE == 11
 	con_str("SHIM", "display test: D11 HELLO console on panel GRAM, holding 20s");
 #else
