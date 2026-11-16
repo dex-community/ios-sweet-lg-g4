@@ -386,3 +386,27 @@ Patch `0090-sweet-skip-gicv3-sysregs.patch`: su SWEET salta tutto il
 blocco `ICC_*` (l'interfaccia CPU è memory-mapped GICC, già inizializzata
 da LK) e rimuove `ICC_IGRPEN1_EL1`; resta solo la programmazione
 memory-mapped di `GICD_CTLR`. Mark 53/54. Catena 95/0.
+
+### Sesto boot device (patch 0090, run CI 43797632614) — FIX RIUSCITO
+
+Il kernel **supera** `pe_init_fiq()`: `e ICC_* sysregs skipped`,
+`d before first GICD_CTLR read`, `[ before GICD_CTLR write`,
+`] GICD_CTLR RWP cleared`, `f GICD_CTLR programmed`,
+`^ pe_init_fiq done`, `R PE_init_cpu done`,
+`S fiq_context_init done`, `T about to call machine_startup`,
+`U machine_startup entered`, `V machine_conf done`,
+`W calling kernel_bootstrap`.
+
+Poi **panic con testo**:
+
+```
+SWEET EARLY PANIC: kmem_range_init: vm_map_locate_space failing for claim kmem_data_range @vm_kern.c:3645
+```
+
+Console ring attiva: `Darwin Kernel Version 22.6.0`,
+`vm_page_bootstrap: 95541 free pages, 2763 wired pages`,
+`VM boostrap: 97 maps, 204 entries and 512 holes available`.
+Nuovo blocker: layout VA dei `kmem_range` con pagine 4 KiB / KVA a
+38 bit, non più hardware. Patch `0091` stampa nel panic
+`size / start / map=[min,max] / largest / claims / data / ptr`
+per il fix mirato. Catena 96/0.

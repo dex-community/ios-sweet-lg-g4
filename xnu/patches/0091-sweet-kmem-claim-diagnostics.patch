@@ -1,0 +1,72 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3518,6 +3518,15 @@
+ 	return (org_ptr_range_size - ptr_range_size - kmem_meta_size) *
+ 	       kmem_ptr_ranges;
+ }
++
++#if defined(SWEET)
++/* 2026-11-16: 4 KiB pages / 38-bit KVA can make the kmem claims
++ * exceed the kernel map. Keep the numbers for the panic. */
++static vm_map_size_t sweet_kmem_largest_free;
++static vm_map_size_t sweet_kmem_total_claims;
++static vm_map_size_t sweet_kmem_data_size;
++static vm_map_size_t sweet_kmem_ptr_size;
++#endif
+ 
+ __startup_func
+ static void
+@@ -3543,6 +3552,10 @@
+ 	}
+ 	assert((total_claims & PAGE_MASK) == 0);
+ 	largest_free_size -= total_claims;
++#if defined(SWEET)
++	sweet_kmem_largest_free = largest_free_size;
++	sweet_kmem_total_claims = total_claims;
++#endif
+ 
+ 	/*
+ 	 * Use half the total available VA for all pointer allocations (this
+@@ -3558,6 +3571,9 @@
+ 
+ 	ptr_range_size = round_page(ptr_range_size);
+ 	sprayqtn_range_size = round_page(sprayqtn_range_size);
++#if defined(SWEET)
++	sweet_kmem_ptr_size = ptr_range_size;
++#endif
+ 
+ 
+ 	data_range_size = largest_free_size
+@@ -3568,6 +3584,9 @@
+ 	 * Add claims for kmem's ranges
+ 	 */
+ 	data_range_size += kmem_add_ptr_claims();
++#if defined(SWEET)
++	sweet_kmem_data_size = data_range_size;
++#endif
+ 	assert(data_range_size + sprayqtn_range_size +
+ 	    ((ptr_range_size + kmem_meta_size) * kmem_ptr_ranges) <=
+ 	    largest_free_size);
+@@ -3641,8 +3660,21 @@
+ 		struct mach_vm_range *sp_range = sp.kc_range;
+ 		if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
+ 		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
++#if defined(SWEET)
++			panic("kmem_range_init: claim %s size=0x%llx start=0x%llx "
++			    "map=[0x%llx,0x%llx] largest=0x%llx claims=0x%llx "
++			    "data=0x%llx ptr=0x%llx",
++			    sp.kc_name, (uint64_t)sp.kc_size, (uint64_t)start,
++			    (uint64_t)kernel_map->min_offset,
++			    (uint64_t)kernel_map->max_offset,
++			    (uint64_t)sweet_kmem_largest_free,
++			    (uint64_t)sweet_kmem_total_claims,
++			    (uint64_t)sweet_kmem_data_size,
++			    (uint64_t)sweet_kmem_ptr_size);
++#else
+ 			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
+ 			    sp.kc_name);
++#endif
+ 		}
+ 
+ 		end = start + sp.kc_size;
