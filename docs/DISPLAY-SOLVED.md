@@ -304,3 +304,29 @@ shareability/TBI cambiano con la board. Il checker ora **decodifica i campi**
 invece di indovinare la parola intera. Risultato: 4 KiB PASS, vecchio
 16 KiB FAIL. `__TEXT vmaddr = 0xfffffff007004000`, `sweet_mark` presente,
 30 marker `0x5eed`, zero atomics LSE. Prossimo: boot device.
+
+### Primo boot device del kernel 4 KiB (16/11, run 43313974215)
+
+Il **blocker 16 KiB è superato**: marker 1..12 tutti OK, compreso
+`12 SCTLR_EL1 with M=1 written`. `TCR_EL1 0x022a51a251a` (TG0 `0b00`),
+`SCTLR_EL1 0x34d4593d` (M=1 C=1 I=1), EL1 su Cortex-A53.
+`SWEET EARLY 1..D`: arm_init, PE_init_platform, arm_vm_init,
+`pmap_bootstrap`, mappatura fbcon, serial_init,
+`kprintf startup complete`. Poi **più niente**: marker 13
+(`IOKitBSDInit`) assente, nessun panic, `ESR/FAR/ELR` a `0xffffffff`
+(nessuna eccezione sincrona), console ring vuota. Quindi il kernel si
+ferma tra `kprintf startup complete` e `IOKitBSDInit`.
+
+Patch `0086-sweet-early-marks-post-kprintf.patch`: otto mark in
+`arm_init()` (PE_create_console, PE_init_printf, cpu_machine_idle_init,
+PE_init_platform(TRUE), ml_map_cpu_pio, cpu_timebase_init,
+PE_init_cpu/fiq_context_init, machine_startup) e cap stage 24 -> 40.
+Catena patch: 91 applicate, 0 fallite. Il prossimo boot device dice
+esattamente quale chiamata non ritorna.
+
+**Diagnostica a schermo**: si fermava a `02` non perché il boot si
+fermasse, ma perché `loader.c` non aveva checkpoint: il boot era già
+arrivato a `JUMP entry=81428488`. Ora `loader.c` dipinge gli step
+`PAYLOAD found`, `XNU segments copied`, `boot args / ADT placed`,
+`JUMP XNU 4K`. Dopo il salto XNU prende il controllo e la diagnostica
+dello shim non può più aggiornarsi: serve un mirror lato XNU.
