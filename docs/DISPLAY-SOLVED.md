@@ -573,3 +573,31 @@ Due differenze da sapere:
 
 Il workflow pubblica ora `kernel-support/` (`libfirehose_kernel.a`,
 `nonlto.o`), gli unici input di link non già presenti negli artefatti.
+
+### Tredicesimo boot (0096 + zone map 8 GiB, **ancora zero CI**) — SBLOCCO
+
+Esperimento fatto in locale in 15 s: `ZONE_MAP_VA_SIZE` 16 → 8 GiB.
+`claims` scende a `0x824210000` (~32,5 GiB), `free` sale a
+`0x13dbdec000` (~79 GiB) e **`kmem_range_init()` completa**: il console
+ring passa da 364 a 3946 byte e stampa tutto il layout:
+
+```
+compressor : ... (24G)   zones : ... (8G)
+kmem_ptr_range : ... (1499M)  kmem_data_range : ... (3749M)
+VM bootstrap done: 85 maps, 164 entries and 501 holes left
+zone_init: map VM/RO/GEN0..3/DATA ...
+Security policy loaded: Guarded vnode policy (vnguard)
+SWEET: starting device-tree platform expert
+SWEET AKS / WDT / SURF / HID / BATTERY registrati
+SWEET FB: no boot framebuffer
+```
+
+**Nessun panic, nessuna eccezione** (`ESR_EL1=0xffffffffffffffff`).
+Il kernel supera VM bootstrap, zone_init, OSLog/Firehose, le policy di
+sicurezza e il platform expert IOKit. Si ferma dopo
+`SWEET FB: no boot framebuffer` e il telefono torna in recovery per
+watchdog/reset senza panic; i marker 13/14 (`IOKitBSDInit`, mount
+rootfs) restano a `0xffffffff`. Prossima bisection: IOKit matching →
+root device → mount HFS+.
+
+`ZONE_MAP_VA_SIZE=8 GiB` è la patch `0097`. Catena 102/0.

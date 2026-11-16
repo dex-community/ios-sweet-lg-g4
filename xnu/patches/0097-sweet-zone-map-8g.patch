@@ -1,0 +1,19 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -166,11 +166,12 @@
+  * reserves 128 GiB of kernel VA for the zone map. On the G4 the 4 KiB /
+  * 38-bit KVA gives a kernel_map span of 0x1bffffffff (112 GiB), so that
+  * single claim -- 153 GiB together with the others -- cannot be placed and
+- * kmem_range_init() panics. The G4 has 1.5 GiB of RAM: 16 GiB of VA for
+- * zones and 2 GiB of wired zone memory are already generous.
++ * kmem_range_init() panics. The G4 has 1.5 GiB of RAM and only ~48 GiB
++ * of USABLE KVA (the kernel image sits ~64 GiB above min_offset), so 8 GiB
++ * of VA for zones and 2 GiB of wired zone memory are already generous.
+  */
+ #define ZONE_MAP_MAX            (2ULL << 30)
+-#define ZONE_MAP_VA_SIZE        (16ULL << 30)
++#define ZONE_MAP_VA_SIZE        (8ULL << 30)
+ #elif XNU_PLATFORM_MacOSX
+ #define ZONE_MAP_MAX            (32ULL << 30)
+ #define ZONE_MAP_VA_SIZE        (128ULL << 30)
