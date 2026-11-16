@@ -142,6 +142,16 @@ jobs:
         run: |
           mkdir -p out
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          # Local incremental relink (tools/local-relink.sh): the CI archive
+          # kernel.development.sweet.a already contains every object, and
+          # xnu-buildtree has the generated headers and the link file lists.
+          # These are the only two link inputs that are NOT in either
+          # artifact, so publish them once and stop rebuilding the whole
+          # kernel on every patch.
+          mkdir -p out/kernel-support
+          cp dxb/fakeroot/usr/local/lib/kernel/*.a out/kernel-support/ 2>/dev/null || true
+          cp dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/nonlto.o out/kernel-support/ 2>/dev/null || true
+          ls -la out/kernel-support
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
 

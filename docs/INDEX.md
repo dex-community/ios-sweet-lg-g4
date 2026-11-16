@@ -8,6 +8,8 @@ ipotesi superate e descrizioni di codice che non esiste più.
 
 **Regola CI.** `.github/workflows/xnu.yml` ha `paths: xnu/patches/**` e il workflow stesso: un push di soli `.md` NON avvia build (verificato con `7d0f53f`: zero run). Eseguire/rilanciare la CI solo quando cambia una patch, il workflow o codice che serve nell'artefatto. Non usare `gh workflow run` per modifiche di documentazione.
 
+**Relink locale (dal 16/11).** Per le iterazioni non serve più attendere la CI: `tools/local-relink.sh RUN_ID [file.c ...]` ricompila in locale solo i file cambiati (con le flag esatte della CI) e rifà il link usando `kernel.development.sweet.a`, `xnu-buildtree` e i `kernel-support` pubblicati dal workflow. Poi `./tools/build-g4-image.sh LOCAL g4`. Serve Xcode 16? **No**: bastano clang/ld del Xcode installato + header generati dalla CI. Verifica con un null relink prima di fidarsi del risultato.
+
 ## 1. Stato corrente (colpo d'occhio)
 
 | Tema | Stato | Fonte |
