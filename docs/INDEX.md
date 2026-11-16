@@ -14,19 +14,23 @@ ipotesi superate e descrizioni di codice che non esiste più.
 |---|---|---|
 | Shim | gira sul telefono, log in pstore / RAM `0x50000000` / IMEM | `NOTES.md`, `shim/log.h` |
 | eMMC | CMD2 risolto (`C2OK v=00000009`), rootfs HFS+ montato ro da Linux | `NOTES.md`, `docs/test-2026-11-10-hfs-mount.txt` |
-| XNU | **arriva a `common_start` e muore dentro `MSR SCTLR_EL1`**: il Cortex-A53 non ha la grana 16 KiB | `NOTES.md:4165-4214` |
-| Fix XNU | `xnu/patches/0085-sweet-4k-granule.patch` + limite utente iOS (`23f0de5`) | ultimo commit `4418684`, 2026-11-12 |
-| Kernel 4 KiB | **GIC FIX OK**, boot fino a `kernel_bootstrap`. Panic `kmem_range_init`: `largest_free_size` underflow (~2^64) nel layout VA 4 KiB. Patch 0092 in verifica. (patch 0090): kernel arriva a `kernel_bootstrap`. Nuovo panic `kmem_range_init: vm_map_locate_space ... kmem_data_range` (layout VA 4 KiB).: `HAS_GIC_V3 1` su hardware GICv2 → `MRS ICC_SRE_EL1` blocca `pe_init_fiq()`. Fix in patch 0090 in verifica.: MMU 4 KiB OK, `SWEET EARLY` fino a `Q: before PE_init_cpu`; blocco in `pe_init_fiq()` (spin infinito su `GICD_CTLR.RWP`). Patch 0088 limita il poll.: MMU 4 KiB OK (marker 1..12, `SCTLR_EL1 M=1`), `SWEET EARLY 1..D` fino a `kprintf startup complete`, poi stop prima di `IOKitBSDInit`. Patch 0086 biseca. **VERIFICATO corretto** il 16/11: artefatto CI `43313974215`, `TCR_EL1 0x022a51a251a` (TG0=4 KiB), `__TEXT 0xfffffff007004000`, zero LSE. Il vecchio FAIL era un bug del checker. **Boot device ancora da eseguire** | `tools/check-xnu-binary.sh`, `docs/DISPLAY-SOLVED.md` |
+| XNU | **MMU 4 KiB OK** (marker 1..12, `SCTLR_EL1 M=1`), GIC risolto, boot fino a `kernel_bootstrap`. Si ferma in `kmem_range_init()` → `vm_kern.c:3497` | `docs/DISPLAY-SOLVED.md §boot device` |
+| Fix XNU | 0085 (grana 4 KiB) → 0086/87/88/89 (bisection) → 0090 (GICv3→GICv2) → 0091/92/93 (kmem) → 0094 (diagnostica early + guard underflow) | `xnu/patches/` — catena 99/0 |
+| Kernel 4 KiB | **VERIFICATO**: `TCR_EL1 0x022a51a251a` (T0SZ 26, TG0 0b00), `__TEXT 0xfffffff007004000`, zero LSE. Il vecchio FAIL era un bug del checker (costante TCR hardcoded) | `tools/check-xnu-binary.sh` |
+| Blocker aperto | `kmem_add_ptr_claims()`: `ptr_range_size` azzerato → underflow a 64 bit (`0x7ffa00460000`) → assert. Patch 0094 logga i numeri nel buffer early e blocca l'underflow | `docs/DISPLAY-SOLVED.md`, run CI `43802642760` / `43806734134` |
 | **Display** | **RISOLTO il 16/11, mode 13**: frame spinto da MDP/DSI DMA (hardware), istantaneo, log boot step-by-step a schermo, `GPU verdict=HW`. HELLO rimosso. Dati in `shim/display-data.h` | **`docs/DISPLAY-SOLVED.md`**, `shim/display.c` |
 | Causa dello stallo | finestra DCS a 640 colonne su pannello da 720: ogni riga sfalsata di 240 byte → static deterministico. Non era MDP, non era SMMU, non era formato pixel | `docs/DISPLAY-SOLVED.md §3` |
 | Causa del mancato boot | **non è il display** | `NOTES.md`, `HANDOFF-PROMPT.md` |
-| Test display | mode 0..11; **11 è la soluzione**, 0..10 sono la bisection storica | `docs/DISPLAY-TEST.md` |
+| Test display | mode 0..13; **13 è la soluzione** (MDP/DSI DMA), 0..12 sono la bisection storica | `docs/DISPLAY-TEST.md` |
 | Documenti superati | spostati in `old/` il 16/11 | mappa qui sotto |
 | Sicurezza | solo `fastboot boot`, watchdog armato, niente `userdata` | `README.md`, `HANDOFF-PROMPT.md §8` |
 
-**Stato delle tracce.** Display chiuso. Critical path = verifica del kernel a
-4 KiB sul device. Le due tracce non sono mai state in competizione: il display
-dava la console visibile allo shim, il marker ring dà il progresso di XNU.
+**Stato delle tracce.** Display chiuso. Critical path = far passare
+`kmem_range_init()` al kernel 4 KiB sul device. Le due tracce non sono mai
+state in competizione: il display dà la console visibile allo shim (fino a
+`JUMP XNU 4K`), il buffer early + marker ring danno il progresso di XNU.
+Nota: a questo stadio `kprintf` **non** arriva al console ring — per i
+numeri del bootstrap usare `sweet_early_logf()` / `tools/read-xnu-early.py`.
 
 ---
 
