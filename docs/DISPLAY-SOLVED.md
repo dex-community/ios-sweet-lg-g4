@@ -330,3 +330,15 @@ arrivato a `JUMP entry=81428488`. Ora `loader.c` dipinge gli step
 `PAYLOAD found`, `XNU segments copied`, `boot args / ADT placed`,
 `JUMP XNU 4K`. Dopo il salto XNU prende il controllo e la diagnostica
 dello shim non può più aggiornarsi: serve un mirror lato XNU.
+
+### Secondo boot device (kernel con patch 0086, run CI 43790427511)
+
+`SWEET EARLY I..N` aggiunti: `PE_create_console`, `PE_init_printf`,
+`cpu_machine_idle_init`, `PE_init_platform(TRUE)`, `ml_map_cpu_pio`,
+**`cpu_timebase_init done` (N = stage 30)**. Poi silenzio: mancano
+`PE_init_cpu + fiq_context_init done` e `calling machine_startup`.
+Quindi il kernel si blocca dentro `PE_init_cpu()` o `fiq_context_init(TRUE)`
+(subito dopo `cpu_timebase_init`, prima di `machine_startup`).
+Patch `0087-sweet-early-bisect-pe-init-cpu.patch` separa le due chiamate e
+marca anche `machine_startup` / `machine_conf` / `kernel_bootstrap`.
+Catena 92 applicate, 0 fallite.

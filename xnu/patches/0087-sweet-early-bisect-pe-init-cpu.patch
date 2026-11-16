@@ -1,0 +1,59 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -623,9 +623,11 @@
+ 	kptimer_curcpu_up();
+ #endif /* KPERF */
+ 
++	sweet_early_mark(33, "before PE_init_cpu");
+ 	PE_init_cpu();
++	sweet_early_mark(34, "PE_init_cpu done");
+ 	fiq_context_init(TRUE);
+-	sweet_early_mark(31, "PE_init_cpu + fiq_context_init done");
++	sweet_early_mark(35, "fiq_context_init done");
+ 
+ 
+ #if HIBERNATION
+@@ -667,8 +669,8 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	sweet_early_mark(36, "about to call machine_startup");
+ 	machine_startup(args);
+-	sweet_early_mark(32, "calling machine_startup");
+ }
+ 
+ /*
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -28,6 +28,7 @@
+ 
+ #include <arm64/machine_machdep.h>
+ #include <arm64/proc_reg.h>
++#include <arm64/sweet_early.h>
+ #include <arm/machine_cpu.h>
+ #include <arm/cpu_internal.h>
+ #include <arm/cpuid.h>
+@@ -476,6 +477,7 @@
+ void
+ machine_startup(__unused boot_args * args)
+ {
++	sweet_early_mark(37, "machine_startup entered");
+ #if defined(HAS_IPI) && (DEVELOPMENT || DEBUG)
+ 	if (!PE_parse_boot_argn("fastipi", &gFastIPI, sizeof(gFastIPI))) {
+ 		gFastIPI = 1;
+@@ -484,11 +486,13 @@
+ 
+ 
+ 	machine_conf();
++	sweet_early_mark(38, "machine_conf done");
+ 
+ 
+ 	/*
+ 	 * Kick off the kernel bootstrap.
+ 	 */
++	sweet_early_mark(39, "calling kernel_bootstrap");
+ 	kernel_bootstrap();
+ 	/* NOTREACHED */
+ }
