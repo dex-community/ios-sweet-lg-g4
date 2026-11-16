@@ -440,3 +440,34 @@ vm_kern.c:3497 Assertion failed: kmem_meta_size + ptr_range_size <= org_ptr_rang
 li rende ingestibili con pagine 4 KiB. Patch `0093`: su SWEET
 `largest_free_size` è limitato a `round_page(sane_size * 4)` (RAM,
 non VA) e stampa `sane / cap / free` nel console ring. Catena 98/0.
+
+### Nono boot device (patch 0093, run CI 43802642760)
+
+Stesso identico panic a `vm_kern.c:3497`. Verifiche fatte prima di
+toccare il codice:
+
+* il kernel 0093 è davvero quello caricato: la stringa
+  `SWEET kmem: sane=` è presente alla VA `__TEXT` attesa, letta dalla
+  RAM del telefono dopo il boot;
+* il `kprintf` di 0093 **non è mai arrivato** al console ring (364 byte,
+  solo le righe di `pmap_startup` / `vm_page_bootstrap`): a questo
+  stadio `kprintf` non è osservabile;
+* `sane_size=0x5db0b000`, `mem_size=0x60000000`, `kmem_ptr_ranges=1`
+  letti dalla RAM;
+* `ptr_range_size` in RAM = `0x7ffa00460000`, che è **esattamente** il
+  risultato di `kmem_add_ptr_claims()` quando
+  `org_ptr_range_size == 0`: `ptr_range_size -= PAGE_SIZE` va in
+  underflow, la moltiplica per `KMEM_CHUNK_SIZE_MIN=0x20000` e produce
+  `ptr=0x7ffa00460000`, `meta=0x5ffb81000`, quindi l'assert fallisce.
+
+Metodo: non fidarsi del canale di log, ma leggere le variabili dalla
+RAM e riprodurre l'aritmetica off-line. Conclusione: il cap 0093
+azzerava il range (o non veniva applicato), e in ogni caso il codice
+non ha alcuna guardia contro l'underflow.
+
+Patch `0094`: `sweet_early_logf()` scrive i numeri nel buffer early
+(cache-cleaned, sopravvive al reset) invece che nel console ring;
+log di `pre_cap / post_cap / ptr_set / ptr_in / ptr_out`; cap con
+floor di 256 MiB e fallback se `sane_size == 0`; guardia in
+`kmem_add_ptr_claims()` per non moltiplicare un range nullo.
+Catena 99/0.

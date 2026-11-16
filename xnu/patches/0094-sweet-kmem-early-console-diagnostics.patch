@@ -1,0 +1,128 @@
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -22,6 +22,7 @@
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
++void sweet_early_logf(const char *fmt, ...);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_disable(void);
+ void sweet_mark(unsigned int off, uint32_t value);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -125,7 +125,28 @@
+ 	sweet_early_clean();
+ }
+ 
++/*
++ * Formatted diagnostics for the early boot. kprintf() output does not reach
++ * the persistent console ring this early (and is lost on a watchdog reset),
++ * so the numbers that decide the kmem layout are written straight into the
++ * early buffer and cleaned to DRAM, like the marks and the panic text.
++ */
+ void
++sweet_early_logf(const char *fmt, ...)
++{
++	va_list args;
++
++	if (early_disabled || early_panicking) {
++		return;
++	}
++	va_start(args, fmt);
++	_doprnt(fmt, &args, sweet_early_putc, 16);
++	va_end(args);
++	sweet_early_putc('\n');
++	sweet_early_clean();
++}
++
++void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+ 	if (early_disabled || early_panicking) {
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -94,6 +94,9 @@
+ #include <os/hash.h>
+ #include <kern/zalloc_internal.h>
+ #include <libkern/crypto/rand.h>
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ 
+ /*
+  *	Variables exported by this module.
+@@ -3484,6 +3487,18 @@
+ 	uint64_t kmem_meta_num, kmem_ptr_chunks;
+ 	vm_map_size_t org_ptr_range_size = ptr_range_size;
+ 
++#if defined(SWEET)
++	sweet_early_logf("SWEET KMEM94 ptr_in: org=0x%llx",
++	    (uint64_t)org_ptr_range_size);
++	/* A zero range would underflow the multiply below and produce a
++	 * 0x7ffa... ptr_range_size, then trip the assertion. */
++	if (org_ptr_range_size < 64 * PAGE_SIZE) {
++		ptr_range_size = 0;
++		kmem_meta_size = 0;
++		return 0;
++	}
++#endif
++
+ 	ptr_range_size -= PAGE_SIZE;
+ 	ptr_range_size *= KMEM_CHUNK_SIZE_MIN;
+ 	ptr_range_size /= (KMEM_CHUNK_SIZE_MIN + sizeof(struct kmem_page_meta));
+@@ -3494,6 +3509,12 @@
+ 	kmem_meta_num = kmem_ptr_chunks + 2;
+ 	kmem_meta_size = round_page(kmem_meta_num * sizeof(struct kmem_page_meta));
+ 
++#if defined(SWEET)
++	sweet_early_logf("SWEET KMEM94 ptr_out: org=0x%llx ptr=0x%llx "
++	    "meta=0x%llx chunks=0x%llx",
++	    (uint64_t)org_ptr_range_size, (uint64_t)ptr_range_size,
++	    (uint64_t)kmem_meta_size, (uint64_t)kmem_ptr_chunks);
++#endif
+ 	assert(kmem_meta_size + ptr_range_size <= org_ptr_range_size);
+ 	/*
+ 	 * Add claims for kmem's ranges
+@@ -3573,6 +3594,11 @@
+ #if defined(SWEET)
+ 	sweet_kmem_largest_free = largest_free_size;
+ 	sweet_kmem_total_claims = total_claims;
++	sweet_early_logf("SWEET KMEM94 pre_cap: sane=0x%llx span=0x%llx "
++	    "claims=0x%llx free=0x%llx",
++	    (uint64_t)sane_size,
++	    (uint64_t)(kernel_map->max_offset - kernel_map->min_offset),
++	    (uint64_t)total_claims, (uint64_t)largest_free_size);
+ #endif
+ 
+ 	/*
+@@ -3585,12 +3611,13 @@
+ 	 * the kmem ranges on the whole VA makes ptr_range_size huge:
+ 	 * kmem_add_ptr_claims() multiplies it by KMEM_CHUNK_SIZE_MIN and
+ 	 * its assertion fails. Size the ranges on RAM instead. */
+-	vm_map_size_t kmem_cap = round_page(sane_size * 4);
++	vm_map_size_t kmem_cap = sane_size ? round_page(sane_size * 4) : 0;
++	if (kmem_cap < (256ULL << 20))
++		kmem_cap = 256ULL << 20;
+ 	if (largest_free_size > kmem_cap)
+ 		largest_free_size = kmem_cap;
+-	kprintf("SWEET kmem: sane=0x%llx cap=0x%llx free=0x%llx\n",
+-	    (uint64_t)sane_size, (uint64_t)kmem_cap,
+-	    (uint64_t)largest_free_size);
++	sweet_early_logf("SWEET KMEM94 post_cap: cap=0x%llx free=0x%llx",
++	    (uint64_t)kmem_cap, (uint64_t)largest_free_size);
+ #endif
+ 	ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
+ 	sprayqtn_range_size = ptr_range_size;
+@@ -3603,6 +3630,9 @@
+ 	sprayqtn_range_size = round_page(sprayqtn_range_size);
+ #if defined(SWEET)
+ 	sweet_kmem_ptr_size = ptr_range_size;
++	sweet_early_logf("SWEET KMEM94 ptr_set: ptr=0x%llx spray=0x%llx ranges=%u",
++	    (uint64_t)ptr_range_size, (uint64_t)sprayqtn_range_size,
++	    (unsigned)kmem_ptr_ranges);
+ #endif
+ 
+ 
