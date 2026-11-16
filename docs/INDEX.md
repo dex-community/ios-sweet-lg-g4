@@ -6,6 +6,8 @@ ipotesi superate e descrizioni di codice che non esiste più.
 
 ---
 
+**Regola CI.** `.github/workflows/xnu.yml` ha `paths: xnu/patches/**` e il workflow stesso: un push di soli `.md` NON avvia build (verificato con `7d0f53f`: zero run). Eseguire/rilanciare la CI solo quando cambia una patch, il workflow o codice che serve nell'artefatto. Non usare `gh workflow run` per modifiche di documentazione.
+
 ## 1. Stato corrente (colpo d'occhio)
 
 | Tema | Stato | Fonte |
