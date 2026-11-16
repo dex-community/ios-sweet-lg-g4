@@ -17,9 +17,9 @@ ipotesi superate e descrizioni di codice che non esiste più.
 | Shim | gira sul telefono, log in pstore / RAM `0x50000000` / IMEM | `NOTES.md`, `shim/log.h` |
 | eMMC | CMD2 risolto (`C2OK v=00000009`), rootfs HFS+ montato ro da Linux | `NOTES.md`, `docs/test-2026-11-10-hfs-mount.txt` |
 | XNU | **MMU 4 KiB OK** (marker 1..12, `SCTLR_EL1 M=1`), GIC risolto, boot fino a `kernel_bootstrap`. Si ferma in `kmem_range_init()` → `vm_kern.c:3497` | `docs/DISPLAY-SOLVED.md §boot device` |
-| Fix XNU | 0085 (grana 4 KiB) → 0086/87/88/89 (bisection) → 0090 (GICv3→GICv2) → 0091/92/93 (kmem) → 0094 (diagnostica early + guard underflow) → 0095 (zone map VA) | `xnu/patches/` — catena 100/0 |
+| Fix XNU | 0085 (grana 4 KiB) → 0086/87/88/89 (bisection) → 0090 (GICv3→GICv2) → 0091/92/93 (kmem) → 0094 (log early) → 0095 (zone map VA) → 0096 (cursore claim) | `xnu/patches/` — catena 101/0 |
 | Kernel 4 KiB | **VERIFICATO**: `TCR_EL1 0x022a51a251a` (T0SZ 26, TG0 0b00), `__TEXT 0xfffffff007004000`, zero LSE. Il vecchio FAIL era un bug del checker (costante TCR hardcoded) | `tools/check-xnu-binary.sh` |
-| Blocker aperto | 0095 **funziona** (claim 152,68 → 40,57 GiB, `kmem_add_ptr_claims` OK). Nuovo stop: `vm_map_locate_space` per `kmem_data_range`, perché `kmem_fuzz_start()` piazza il cursore ~2,9 GiB sotto `max_offset` e il claim chiede 3,66 GiB. Fix: ancorare `start` a `min_offset` | `docs/DISPLAY-SOLVED.md`, run CI `43808900044` |
+| Blocker aperto | 0095 e 0096 **funzionano** (claim 152,68 → 40,57 GiB, cursore da `min_offset`), ma il panic resta `vm_map_locate_space` / `kmem_sprayqtn_range`: il __TEXT è ~64 GiB sopra `min_offset`, quindi i ~46 GiB di claim finiscono contro `max_offset`. Serve ridurre ancora i claim o estendere il KVA TTBR1 | `docs/DISPLAY-SOLVED.md`, test locale `LOCAL` |
 | **Display** | **RISOLTO il 16/11, mode 13**: frame spinto da MDP/DSI DMA (hardware), istantaneo, log boot step-by-step a schermo, `GPU verdict=HW`. HELLO rimosso. Dati in `shim/display-data.h` | **`docs/DISPLAY-SOLVED.md`**, `shim/display.c` |
 | Causa dello stallo | finestra DCS a 640 colonne su pannello da 720: ogni riga sfalsata di 240 byte → static deterministico. Non era MDP, non era SMMU, non era formato pixel | `docs/DISPLAY-SOLVED.md §3` |
 | Causa del mancato boot | **non è il display** | `NOTES.md`, `HANDOFF-PROMPT.md` |

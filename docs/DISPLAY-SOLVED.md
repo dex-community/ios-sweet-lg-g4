@@ -521,3 +521,55 @@ Nuovo, diverso blocker: `vm_map_locate_space()` non trova spazio per
 `0xfffffffb452a0000`, cioè ~2,9 GiB sotto `max_offset`, mentre il
 claim ne chiede 3,66. Prossimo fix: su SWEET ancorare `start` a
 `kernel_map->min_offset` (si perde il fuzz ASLR, si guadagna il boot).
+
+### Dodicesimo boot device (patch 0096, **primo giro senza CI**)
+
+Patch `0096`: su SWEET `start = kernel_map->min_offset` invece di
+`kmem_fuzz_start()`, con log del cursore nel buffer early. Il log
+conferma che la modifica è nel kernel giusto:
+
+```
+SWEET KMEM96 start=0xffffffe000000000 min=0xffffffe000000000
+             max=0xfffffffbffffffff
+```
+
+Ma il panic resta, più avanti:
+
+```
+PANIC: claim kmem_sprayqtn_range size=0x2eddc000
+       start=0xfffffffbe7fa8000   @vm_kern.c:3746
+```
+
+Il cursore parte da `min_offset` ma dopo aver piazzato i claim è
+comunque a ~111 GiB dentro la mappa: il kernel __TEXT sta a
+`0xfffffff007004000`, cioè ~64 GiB sopra `min_offset`, quindi la parte
+bassa del KVA non è libera e i ~46 GiB di claim finiscono addosso a
+`max_offset`. **La causa vera è il layout VA 4 KiB / 38 bit, non i
+singoli claim**: o si riducono ancora i claim, o si estende
+`kernel_map->max_offset` (serve toccare le page table TTBR1).
+
+### Relink incrementale locale (VALIDATO)
+
+`tools/local-relink.sh` ricompila in locale solo i file cambiati e rifà
+il link con clang/ld di Xcode 27, senza Xcode 16 e senza SDK 15.
+Verifiche fatte:
+
+* **null relink** (nessun file cambiato): 13 s, tutti i controlli di
+  `check-xnu-binary.sh` verdi, e il kernel **boota sul device fino
+  allo stesso punto** della CI (log early completi, console ring attivo);
+* **relink con 0096**: 15 s, stringa `SWEET KMEM96` nel binario,
+  immagine ricostruita con `build-g4-image.sh LOCAL g4`, boot device
+  con il nuovo log. Zero run CI per l'intera iterazione.
+
+Due differenze da sapere:
+
+* il linker 27 rifiuta la text-relocation in
+  `lastkernelconstructor.o` con `-pie`: lo script rimuove `-Wl,-pie`.
+  Lo shim carica il kernel a indirizzo fisso e non applica slide, quindi
+  `MH_PIE` non serve.
+* il kernel locale è ~15,8 MB contro i 17,1 MB della CI (strip/linker
+  diversi); `sane_size` cambia di conseguenza di qualche MiB.
+  `check-xnu-binary.sh` e il boot device restano la validazione.
+
+Il workflow pubblica ora `kernel-support/` (`libfirehose_kernel.a`,
+`nonlto.o`), gli unici input di link non già presenti negli artefatti.

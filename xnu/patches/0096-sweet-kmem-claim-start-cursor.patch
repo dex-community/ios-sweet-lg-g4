@@ -1,0 +1,24 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3698,7 +3698,20 @@
+ 	 * pointer packing schemes using KERNEL_PMAP_HEAP_RANGE_START as a base
+ 	 * do not admit this address to be part of any zone submap.
+ 	 */
++#if defined(SWEET)
++	/* 2026-11-16: kmem_fuzz_start() does a KMA_VAONLY allocation, and on
++	 * the 4 KiB / 38-bit KVA layout it lands ~2.9 GiB below max_offset
++	 * (0xfffffffb452a0000 measured on the G4). The claims are packed
++	 * UPWARD from that cursor, so vm_map_locate_space() runs out of map
++	 * before kmem_data_range (3.66 GiB). Start at min_offset instead:
++	 * we lose the ASLR fuzz, we gain a bootable kernel. */
++	start = kernel_map->min_offset;
++	sweet_early_logf("SWEET KMEM96 start=0x%llx min=0x%llx max=0x%llx",
++	    (uint64_t)start, (uint64_t)kernel_map->min_offset,
++	    (uint64_t)kernel_map->max_offset);
++#else
+ 	start = kmem_fuzz_start();
++#endif
+ 
+ 	/*
+ 	 * Add claims for ptr and data kmem_ranges

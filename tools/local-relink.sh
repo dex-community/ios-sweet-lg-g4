@@ -125,26 +125,55 @@ if [ -n "$FILES" ]; then
 fi
 
 # --- 3. relink -------------------------------------------------------------
+# -force_load on the archive changes the section order and Xcode 27's ld then
+# rejects a text relocation in lastkernelconstructor.o. Reproduce the CI
+# exactly instead: extract every member and feed them in link.filelist order
+# (the CI build tree ships that list), then the four trailing objects.
 say "== link (local clang/ld)"
+mkdir -p "$WORK/objects"
+(cd "$WORK/objects" && ar x "$WORK/kernel.a")
+python3 - "$OBJDIR/link.filelist" "$WORK/objects" "$SUPPORT" "$WORK/link.filelist" <<'PY'
+import os, sys
+src, objects, support, out = sys.argv[1:]
+names = []
+for line in open(src):
+    line = line.strip()
+    if not line:
+        continue
+    b = os.path.basename(line)
+    p = os.path.join(objects, b)
+    if not os.path.exists(p):
+        sys.exit("missing object for " + line)
+    names.append(p)
+for extra in ("version.o", "lastkerneldataconst.o", "lastkernelconstructor.o"):
+    names.append(os.path.join(objects, extra))
+n = os.path.join(support, "nonlto.o")
+if os.path.exists(n):
+    names.append(n)
+open(out, "w").write("\n".join(names) + "\n")
+print("objects: %d" % len(names), file=sys.stderr)
+PY
 python3 - "$LINKDIR/kernel.development.sweet.linkarguments" "$SUPPORT" "$CC_RT" \
-	"$WORK/kernel.a" "$OBJDIR" "$WORK/kernel.unstripped" <<'PY' > "$WORK/link.sh"
-import sys
-args, support, cc_rt, archive, objdir, out = sys.argv[1:]
+	"$WORK/link.filelist" "$OBJDIR" "$WORK/kernel.unstripped" <<'PY' > "$WORK/link.sh"
+import re, sys
+args, support, cc_rt, filelist, objdir, out = sys.argv[1:]
 flags = open(args).read().strip()
 flags = flags.replace("-L/Users/runner/work/ios-sweet-lg-g4/ios-sweet-lg-g4/dxb/fakeroot/usr/local/lib/kernel",
                       "-L" + support)
 # -lcc_kext is a compiler-rt archive; the modern toolchain spells it differently
 flags = flags.replace("-lcc_kext", cc_rt)
+# ld 27106 (Xcode 27) rejects the ARM64_RELOC_UNSIGNED in the read-only
+# __mod_init_func of lastkernelconstructor.o as an "illegal text relocation"
+# when -pie is set; Xcode 16's linker allowed it. The shim loads the kernel at
+# a FIXED physical address and never applies a slide, so MH_PIE is not needed
+# on this port. Verified by a null relink booting identically to the CI image.
+flags = re.sub(r"(^|\s)-Wl,-pie(\s|$)", " ", flags)
 extra = " ".join([
-    "-Wl,-force_load," + archive,
+    "-filelist " + filelist,
     "-Wl,-alias_list," + objdir + "/all-alias.exp",
     "-Wl,-sectcreate,__LINKINFO,__symbolsets," + objdir + "/symbolsets.plist",
     "-Wl,-segprot,__LINKINFO,r--,r--",
 ])
-nonlto = support + "/nonlto.o"
-import os
-if os.path.exists(nonlto):
-    extra += " " + nonlto
 print("/usr/bin/clang++ " + flags + " " + extra + " -o " + out)
 PY
 bash "$WORK/link.sh" > "$WORK/link.log" 2>&1 || {
