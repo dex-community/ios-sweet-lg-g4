@@ -342,3 +342,23 @@ Quindi il kernel si blocca dentro `PE_init_cpu()` o `fiq_context_init(TRUE)`
 Patch `0087-sweet-early-bisect-pe-init-cpu.patch` separa le due chiamate e
 marca anche `machine_startup` / `machine_conf` / `kernel_bootstrap`.
 Catena 92 applicate, 0 fallite.
+
+### Terzo boot device (patch 0087, run CI 43792574311)
+
+`SWEET EARLY Q: before PE_init_cpu` presente, `34: PE_init_cpu done`
+assente. Il blocco è **dentro `PE_init_cpu()` → `pe_init_fiq()`**.
+`fiq_context_init()` non viene mai raggiunto. Nessuna eccezione, nessun
+panic, console ring vuota: è uno spin, non un fault.
+
+Causa nel sorgente patched (`pexpert/arm/pe_fiq.c`, ramo SWEET):
+
+```c
+gicd_write32(GICD_CTLR, gicd_ctlr);
+while (gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) { ; }
+```
+
+`GICD_CTLR.RWP` non si azzera sul GICv2 del G4 da EL1 non-secure: loop
+senza uscita. Patch `0088-sweet-gic-rwp-timeout.patch`: poll limitato a
+100000 iterazioni con mark `44 RWP stuck, continuing` / `45 RWP cleared`,
+più mark 41/42/43/46 dentro `pe_init_fiq()` e capstage 40 -> 64.
+Catena patch: 93 applicate, 0 fallite.

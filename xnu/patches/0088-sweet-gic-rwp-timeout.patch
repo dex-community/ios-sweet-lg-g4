@@ -1,0 +1,68 @@
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -11,6 +11,7 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/device_tree.h>
+ #include <pexpert/arm64/board_config.h>
++#include <arm64/sweet_early.h>
+ 
+ 
+ #if HAS_GIC_V3
+@@ -88,6 +89,8 @@
+ 	int error;
+ 	DTEntry entry;
+ 
++	sweet_early_mark(41, "pe_init_fiq entered");
++
+ 	// gicd_base is 0x0 only before it's initialized by the boot processor.
+ 	// Avoid calling SecureDT* routines on secondary processors to avoid
+ 	// race conditions because they are not thread-safe.
+@@ -152,6 +155,8 @@
+ 		gicr_size = gicr_size_prop;
+ 	}
+ 
++	sweet_early_mark(42, "GIC DT + ml_io_map done");
++
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+ 
+@@ -234,13 +239,24 @@
+ #if defined(SWEET)
+ 	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
+ 	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
++	sweet_early_mark(43, "before GICD_CTLR write");
+ 	gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;
+ 	gicd_write32(GICD_CTLR, gicd_ctlr);
+-	while (gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) {
+-		;
++	/* 2026-11-16: RWP never clears on the G4 (GICv2, EL1 non-secure).
++	 * The unbounded spin froze the kernel inside PE_init_cpu(). */
++	{
++		unsigned rwp_poll;
++		for (rwp_poll = 0; rwp_poll < 100000u; rwp_poll++)
++			if (!(gicd_read32(GICD_CTLR) & GICD_CTLR_RWP))
++				break;
++		if (rwp_poll == 100000u)
++			sweet_early_mark(44, "GICD_CTLR RWP stuck, continuing");
++		else
++			sweet_early_mark(45, "GICD_CTLR RWP cleared");
+ 	}
+ 	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
+ 	__builtin_arm_isb(ISB_SY);
++	sweet_early_mark(46, "pe_init_fiq done");
+ #else
+ 	// Enable the forwarding of the vtimer interrupt
+ 	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -114,7 +114,7 @@
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 40) {
++	if (early_disabled || stage > 64) {
+ 		return;
+ 	}
+ 	sweet_early_string("SWEET EARLY ");
