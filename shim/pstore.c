@@ -69,11 +69,8 @@
  * log. The CRC is what tells a corrupted record (a parity block that the
  * decoder mangled) from a good one.
  */
+#define PSTORE_NO_CONSOLE 1
 #include <stdint.h>
-
-#ifndef PSTORE_NO_CONSOLE
-#include "console.h"
-#endif
 #include "pstore.h"
 #include "rs8.h"
 
@@ -107,6 +104,71 @@ void *memcpy(void *dst, const void *src, unsigned long n);
 #endif
 #ifndef RAMOOPS_BASE2
 #define RAMOOPS_BASE2		0x0ff00000UL
+#endif
+
+/*
+ * THE PMSG ZONE: THE COPY THAT ACTUALLY SURVIVES (added 2026-11-15).
+ *
+ * WHY THE CONSOLE ZONE IS NOT ENOUGH
+ * ------------------------------------
+ * The console zone is a ONE SHOT channel, and the proof came on this phone.
+ * The shim wrote its record, the phone was rebooted, TWRP was booted, and
+ * /sys/fs/pstore/console-ramoops-0 came back with the RECOVERY's own
+ * console in it: the shim's record was gone, 116488 bytes of kernel log
+ * instead. The kernel writes its console to the console zone from the
+ * moment it boots, and the zone is a ring: what was there first is
+ * overwritten.
+ *
+ * That is why the record of a run that HUNG used to be unreadable.
+ *
+ * WHY THE PMSG ZONE WORKS
+ * -----------------------
+ * The ramoops region is split in zones, and the kernel only ever writes to
+ * the one it is told to:
+ *
+ *   - the CONSOLE zone gets the kernel console (ramoops_pstore_write_buf,
+ *     type PSTORE_TYPE_CONSOLE) -- that is what overwrites our record;
+ *   - the PMSG zone gets the userspace log (/dev/pmsg, type
+ *     PSTORE_TYPE_PMSG). No recovery writes to /dev/pmsg, so nothing
+ *     touches this zone.
+ *
+ * The layout was read off the phone, not guessed: /proc/iomem of the
+ * recovery's kernel lists four persistent_ram regions,
+ *
+ *   0ff00000-0ff7ffff   the record zone  (512 KiB)
+ *   0ff80000-0ff9ffff   the CONSOLE zone  (128 KiB)
+ *   0ffa0000-0ffbffff   the PMSG zone    (128 KiB)
+ *   0ffc0000-0ffdffff   one more         (128 KiB)
+ *
+ * and the console file it produced is 116488 bytes, which is a 0x20000 zone
+ * with its 12 byte header and its Reed-Solomon parity taken out. So the
+ * console zone the recovery reads is at 0x0ff80000, and the pmsg zone is at
+ * 0x0ffa0000.
+ *
+ * (The first attempt used 0x0ff20000, which was the layout computed from
+ * msm8992-lge.dtsi instead of the device tree the phone actually boots.
+ * The phone's /proc/iomem is the truth.)
+ *
+ * So 0x0ffa0000 is the pmsg zone, and it is the address the shim writes as
+ * the third copy.
+ *
+ * And it is not a private channel: the pstore core reads every zone at
+ * mount and makes a file out of it (fs/pstore/platform.c,
+ * pstore_get_records -> psi->read -> pstore_mkfile), one file per zone and
+ * per type:
+ *
+ *   console-ramoops-0   the kernel console (it eats our record)
+ *   pmsg-ramoops-0      THE PMSG ZONE: our record, intact
+ *
+ * The signature is the same as the console zone's: the driver asks for
+ * sig = 0 for both, and persistent_ram_post_init compares it with
+ * sig ^ PERSISTENT_RAM_SIG = 0x43474244, which is what this file writes.
+ *
+ * The zone is 128 KiB, with the same 12 byte header and the same 16 byte
+ * Reed-Solomon parity, so the same writer and the same reader are used.
+ */
+#ifndef RAMOOPS_PMSG_BASE
+#define RAMOOPS_PMSG_BASE	0x0ffa0000UL
 #endif
 #define RAMOOPS_SIZE		0x00100000UL
 #define RAMOOPS_RECORD		0x000ffffaUL
@@ -145,12 +207,21 @@ void *memcpy(void *dst, const void *src, unsigned long n);
 #define RAMOOPS_PAR_HDR(h)	(RAMOOPS_PAR_BASE(h) + RAMOOPS_ECC_BLOCKS * RAMOOPS_ECC)
 
 /*
- * How many times the write may be attempted. Two: once when the eMMC
- * bring-up is over (the MMU is still off there, so the write goes straight
- * to the physical address) and once in reset(), with the MMU on. A third
- * attempt is never made: if the second one faults, the exception handler
- * calls reset() again and the phone must still be able to reset.
+ * How many times the write may be attempted.
+ *
+ * It is more than two now (2026-11-15): the log is flushed several times
+ * during a run (the earliest possible one, the one before the display is
+ * touched, the one after it), and each flush rewrites the zones with the
+ * log as it is at that moment. The counter still exists for one reason:
+ * a write that FAULTS must not be retried for ever, because the exception
+ * handler calls reset(), and reset() writes the log again. A zone that
+ * faults once will fault every time.
+ *
+ * So the limit is a budget for the whole run, not for one call: four
+ * flushes are enough for every path, and the fifth is refused.
  */
+#define PSTORE_MAX_ATTEMPTS	64
+
 static unsigned pstore_attempts;
 
 static inline uint32_t p_rd32(uintptr_t a)
@@ -313,7 +384,7 @@ void pstore_console_write(const char *text, unsigned len)
 {
 	if (!text || !len)
 		return;
-	if (pstore_attempts >= 2)
+	if (pstore_attempts >= PSTORE_MAX_ATTEMPTS)
 		return;
 	pstore_attempts++;
 
@@ -324,6 +395,39 @@ void pstore_console_write(const char *text, unsigned len)
 	if (RAMOOPS_BASE2 != RAMOOPS_BASE)
 		pstore_write_zone(RAMOOPS_BASE2, text, len);
 #endif
+	/*
+	 * And the pmsg zone, which is the copy that survives: no kernel
+	 * writes its console there (the console goes to the console zone),
+	 * so the record of this run is still there when the recovery is up.
+	 * It comes back as /sys/fs/pstore/pmsg-ramoops-0.
+	 */
+	pstore_write_zone(RAMOOPS_PMSG_BASE, text, len);
+}
+
+/*
+ * The FIRST write of the run, before the watchdog is armed and before
+ * anything that can hang.
+ *
+ * It writes ONLY the pmsg zone, and only that one, for two reasons:
+ *
+ *   - the pmsg zone is the copy that survives the kernel's console, and
+ *     it is the one the recovery reads back as pmsg-ramoops-0;
+ *   - the pmsg zone is 128 KiB in both layouts, exactly like the console
+ *     zone, so the parity this writer computes is the parity the kernel's
+ *     decoder expects. The other two candidates do not have that
+ *     property: in the recovery's layout 0x0ff00000 is a 512 KiB RECORD
+ *     zone, and writing it with the console zone's geometry puts the
+ *     parity in the wrong place.
+ *
+ * If this one hangs, the phone is stuck before the watchdog is armed and
+ * nothing can be read: that is why it is a separate function, and why the
+ * watchdog is armed before the rest of the run.
+ */
+void pstore_early_write(const char *text, unsigned len)
+{
+	if (!text || !len)
+		return;
+	pstore_write_zone(RAMOOPS_PMSG_BASE, text, len);
 }
 
 /*
@@ -370,13 +474,17 @@ static int pstore_hexval(uint8_t c)
 	return -1;
 }
 
-void pstore_read_previous(void)
+/*
+ * Read the record of the previous run out of ONE zone and print it.
+ *
+ * Returns 1 if a record was found (and printed), 0 if there was none.
+ */
+static int pstore_read_zone(uintptr_t base)
 {
-	uintptr_t base = RAMOOPS_BASE;
 	uint8_t *data = (uint8_t *)RAMOOPS_DATA_BASE(base);
 	uint32_t sig, start, size;
 	unsigned k, best = 0, pos, i, len = 0;
-	uint32_t crc = 0, want = 0;
+	uint32_t crc = 0;
 	int found = 0;
 	char line[160];
 
@@ -384,11 +492,11 @@ void pstore_read_previous(void)
 	start = p_rd32((uintptr_t)base + 4);
 	size = p_rd32((uintptr_t)base + 8);
 	if (sig != RAMOOPS_SIG)
-		return;
+		return 0;
 	if (start > RAMOOPS_DATA || size > RAMOOPS_DATA)
-		return;
+		return 0;
 	if (size < PSTORE_MARKER_LEN + 32)
-		return;
+		return 0;
 
 	/*
 	 * The ring: the oldest byte is at 'start', the newest at
@@ -412,7 +520,7 @@ void pstore_read_previous(void)
 		}
 	}
 	if (!found)
-		return;
+		return 0;
 
 	/* The header of the record: "len=<n> crc=<8 hex digits>\n". */
 	pos = best + PSTORE_MARKER_LEN;
@@ -426,13 +534,13 @@ void pstore_read_previous(void)
 		int v = pstore_hexval(pstore_ring(data, start, pos + i));
 
 		if (v < 0)
-			return;
+			return 0;
 		crc = (crc << 4) | (uint32_t)v;
 	}
 	pos += 8 + 1;			/* the eight digits and the newline */
 
 	if (len == 0 || pos + len > size)
-		return;
+		return 0;
 
 #ifndef PSTORE_NO_CONSOLE
 	con_str("PREV", "--- the log of the previous run ---");
@@ -441,7 +549,7 @@ void pstore_read_previous(void)
 #ifndef PSTORE_NO_CONSOLE
 		con_str("PREV", "the record is damaged (the CRC does not match)");
 #endif
-		return;
+		return 1;
 	}
 
 	/* Print it line by line: the console takes one line at a time. */
@@ -466,5 +574,25 @@ void pstore_read_previous(void)
 	}
 #ifndef PSTORE_NO_CONSOLE
 	con_str("PREV", "--- end of the previous run ---");
+#endif
+	return 1;
+}
+
+void pstore_read_previous(void)
+{
+	/*
+	 * The pmsg zone comes first: it is the one that is NOT eaten by the
+	 * kernel's console, so it holds the log of the run that really
+	 * happened. The console zones are read as well, for the case where
+	 * the pmsg zone was never written (an older shim, or a run that
+	 * died before the first flush).
+	 */
+	if (pstore_read_zone(RAMOOPS_PMSG_BASE))
+		return;
+	if (pstore_read_zone(RAMOOPS_BASE))
+		return;
+#if RAMOOPS_BASE2
+	if (RAMOOPS_BASE2 != RAMOOPS_BASE)
+		pstore_read_zone(RAMOOPS_BASE2);
 #endif
 }

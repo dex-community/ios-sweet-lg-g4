@@ -1,5 +1,9 @@
 # Display (G4 H815): findings from the live kernel, 2026-11-10
 
+> **Misurato sul kernel funzionante: ancora valido.** È il riferimento per
+> RGB2/INTF2, l'IOVA `0x00E30000` e l'SMMU MDP. Mappa della documentazione:
+> `docs/INDEX.md` · procedura di test corrente: `docs/DISPLAY-TEST.md`.
+
 Evidence: `docs/display-2026-11-10.txt`, captured with
 `tools/read-mdp-registers.sh` from TWRP (the kernel's own MDP is clocked,
 so every register reads a live value). Read-only: debugfs only.

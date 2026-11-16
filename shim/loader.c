@@ -15,6 +15,8 @@
 #include "pstore.h"
 #include "wdt.h"
 #include "loader.h"
+#include "log.h"
+#include "trail.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -201,6 +203,24 @@ const char *loader_boot(uintptr_t dtb)
 	mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE);
 #endif
 #endif
+
+	/*
+	 * The last record before the jump.
+	 *
+	 * The kernel that dies at its first instruction leaves no trace of
+	 * its own: the shim's record is the only one there is. So the log
+	 * goes to the RAM and to the ramoops HERE, with the entry point and
+	 * the address of the boot arguments in it.
+	 *
+	 * The exception vectors are still ours at this point: if the
+	 * kernel faults before it installs its own, the panic handler of
+	 * the shim catches it and writes the ESR, the ELR and the FAR to
+	 * the same two places.
+	 */
+	con_hex2("JUMP", "entry=", entry_pa, "args=", (uint32_t)ba_pa);
+	trail(0x3100, entry_pa);
+	trail(0x3101, (uint32_t)ba_pa);
+	shim_log_flush();
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");

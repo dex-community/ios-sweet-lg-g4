@@ -89,6 +89,51 @@ CFLAGS="$CFLAGS -DSHIM_EMMC_PROBE=${SHIM_EMMC_PROBE:-0}"
 # zone and to the scratch RAM at 0x50000000, which touch nothing.
 CFLAGS="$CFLAGS -DSHIM_EMMC_WRITE=${SHIM_EMMC_WRITE:-0}"
 CFLAGS="$CFLAGS -DG4_WDT_GUARD_MS=${WDT_GUARD_MS:-60000}"
+# The display bring-up test (shim/display.c). It is OFF BY DEFAULT: the
+# normal shim jumps to XNU and never touches the display hardware. When it
+# is ON the shim does NOT jump, it paints HELLO + a stage number and stops.
+#
+# ONE variable, one source of truth. Until 2026-11-15 this flag defaulted
+# to 1 while the comment said 0, and SKIP_EMMC used a second default of 0:
+# a plain ./build.sh silently produced a display-test image that still ran
+# the eMMC phase. Everything below derives from DISP_TEST.
+DISP_TEST=${SHIM_DISPLAY_TEST:-0}
+CFLAGS="$CFLAGS -DSHIM_DISPLAY_TEST=$DISP_TEST"
+#
+# DISPLAY_MODE selects the bisection (see shim/display.h):
+#   0 = baseline, zero display reads and writes
+#   1 = minimal touch, bounded 12 MiB fill + HELLO, zero MMIO  (default)
+#   2 = D1 + MMSS core clocks + BOOT dump + one DSI frame trigger
+#   3 = full staged bring-up (clocks -> PLL -> DSI -> MDP -> frame -> panel)
+#   4 = DCS DIRECT into panel GRAM (no MDP at all). Ran 16/11: both links
+#       and the DCS engine answer, but CMD_DMA_DONE is host-side only.
+#   5 = re-arm the LIVE LK pipeline: paint DDR + GRAM, force HS, set
+#       DSI_TRIG_CTRL BIT(31) (kernel value 0x80000004), kick MDP frames.
+#       Zero MDP/CTL/RGB/LM/INTF writes. THE NEXT RUN TO DO.
+#   6 = contact probe: DCS 0x28 display off for 20s. Black = panel obeys.
+# DISPLAY_STAGE bisects modes 3, 4 and 5:
+#   mode 3: 1 = MMSS clocks, 2 = + PLL, 3 = + DSI, 4 = + MDP, 5 = + frame
+#   mode 4: 1 = clocks + BOOT dump, 2 = + PLL + DCS probe, 3 = + HELLO
+#   mode 5: 1 = clocks + extended dump, 2 = + HS/TE, 3 = + paint/kick
+CFLAGS="$CFLAGS -DSHIM_DISPLAY_MODE=${DISPLAY_MODE:-1}"
+CFLAGS="$CFLAGS -DSHIM_DISPLAY_STAGE=${DISPLAY_STAGE:-5}"
+CFLAGS="$CFLAGS -DDISP_FB_BPP=${DISP_FB_BPP:-24}"
+CFLAGS="$CFLAGS -DDISP_DSI_MAP_SHIFT=${DISP_DSI_MAP_SHIFT:-4}"
+# The eMMC phase is skipped in the display test: the test does not need the
+# card, and the card is where the hang of 2026-11-15 happened. Override
+# with SKIP_EMMC=0 to run it anyway.
+if [ -z "${SKIP_EMMC:-}" ]; then
+	SKIP_EMMC=$DISP_TEST
+fi
+CFLAGS="$CFLAGS -DSHIM_SKIP_EMMC=${SKIP_EMMC}"
+# Build identity. A hash of the sources and the flags is compiled into the
+# shim as a 32-bit constant (no absolute pointers: the image is not
+# relocated). display_test() prints it as the first BUILD line in pstore,
+# so every test record can be attributed to the binary that produced it.
+BUILD_TAG=$( (cat start.S shim.c console.c display.c clocks.c display.h \
+                   console.h g4.h mmio.h timer.h 2>/dev/null; \
+              printf '%s' "$CFLAGS") | shasum -a 256 | cut -c1-8)
+CFLAGS="$CFLAGS -DG4_BUILD_ID=0x${BUILD_TAG}UL"
 # The phone has DRAM at 0xff00000, where its ramoops region is. QEMU's
 # virt machine has its RAM at 0x40000000, and only 128 MiB of it (the
 # machine's default: the memory-backend-file is the backing store, not the
@@ -102,7 +147,7 @@ fi
 # untouched (the instruction was: do not touch emmc*). It is always compiled
 # (it is small and it has no side effects when SHIM_SD_PROBE=0), so that the
 # link line does not change from one build to the next.
-SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c rs8.c pstore.c wdt.c sd_probe.c mmio_selftest.c sd.c crc32.c sd_payload.c emmc_probe.c"
+SRC="start.S shim.c console.c mmu.c fdt.c loader.c emmc.c lib.c rs8.c pstore.c wdt.c sd_probe.c mmio_selftest.c sd.c crc32.c sd_payload.c emmc_probe.c display.c clocks.c"
 
 # The static half of the MMIO allowlist: a raw store on a device window
 # would bypass the protection that keeps a write to a dead controller from
@@ -118,10 +163,10 @@ for f in $SRC; do
 done
 # The image runs wherever LK puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o out/emmc_probe.o 2>/dev/null | grep -c ABS64 || true)
+abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o out/emmc_probe.o out/display.o out/clocks.o 2>/dev/null | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o out/emmc_probe.o -o out/shim.elf
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/lib.o out/rs8.o out/pstore.o out/wdt.o out/sd_probe.o out/mmio_selftest.o out/sd.o out/crc32.o out/sd_payload.o out/emmc_probe.o out/display.o out/clocks.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # LK copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 # (BSD awk has no strtonum, so do the hex conversion in the shell.)
@@ -149,3 +194,14 @@ fi
 # Host render of the console layout.
 gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
 ls -l out/Image out/shim-boot.img out/host.ppm
+
+# The run manifest: copy these five lines into the report of every device
+# test. Without them a pstore record cannot be attributed to a binary.
+{
+	echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo uncommitted)"
+	echo "build_id=0x$BUILD_TAG"
+	echo "image_sha256=$(shasum -a 256 out/shim-boot.img | cut -d' ' -f1)"
+	echo "display_test=$DISP_TEST mode=${DISPLAY_MODE:-1} stage=${DISPLAY_STAGE:-5} bpp=${DISP_FB_BPP:-24} skip_emmc=$SKIP_EMMC"
+} > out/run-manifest.txt
+cat out/run-manifest.txt

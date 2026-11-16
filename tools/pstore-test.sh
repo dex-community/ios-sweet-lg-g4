@@ -94,23 +94,33 @@ cat > "$TMP/main.c" <<'EOF'
 
 #include "ref.c"
 
-/* The whole ramoops region: 1 MiB, as on the phone. The console zone is
- * not at the start of it: the twelve record zones come first. */
+/* The whole ramoops region: 1 MiB, as on the phone. The zones are at the
+ * addresses the phone's recovery uses (read off its /proc/iomem):
+ * the record zone at 0xff00000, the console zone at 0xff80000 and the
+ * pmsg zone at 0xffa0000. */
 static uint8_t region[0x100000];
 static struct rs_control *rs;
 
-/* The shim's writer, with the zone moved into this process. */
+/* The shim's writer, with the zones moved into this process. */
 #define PSTORE_HAVE_MEMCPY 1
 #define PSTORE_NO_CONSOLE 1
-#define RAMOOPS_BASE ((uintptr_t)region)
-#define RAMOOPS_BASE2 0
+#define RAMOOPS_BASE   ((uintptr_t)(region + 0x80000))
+#define RAMOOPS_BASE2  0
+#define RAMOOPS_PMSG_BASE ((uintptr_t)(region + 0xa0000))
 #include "pstore.c"
 
-#define ZHDR	(region)
+#define ZHDR	(region + 0x80000)
 #define ZDATA	(ZHDR + 12)
 #define ZDATA_SZ	116468
 #define ZPAR	(ZDATA + ZDATA_SZ)
 #define ZPAR_HDR	(ZPAR + 911 * 16)
+
+/* The pmsg zone: the same layout, 128 KiB, at 0xffa0000. */
+#define PHDR	(region + 0xa0000)
+#define PDATA	(PHDR + 12)
+#define PDATA_SZ	116468
+#define PPAR	(PDATA + PDATA_SZ)
+#define PPAR_HDR	(PPAR + 911 * 16)
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -127,69 +137,86 @@ static void wr32(uint8_t *p, uint32_t v)
 
 /* The kernel's persistent_ram_update_ecc(): the parity of every 128 byte
  * block the write touched. */
-static void kernel_ecc(unsigned start, unsigned count)
+static void kernel_ecc_at(uint8_t *data, uint8_t *par, unsigned start,
+			  unsigned count, unsigned data_sz)
 {
 	unsigned b = start / 128;
 
 	while (b * 128 < start + count) {
-		unsigned blen = ZDATA_SZ - b * 128;
-		uint16_t par[16];
+		unsigned blen = data_sz - b * 128;
+		uint16_t par16[16];
 		uint8_t ecc[16];
 
 		if (blen > 128)
 			blen = 128;
-		memset(par, 0, sizeof(par));
-		ref_encode_rs8(rs, ZDATA + b * 128, (int)blen, par, 0);
+		memset(par16, 0, sizeof(par16));
+		ref_encode_rs8(rs, data + b * 128, (int)blen, par16, 0);
 		for (int i = 0; i < 16; i++)
-			ecc[i] = (uint8_t)par[i];
-		memcpy(ZPAR + b * 16, ecc, 16);
+			ecc[i] = (uint8_t)par16[i];
+		memcpy(par + b * 16, ecc, 16);
 		b++;
 	}
 }
 
-/* The kernel's persistent_ram_write(), reduced to what a console does. */
-static void kernel_write(const char *s, unsigned n)
+static void kernel_ecc(unsigned start, unsigned count)
 {
-	uint32_t start = rd32(ZHDR + 4);
-	uint32_t size = rd32(ZHDR + 8);
+	kernel_ecc_at(ZDATA, ZPAR, start, count, ZDATA_SZ);
+}
+
+/* The kernel's persistent_ram_write(), reduced to what a console does. */
+static void kernel_write_at(uint8_t *hdr, uint8_t *data, uint8_t *par,
+			    unsigned data_sz, const char *s, unsigned n)
+{
+	uint32_t start = rd32(hdr + 4);
+	uint32_t size = rd32(hdr + 8);
 	unsigned first = n;
 
-	if (start + n > ZDATA_SZ) {
-		first = ZDATA_SZ - start;
-		memcpy(ZDATA + start, s, first);
-		memcpy(ZDATA, s + first, n - first);
+	if (start + n > data_sz) {
+		first = data_sz - start;
+		memcpy(data + start, s, first);
+		memcpy(data, s + first, n - first);
 	} else {
-		memcpy(ZDATA + start, s, n);
+		memcpy(data + start, s, n);
 	}
-	kernel_ecc(start, n);
-	start = (start + n) % ZDATA_SZ;
+	kernel_ecc_at(data, par, start, n, data_sz);
+	start = (start + n) % data_sz;
 	size += n;
-	if (size > ZDATA_SZ)
-		size = ZDATA_SZ;
-	wr32(ZHDR + 4, start);
-	wr32(ZHDR + 8, size);
+	if (size > data_sz)
+		size = data_sz;
+	wr32(hdr + 4, start);
+	wr32(hdr + 8, size);
+}
+
+static void kernel_write(const char *s, unsigned n)
+{
+	kernel_write_at(ZHDR, ZDATA, ZPAR, ZDATA_SZ, s, n);
 }
 
 /* The kernel's persistent_ram_save_old(). */
 static uint8_t old_log[0x20000];
 static unsigned old_log_size;
 
-static void kernel_save_old(void)
+static void kernel_save_old_at(uint8_t *hdr, uint8_t *data, unsigned data_sz)
 {
-	uint32_t start = rd32(ZHDR + 4);
-	uint32_t size = rd32(ZHDR + 8);
+	uint32_t start = rd32(hdr + 4);
+	uint32_t size = rd32(hdr + 8);
 
-	if (size > ZDATA_SZ)
-		size = ZDATA_SZ;
-	if (start > ZDATA_SZ)
+	if (size > data_sz)
+		size = data_sz;
+	if (start > data_sz)
 		start = 0;
 	if (size >= start) {
-		memcpy(old_log, ZDATA + start, size - start);
-		memcpy(old_log + size - start, ZDATA, start);
+		memcpy(old_log, data + start, size - start);
+		memcpy(old_log + size - start, data, start);
 	} else {
-		memcpy(old_log, ZDATA + start, size);
+		memcpy(old_log, data + start, size);
 	}
 	old_log_size = size;
+}
+
+static void kernel_save_old(void)
+{
+	kernel_save_old_at(ZHDR, ZDATA, ZDATA_SZ);
 }
 
 int main(void)
@@ -207,6 +234,9 @@ int main(void)
 	wr32(ZHDR, 0x43474244u);
 	wr32(ZHDR + 4, 0);
 	wr32(ZHDR + 8, 0);
+	wr32(PHDR, 0x43474244u);
+	wr32(PHDR + 4, 0);
+	wr32(PHDR + 8, 0);
 
 	/* The console log of the previous boot, as the kernel wrote it. */
 	kernel_write("[    0.000000] previous boot console log\n", 41);
@@ -307,6 +337,101 @@ int main(void)
 			}
 			if (memcmp(copy, ZDATA + b * 128, blen)) {
 				printf("FAIL: the decoder changed block %u\n", b);
+				fail = 1;
+				break;
+			}
+		}
+		if (!fail)
+			printf("every block: parity ok, data unchanged\n");
+	}
+
+	/*
+	 * THE PMSG ZONE (the one that survives the kernel's console).
+	 *
+	 * The phone's recovery reads it back as /sys/fs/pstore/pmsg-ramoops-0,
+	 * through exactly the same path: persistent_ram_save_old() at boot,
+	 * then the file is made out of it. So the record has to be there,
+	 * with its parity right, exactly as in the console zone.
+	 */
+	printf("\n== the pmsg zone ==\n");
+	kernel_save_old_at(PHDR, PDATA, PDATA_SZ);
+	printf("old_log: %u bytes\n", old_log_size);
+	{
+		int pfound = 0;
+		char *p;
+
+		for (unsigned i = 0; i + 7 < old_log_size; i++) {
+			if (!memcmp(old_log + i, "[G4SHIM", 7)) {
+				pfound = 1;
+				printf("record found at offset %u\n", i);
+				break;
+			}
+		}
+		if (!pfound) {
+			printf("FAIL: the record is not in the pmsg zone\n");
+			fail = 1;
+		}
+		p = strstr((char *)old_log, "[G4SHIMPS1] len=");
+		if (!p) {
+			printf("FAIL: no record header in the pmsg zone\n");
+			fail = 1;
+		} else {
+			unsigned len = (unsigned)strtoul(strstr(p, "len=") + 4, NULL, 10);
+			unsigned crc = (unsigned)strtoul(strstr(p, "crc=") + 4, NULL, 16);
+			const uint8_t *q = (const uint8_t *)(strchr(p, '\n') + 1);
+			uint32_t c = 0xffffffffu, mine;
+
+			for (unsigned i = 0; i < len; i++) {
+				c ^= q[i];
+				for (int b = 0; b < 8; b++)
+					c = (c >> 1) ^ (0xedb88320u & (-(int32_t)(c & 1)));
+			}
+			mine = ~c;
+			printf("record: len=%u crc=%08x\n", len, crc);
+			if (mine != crc) {
+				printf("FAIL: the CRC is %08x, the payload says %08x\n",
+				       crc, mine);
+				fail = 1;
+			} else {
+				printf("crc: ok\n");
+			}
+		}
+	}
+	{
+		uint8_t hdr_copy[12];
+		uint16_t par[16];
+		int err;
+
+		memcpy(hdr_copy, PHDR, 12);
+		for (int i = 0; i < 16; i++)
+			par[i] = PPAR_HDR[i];
+		err = ref_decode_rs8(rs, hdr_copy, par, 12, NULL, 0, NULL, 0, NULL);
+		if (err != 0) {
+			printf("FAIL: the pmsg header parity is wrong (%d)\n", err);
+			fail = 1;
+		} else if (memcmp(hdr_copy, PHDR, 12)) {
+			printf("FAIL: the decoder changed the pmsg header\n");
+			fail = 1;
+		} else {
+			printf("header parity: ok\n");
+		}
+		for (unsigned b = 0; b * 128 < PDATA_SZ; b++) {
+			unsigned blen = PDATA_SZ - b * 128;
+			uint8_t copy[128];
+
+			if (blen > 128)
+				blen = 128;
+			memcpy(copy, PDATA + b * 128, blen);
+			for (int i = 0; i < 16; i++)
+				par[i] = (uint16_t)(PPAR + b * 16)[i];
+			err = ref_decode_rs8(rs, copy, par, (int)blen, NULL, 0, NULL, 0, NULL);
+			if (err != 0) {
+				printf("FAIL: the pmsg block %u has a wrong parity (%d)\n", b, err);
+				fail = 1;
+				break;
+			}
+			if (memcmp(copy, PDATA + b * 128, blen)) {
+				printf("FAIL: the decoder changed the pmsg block %u\n", b);
 				fail = 1;
 				break;
 			}

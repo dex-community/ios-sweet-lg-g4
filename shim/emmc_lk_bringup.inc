@@ -92,8 +92,12 @@
  * checks for the exact values CMD_RESP_48 / CMD_RESP_48BUSY. */
 #define CMD_RESP_R3		0x82
 
+#ifndef EMMC_E_BRINGUP
 #define EMMC_E_BRINGUP		-11	/* host bring-up failed */
+#endif
+#ifndef EMMC_E_IDENT
 #define EMMC_E_IDENT		-12	/* card did not identify */
+#endif
 
 /*
  * How far the identification got, so that the host can tell a mute card
@@ -156,20 +160,6 @@ static void emmc_pwr_probe(unsigned step)
 }
 
 /* rd16 sta in emmc.c, insieme agli altri accessori. */
-
-static void emmc_gcc_enable(uint32_t off, uint32_t tag)
-{
-	uintptr_t a = G4_GCC_BASE + off;
-	uint32_t v = rd32(a);
-
-	trail(tag, v);
-	if (!(v & 1u)) {
-		wr32(a, v | 1u);
-		for (int i = 0; i < 1000 && (rd32(a) & 0x80000000u); i++)
-			emmc_delay_us(10);	/* CLK_OFF clears when it runs */
-	}
-	trail(tag + 1, rd32(a));
-}
 
 /* sdhci_msm_init(): CLEAR = STATUS; CTL |= BUS_SUCCESS / IO_SUCCESS. */
 static void emmc_pwrctl_ack(void)
@@ -251,10 +241,20 @@ static int emmc_lk_bringup(const struct lk_var *v)
 	trail(0x0072, rd32(HC + HC_CLK_CTRL));
 	emmc_pwr_probe(30);
 
-	/* (a) clocks */
+	/*
+	 * (a) clocks.
+	 *
+	 * They come from the clock module (shim/clocks.c), which is the
+	 * only place in the shim that switches a clock on: the rule is
+	 * that the clock of a controller goes on before the controller is
+	 * touched, and it has one implementation.
+	 */
 	STEP(30);
-	emmc_gcc_enable(GCC_SDCC1_AHB_CBCR, 0x0060);
-	emmc_gcc_enable(GCC_SDCC1_APPS_CBCR, 0x0062);
+	if (clocks_sdcc1()) {
+		emmc_last_stage = STAGE_WAKE;
+		emmc_class = CLASS_CLOCK_OFF;
+		return EMMC_E_BRINGUP;
+	}
 
 	/* (b) sdhci_msm_init() */
 	STEP(31);
@@ -516,6 +516,17 @@ static int emmc_lk_bringup(const struct lk_var *v)
 	 * acknowledges it with a second CMD1).
 	 */
 	{
+		/*
+		 * The answer of CMD2, in the order of the drivers: the working
+		 * Linux driver asks for a 136 bit answer with the CRC7 check
+		 * and WITHOUT the index check, and that is the first one that
+		 * is tried. The other three are the variants that the shim
+		 * used (the index check as well) and the two shorter ones.
+		 *
+		 * The winner is remembered (g_cmd2_flags): the second boot of
+		 * the phone does not have to sweep again, and the log says
+		 * which one it was ("C2OK").
+		 */
 		static const uint8_t cmd2_flags[] = {
 			CMD_RESP_136_CRC,	/* what the working driver does */
 			CMD_RESP_136_CRC_IDX,	/* what the shim did until now */
@@ -530,10 +541,17 @@ static int emmc_lk_bringup(const struct lk_var *v)
 			/* CMD0: the card goes back to the idle state. */
 			if (emmc_cmd(0, 0, CMD_RESP_NONE, 0))
 				return emmc_ident_fail(0);
-			/* CMD1: the card powers up and answers with its OCR. */
-			/* Wait for bit 31 (busy) like the Linux driver does. */
+			/*
+			 * CMD1: the card powers up and answers with its OCR.
+			 * Wait for bit 31 (busy) like the Linux driver does.
+			 *
+			 * The wait is bounded by the timebase: with the EL0
+			 * counters off (the bug of 2026-11-15) this loop was
+			 * the one that never ended.
+			 */
 			int i;
-			for (i = 0; i < 1000; i++) {
+			for (i = 0; i < 200; i++) {
+				g4_wdt_pet();
 				if (emmc_cmd(1, ocr, CMD_RESP_R3, &rsp))
 					return emmc_ident_fail(0);
 				emmc_lk_stage = 1;
@@ -560,6 +578,7 @@ static int emmc_lk_bringup(const struct lk_var *v)
 					continue;
 				con_hex2("C2OK", "v=", cmd2_flags[vi], "rsp=", r);
 				rsp = r;
+				g_cmd2_flags = cmd2_flags[vi];
 				done = 1;
 			}
 		}

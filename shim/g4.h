@@ -90,6 +90,118 @@
 #define G4_FB_W			1440
 #define G4_FB_H			2560
 
+/* ---- Display hardware: the addresses the phone's own device tree gives ----
+ *
+ * Everything below comes from "../lg g4/msm8992-lg-h815-boot.dts" and from
+ * the phone's own kernel tree ("../lg g4/G4-Titan-Kernel-titan_bpf2",
+ * the msm-3.18 MDSS stack). The numbers are the ones the kernel itself
+ * uses, so the shim programs the same registers the kernel does.
+ *
+ *   qcom,mmsscc@fd8c0000          the MMSS clock controller
+ *   qcom,mdss_mdp@fd900000        the MDP
+ *   qcom,mdss_dsi@fd994000        the DSI0 controller
+ *   qcom,mdss_dsi_pll@fd994300    the DSI0 PHY PLL
+ */
+
+/* qcom,mmsscc@fd8c0000 (DTS:3871). The MDSS branch clocks (MDSS_AHB,
+ * MDSS_MDP, MDSS_PCLK0/1, MDSS_BYTE0/1, MDSS_ESC0/1, MDSS_VSYNC) and their
+ * root oscillators (MDP_CMD_RCGR, PCLK0_CMD_RCGR, BYTE0_CMD_RCGR,
+ * ESC0_CMD_RCGR) live here: drivers/clk/qcom/clock-mmss-8992.c. */
+#define G4_MMSS_CC_BASE		0xfd8c0000UL
+#define G4_MMSS_CC_SIZE		0x4000UL
+
+/* The global clock controller (GCC). The SDCC1 branch clocks (the eMMC)
+ * live here: drivers/clk/qcom/clock-local2.c and the LK binary
+ * (0x0f912cd8). */
+#define G4_GCC_BASE		0xfc400000UL
+#define G4_GCC_SIZE		0x2000UL
+
+/* The root oscillators (the "CMD_RCGR" registers): bits [10:8] select the
+ * source, bits [3:0] the divider, bit 0 enables the branch.
+ * drivers/clk/qcom/clock-local2.c: rcg_set_src_div(). */
+#define G4_RCGR_PCLK0		0x2000UL	/* PCLK0_CMD_RCGR  */
+#define G4_RCGR_PCLK1		0x2020UL	/* PCLK1_CMD_RCGR  */
+#define G4_RCGR_MDP		0x2040UL	/* MDP_CMD_RCGR    */
+#define G4_RCGR_VSYNC		0x2080UL	/* VSYNC_CMD_RCGR  */
+#define G4_RCGR_BYTE0		0x2120UL	/* BYTE0_CMD_RCGR  */
+#define G4_RCGR_BYTE1		0x2140UL	/* BYTE1_CMD_RCGR  */
+#define G4_RCGR_ESC0		0x2160UL	/* ESC0_CMD_RCGR   */
+#define G4_RCGR_ESC1		0x2180UL	/* ESC1_CMD_RCGR   */
+
+/* The branch clocks (the "CBCR" registers): bit 0 enables, bits [31:28] are
+ * the status field that has to read back as 0 (branch on).
+ * drivers/clk/qcom/clock-local2.c: branch_clk_enable(). */
+#define G4_CBCR_MDSS_AHB	0x2308UL
+#define G4_CBCR_MDSS_AXI	0x2310UL
+#define G4_CBCR_MDSS_PCLK0	0x2314UL
+#define G4_CBCR_MDSS_PCLK1	0x2318UL
+#define G4_CBCR_MDSS_MDP	0x231cUL
+#define G4_CBCR_MDSS_EXTPCLK	0x2324UL
+#define G4_CBCR_MDSS_VSYNC	0x2328UL
+#define G4_CBCR_MDSS_BYTE0	0x233cUL
+#define G4_CBCR_MDSS_BYTE1	0x2340UL
+#define G4_CBCR_MDSS_ESC0	0x2344UL
+#define G4_CBCR_MDSS_ESC1	0x2348UL
+
+/* qcom,mdss_mdp@fd900000 (DTS:759). The block offsets come from the same
+ * device tree: qcom,mdss-ctl-off = <0x2000 ...>, qcom,mdss-pipe-rgb-off =
+ * <0x15000 0x17000 0x19000>, qcom,mdss-intf-off = <0x6b000 ... 0x6c000>. */
+#define G4_MDP_BASE		0xfd900000UL
+#define G4_MDP_SIZE		0x90000UL
+#define G4_MDP_CTL_OFF		0x2000UL	/* the CTL block  */
+#define G4_MDP_RGB0_OFF		0x15000UL
+#define G4_MDP_RGB1_OFF		0x17000UL
+#define G4_MDP_RGB2_OFF		0x19000UL	/* the pipe that drives the panel */
+#define G4_MDP_INTF1_OFF	0x6b000UL
+#define G4_MDP_INTF2_OFF	0x6c000UL	/* the interface in command mode */
+
+/* qcom,mdss_dsi@fd994000 (DTS:1623): reg = <0xfd994000 0x260 (dsi_ctrl)
+ * 0xfd994500 0x280 (dsi_phy) 0xfd994780 0x30 (dsi_phy_regulator)
+ * 0xfd828000 0x108 (mmss_misc_phys)>. */
+#define G4_DSI0_CTRL_BASE	0xfd994000UL
+#define G4_DSI0_CTRL_SIZE	0x260UL
+#define G4_DSI0_PHY_BASE		0xfd994500UL
+#define G4_DSI0_PHY_SIZE		0x280UL
+#define G4_DSI0_PHYREG_BASE	0xfd994780UL
+#define G4_DSI0_PHYREG_SIZE	0x30UL
+
+/* qcom,mdss_dsi_pll@fd994300 (DTS:611): reg = <0xfd994300 0x500 (pll_base)
+ * 0xfd8c2300 0x08 (gdsc_base) 0xfd994200 0x64 (dynamic_pll_base)>. */
+#define G4_DSI0_PLL_BASE	0xfd994300UL
+#define G4_DSI0_PLL_SIZE	0x500UL
+#define G4_DSI0_PLL_GDSC	0xfd8c2300UL
+
+/* The panel, from the live phone (docs/display-2026-11-10.txt) and from
+ * the panel's own device tree node
+ * (arch/arm64/boot/dts/lge/dsi-panel-jdi-nt36850-dualmipi0-qhd-cmd.dtsi):
+ *
+ *   Panel #0 720x2560p60, 4 data lanes per link, dual link, 24 bpp on the
+ *   wire, the MDP buffer in RGBA8888 with a 5760 byte stride.
+ *   clk_rate (the DSI bit clock) = 910224000.
+ */
+#define G4_PANEL_W		720	/* per DSI link */
+#define G4_PANEL_H		2560
+#define G4_PANEL_BPP		24	/* on the wire */
+#define G4_DSI_CLK_RATE		910224000UL
+/* The VCO rate the DSI PLL is programmed for (the DSI clock times the
+ * fixed divider of the 20nm PHY: /2 for the byte clock, times the number
+ * of lanes). */
+#define G4_DSI_VCO_RATE		1820448000UL
+
+/* The framebuffer the FULL display test (DISPLAY_MODE=3) uses: 0x20000000
+ * is plain RAM in the 0x10000000-0x5fffffff bank, it is the address the
+ * loader already hands to XNU as the video frame buffer (shim/loader.c:
+ * ba->Video.v_baseAddr), and at the shim's entry nothing else uses it.
+ *
+ * The minimal-touch test instead writes cont_splash_mem (0x03400000,
+ * 12 MiB). A historical note here claimed that window is XPU-protected
+ * from EL1 and that a write takes a data abort: that was NOT confirmed at
+ * handover. console.c has always painted its log there (con_str ->
+ * put_str) and old/displayTest.md test 5 recorded no XPU fault. See
+ * docs/INDEX.md §4. */
+#define G4_DISP_FB_BASE		0x20000000UL
+#define G4_DISP_FB_STRIDE	5760	/* 1440 * 4 (RGBA8888) */
+
 /* ---- Storage (Phase 3) ---- */
 
 /* sdhci@f9824900 = sdhc1/mmc0, the eMMC host (DTS:6392-6496).

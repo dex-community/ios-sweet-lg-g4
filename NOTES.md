@@ -4536,3 +4536,78 @@ visibile, perché `proc_reg.h` (che lo include) è a sua volta condizionato.
   del file è stato corretto.
 - **PSCI è rotto** sull'H815 (`enable-method = "qcom,8994-arm-cortex-acc"`),
   quindi l'avvio dei secondari è un problema ancora aperto.
+
+---
+
+## 2026-11-16 — Il display è risolto
+
+### Fatto
+
+HELLO, numero di stage, etichetta e heartbeat sono **visibili sul pannello**
+del G4. Conferma dell'utente: due video (`signal-2026-11-16-01-15-17-866.mp4`
+e `..._002.mp4`). Il pannello mostra due copie di HELLO, una per link DSI,
+più `1`, `SHIM CONSOLE`, `BEAT 00000000` e una barra colorata in cima.
+
+Modalità 11 di `shim/display.c`, build `build_id=0x81469482`:
+
+```
+clocks_display_core()
+dsi_force_hs_mode()          DSI_COMMAND_MODE_DMA_CTRL &= ~BIT(26)  (LP -> HS)
+DCS 0x11 sleep out, 0x29 display on        (entrambi i link)
+DCS 0x3A = 0x77                             (24 bpp)
+DCS 0x2A 0..719, 0x2B 0..2559              (720 colonne: una per meta' pannello)
+primo pacchetto 0x2C, poi 0x3C continue,  86 pacchetti da 30 righe (64800 B)
+```
+
+Percorso: `DRAM 0x20000000 -> DMA del controller DSI -> GRAM -> vetro`.
+**Nessun** registro MDP/CTL/RGB/LM/INTF, nessun `CTL_FLUSH`, nessun
+`CTL_START`, nessun `MDP_SW_TRIGGER`, nessun indirizzo IOVA, nessun SMMU.
+
+### La catena di ragionamento
+
+1. **D0/D1** (15/11): fatto negativo solido. Il codice gira, la CPU e' viva
+   (40 heartbeat), il disegno avviene, il vetro non cambia. Il contenuto del
+   buffer non e' il problema.
+2. **D4** (16/11): BOOT dump a clock accesi, la misura che mancava nei sette
+   test precedenti. `RGB0/RGB1 -> 0x03400000`, stride `0x10E0` = 4320,
+   `DSI.ctrl = 0x1F5` su **entrambi** i link, `RGB2 = 0`. La pipeline MDP di
+   LK e' viva e ben configurata: e' **ferma**, non rotta. Questo corregge la
+   conclusione affrettata di D1.
+3. **D6**: un solo `0x28` (display off) tiene il pannello **nero** per 20 s.
+   Risposta binaria: i comandi DCS raggiungono il pannello. Tutte le ipotesi
+   "i pacchetti non lasciano l'host" sono morte qui.
+4. **D10**: stessa via, finestra 720 colonne, frame intero -> **rosso pieno**,
+   scritto progressivamente dall'alto a sinistra verso il basso a destra.
+   Il confronto con D4/D7 (finestra 640) mostra che lo "static deterministico"
+   era uno **sfalsamento di riga**: `0x2A` a 640 colonne con 640*3 byte per
+   riga traslava ogni riga di `(720-640)*3 = 240` byte. La costanza
+   dell'immagine a ogni avvio era il segnale: il rumore vero non e'
+   riproducibile, uno shift di stride sì.
+5. **D11**: geometria di D10, byte diversi. HELLO al primo colpo.
+
+Formula: **trova il canale che risponde, poi riduci le variabili finche' una
+sola differenza separa il caso che funziona da quello che non funziona.**
+
+### Bug di codice corretti (vedi `docs/DISPLAY-SOLVED.md` §2)
+
+Payload long-write, dispatch dual-DSI, `CMD_DMA_DONE` write-one-to-clear,
+`CTL_FLUSH` non e' un criterio di successo, finestre DCS strette, fill a 32 bit
+su framebuffer a 3 B/pixel, overlap dei buffer, `DSI_CMD_BUF` a 64 KiB.
+
+### Confronto con `garwedgess/android_kernel_lge_g4` (branch `M`)
+
+`mdss_dsi_host.c`, `mdss_dsi_cmd.c`, `mdss_dsi.h`, `dsi_host_v2.c` **identici**
+(solo `%pK` -> `%p`); DTS del pannello identico tranne la curva `qcom,blmap`.
+Differenze reali solo in `mdss_dsi_panel.c` (417 righe: feature LGE reader
+mode / extended panel / livedisplay), `mdss_mdp_intf_cmd.c` (62: hack
+`lge_panel_send_off_cmd`), `mdss_fb.c` (1086). **Nessuna differenza sul
+bring-up DSI**: l'altro kernel non cambia la diagnosi ne' la soluzione.
+
+### Critical path XNU
+
+Recuperato l'artefatto CI `43313974215` (run `success` del 12/11 21:49, mai
+scaricato) in `xnu/out-43313974215/`. `tools/check-xnu-binary.sh` dà:
+`__TEXT vmaddr 0xfffffff007004000` ok, vecchio `TCR_EL1` 16 KiB sparito, ma
+`TCR_EL1 0x002a51a161a` (4 KiB) **non presente come costante**. Da capire se
+la patch 0085 lo costruisce a runtime. Poi `fastboot boot` e
+`tools/read-pram.py --marks`: go = marker 12 presente.

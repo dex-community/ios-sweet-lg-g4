@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read the shim's record out of the ramoops console zone.
+"""Read the shim's record out of a ramoops zone.
 
 The shim leaves its log in the console zone of the ramoops region, in the
 format the kernel's pstore driver reads back:
@@ -11,17 +11,37 @@ format the kernel's pstore driver reads back:
 The CRC is what tells a record that survived the trip from the phone to the
 host from one that the Reed-Solomon decoder mangled on the way.
 
+WHICH FILE
+----------
+The shim writes the record in THREE places (shim/pstore.c):
+
+  console zone, 0x0ff80000   what the recovery reads as console-ramoops-0
+  console zone, 0x0ff00000   the other console zone (Android's layout)
+  pmsg zone,   0x0ff20000   what the recovery reads as pmsg-ramoops-0
+
+The console zones are EATEN by the kernel: the recovery writes its own
+console there from the moment it boots, and the zone is a ring, so the
+record of a run that finished is gone by then. That is why the pmsg zone
+matters: no kernel writes its console there (the console goes to the
+console zone), so the record survives and comes back as
+/sys/fs/pstore/pmsg-ramoops-0.
+
+So, when reading the log of a run, pull the pmsg file FIRST:
+
+    adb pull /sys/fs/pstore/pmsg-ramoops-0 pmsg.bin
+    tools/read-pstore.py pmsg.bin
+
 The file can be
 
-  - /sys/fs/pstore/console-ramoops-0 pulled from the phone (the kernel has
-    already rebuilt the ring into it), or
-  - a raw dump of the console zone (the first 12 bytes are the zone header:
-    the signature, the start and the size of the ring).
+  - /sys/fs/pstore/pmsg-ramoops-0 (or console-ramoops-0) pulled from the
+    phone: the kernel has already rebuilt the ring into it, or
+  - a raw dump of the zone (the first 12 bytes are the zone header: the
+    signature, the start and the size of the ring).
 
 Both are searched for the marker, so it does not matter which one it is.
 
     tools/read-pstore.py console-ramoops-0.bin
-    adb pull /sys/fs/pstore/console-ramoops-0 pstore.bin && tools/read-pstore.py pstore.bin
+    adb pull /sys/fs/pstore/pmsg-ramoops-0 pmsg.bin && tools/read-pstore.py pmsg.bin
 """
 import re
 import sys

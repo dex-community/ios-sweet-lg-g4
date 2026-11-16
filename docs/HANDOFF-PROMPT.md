@@ -1,5 +1,10 @@
 # HANDOFF — iOS 16.7.16 su LG G4 H815
 
+> **Storico, aggiornato fino al 12/11.** Restano validi: regole di sicurezza
+> (§8), indirizzi e costanti (§6), strade morte (§9). "Stato attuale" (§2) e
+> "Prossimi passi in ordine" (§5) sono superati. Mappa e stato corrente:
+> `docs/INDEX.md`.
+
 Sei l'AI che riprende un progetto a metà. Questo documento è l'handoff completo:
 tutto quello che segue è **misurato sul telefono reale**, non dedotto. Non
 ritentare le strade marcate come morte. Lavora in **italiano**.
@@ -163,7 +168,7 @@ driver eMMC per XNU, il display (MDP/DSI command mode) e l'input.
 >   read-only (`hfsplus: no backup volume header ... primary used alone`),
 >   ed e' il rootfs iPhone OS 16.7.16 (20H392).
 > - Evidenze: `docs/test-2026-11-10-hfs-mount.txt`; procedura:
->   `docs/DEVICE-TEST.md` (`tools/device-test.sh`, un boot + un file).
+>   `old/DEVICE-TEST.md` (`tools/device-test.sh`, un boot + un file).
 > - Il kernel di test ha `-dirty` (patch applicata). Telefono attualmente
 >   avviato con quel kernel + ramdisk TWRP; nulla e' stato flashato.
 > - Prossimo step: **display (RGB2/INTF2)**; poi il driver eMMC per XNU.
@@ -302,7 +307,7 @@ HFSPLUS=/path/to/hfsplus \
 `/dev/mem`, mount/dmesg/df/ls del volume HFS+, `SystemVersion.plist`, gli
 sha256 via mount e via `hfsplus`, e il log shim da `0x50000000`.
 `--collect [file]` rifà la sola batteria su un kernel già avviato.
-Dettagli: `docs/DEVICE-TEST.md`.
+Dettagli: `old/DEVICE-TEST.md`.
 
 
 ## 5. Prossimi passi in ordine

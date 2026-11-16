@@ -8,13 +8,16 @@
  * continuous-splash window at 0x03400000 (cont_splash_mem). 1440*2560*3
  * (10.5 MiB, RGB888) fits that window; 1440*2560*4 does not.
  *
- * FB_BPP selects how the console encodes pixels. The DSI node says
- * qcom,mdss-dsi-bpp = <0x18> (24 bpp on the wire), but the MDP's own
- * framebuffer is ARGB8888: the running phone reports
- * /sys/class/graphics/fb0 = "mdssfb_90000 1440,5120 stride=5760 bpp=32",
- * i.e. 4 bytes per pixel at a 1440 pixel stride. So 32 is the default. If
- * the first device test shows garbage, change this one value and rebuild:
- * 24 or 16 (RGB565).
+ * FB_BPP selects how the console encodes pixels, and shim/build.sh passes
+ * 24 for the phone: the bootloader's RGB0/RGB1 pipes read the 12 MiB
+ * cont_splash window as RGB888 (1440*2560*3 = 10.5 MiB fits; 32 bpp would
+ * need 14.1 MiB and does not). The running kernel instead uses RGB2 with
+ * ARGB8888 and stride 5760 (fb0 = "mdssfb_90000 1440,5120 stride=5760
+ * bpp=32"): that is the config the FULL display test (DISPLAY_MODE=3)
+ * sets up at 0x20000000. Two different pipelines, two different formats:
+ * the display test passes its format at run time through
+ * con_draw_text_bpp(). If the text is garbled, rebuild with FB_BPP=32
+ * (console) or DISP_FB_BPP=32 (test).
  */
 #define FB_BASE		G4_FB_BASE
 #define FB_W		G4_FB_W
@@ -57,6 +60,16 @@ extern uint32_t con_fb_w, con_fb_h, con_fb_stride;
 extern char con_log[];
 extern int con_log_len;
 
+/*
+ * Append a line to the ASCII log ONLY: nothing is painted on the panel.
+ *
+ * This is the way to write the log before the framebuffer is known to be
+ * safe: on the phone the splash framebuffer sits in the XPU protected
+ * region, and a write there is a data abort. The ASCII log lives in plain
+ * RAM, so this cannot fault.
+ */
+void con_log_only(const char *label, const char *s);
+
 /* Point the console at a framebuffer the device tree described. */
 void con_set_fb(uintptr_t base, uint32_t w, uint32_t h, uint32_t stride);
 
@@ -80,5 +93,25 @@ void con_str(const char *label, const char *s);
 void con_hex(const char *label, uint64_t v);
 /* label, then "a=xxxxxxxx b=xxxxxxxx" style pairs of 32-bit values */
 void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint32_t vb);
+/* One name and one value: "PARANGE pa=0000000A". */
+void con_hex1(const char *label, const char *a, uint32_t va);
 /* Raw dump of memory, to identify what the bootloader left in a buffer. */
 void con_dump(const char *label, uintptr_t addr, int bytes);
+
+/*
+ * Draw a string into an arbitrary framebuffer, in ARGB8888, with the
+ * console's own font. The display test uses it to paint into the buffer
+ * the MDP scans out (shim/display.c), which is not the console one.
+ */
+void con_draw_text(uintptr_t fb, uint32_t stride, int x, int y, const char *s,
+		   uint32_t fg, uint32_t bg, int scale);
+
+/*
+ * The same, with the pixel format chosen at run time. The bootloader's
+ * RGB0/RGB1 pipes read RGB888 (3 bytes per pixel), the kernel's RGB2
+ * pipe reads ARGB8888 (4 bytes): drawing with the wrong stride garbles
+ * the picture even when the scan-out is working.
+ */
+void con_draw_text_bpp(uintptr_t fb, uint32_t stride, int x, int y,
+		       const char *s, uint32_t fg, uint32_t bg,
+		       int scale, int bpp);

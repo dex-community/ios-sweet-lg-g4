@@ -104,6 +104,96 @@ static int put_str(int col, const char *s, uint32_t fg)
 	return col;
 }
 
+/*
+ * Draw a string into an ARBITRARY framebuffer, in ARGB8888.
+ *
+ * The display test (shim/display.c) paints into its own buffer, not into
+ * the console one: the console framebuffer is the splash window, which is
+ * inside the region the XPU protects, and the display buffer is the one
+ * the MDP scans out. The font lives here, so it is not duplicated in the
+ * display module.
+ *
+ *   fb     the address of the buffer
+ *   stride the number of bytes between two lines
+ */
+void con_draw_text(uintptr_t fb, uint32_t stride, int x, int y, const char *s,
+		   uint32_t fg, uint32_t bg, int scale)
+{
+	while (*s) {
+		char ch = *s++;
+
+		if (ch < 0x20 || ch > 0x7e)
+			ch = '?';
+		const unsigned char *g = font8x16[ch - 0x20];
+
+		for (int gy = 0; gy < 16; gy++)
+			for (int gx = 0; gx < 8; gx++) {
+				uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : bg;
+
+				for (int sy = 0; sy < scale; sy++)
+					for (int sx = 0; sx < scale; sx++) {
+						int px = x + gx * scale + sx;
+						int py = y + gy * scale + sy;
+						volatile uint32_t *p =
+							(volatile uint32_t *)(fb +
+							  (uintptr_t)py * stride +
+							  (uintptr_t)px * 4);
+
+						*p = c;
+					}
+			}
+		x += 8 * scale;
+	}
+}
+
+/*
+ * The same, for a framebuffer whose pixel format is chosen at run time.
+ * The display test passes the format of the pipes it is actually using,
+ * so a stage number is legible in RGB888 as well as in ARGB8888.
+ */
+void con_draw_text_bpp(uintptr_t fb, uint32_t stride, int x, int y,
+		       const char *s, uint32_t fg, uint32_t bg,
+		       int scale, int bpp)
+{
+	int bytes = (bpp == 24) ? 3 : (bpp == 16 ? 2 : 4);
+
+	while (*s) {
+		char ch = *s++;
+
+		if (ch < 0x20 || ch > 0x7e)
+			ch = '?';
+		const unsigned char *g = font8x16[ch - 0x20];
+
+		for (int gy = 0; gy < 16; gy++)
+			for (int gx = 0; gx < 8; gx++) {
+				uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : bg;
+
+				for (int sy = 0; sy < scale; sy++)
+					for (int sx = 0; sx < scale; sx++) {
+						int px = x + gx * scale + sx;
+						int py = y + gy * scale + sy;
+						volatile uint8_t *p =
+							(volatile uint8_t *)(fb +
+							  (uintptr_t)py * stride +
+							  (uintptr_t)px * bytes);
+
+						if (bpp == 32)
+							*(volatile uint32_t *)p = c;
+						else if (bpp == 24) {
+							p[0] = (uint8_t)(c >> 16);
+							p[1] = (uint8_t)(c >> 8);
+							p[2] = (uint8_t)c;
+						} else
+							*(volatile uint16_t *)p =
+							  (uint16_t)(((c >> 8) & 0xf800) |
+								     ((c >> 5) & 0x07e0) |
+								     ((c >> 3) & 0x001f));
+					}
+			}
+		x += 8 * scale;
+	}
+}
+
 static void fmt_hex(char *buf, uint64_t v, int digits)
 {
 	static const char hex[] = "0123456789ABCDEF";
@@ -171,7 +261,6 @@ static void log_line(const char *label, const char *s)
 void con_str(const char *label, const char *s)
 {
 	int col = put_str(0, label, YELLOW);
-
 	/* Do not overwrite a label that is longer than the label column. */
 	if (col < LABEL_COLS)
 		col = LABEL_COLS;
@@ -180,11 +269,33 @@ void con_str(const char *label, const char *s)
 	log_line(label, s);
 }
 
+/*
+ * The ASCII log only: the line goes into con_log and nothing is painted.
+ *
+ * This is how the log is written before the panel is known to be safe: on
+ * the phone the splash framebuffer sits inside the 150 MiB "secure_region"
+ * that the XPU protects, and a write there is a data abort. con_log lives
+ * in plain RAM, so this cannot fault.
+ */
+void con_log_only(const char *label, const char *s)
+{
+	log_line(label, s);
+}
+
 void con_hex(const char *label, uint64_t v)
 {
 	char buf[17];
 	fmt_hex(buf, v, 16);
 	con_str(label, buf);
+}
+
+/*
+ * One name and one value ("PARANGE pa=0000000A"). The two-pair version
+ * above cannot be used when there is only one value.
+ */
+void con_hex1(const char *label, const char *a, uint32_t va)
+{
+	con_hex2(label, a, va, 0, 0);
 }
 
 void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint32_t vb)

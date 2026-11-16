@@ -7,6 +7,8 @@ research/*
 # ...except the factory LK of this phone, which is our hardware ground truth
 !research/lk-g4/
 shim/out/
+# the concatenated boot image built for the phone: 2 GB, regenerable
+shim/boot.img
 xnu/out/
 xnu/out-*/
 __pycache__/
@@ -22,3 +24,6 @@ tools/kdztools/
 # staged Apple sources. /tmp is cleaned by the system and these are needed
 # again at every cycle, so they live in the project.
 work/
+
+# Il tutorial locale non va nel repository Git del progetto.
+tutorial/

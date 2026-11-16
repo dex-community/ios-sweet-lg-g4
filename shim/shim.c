@@ -26,8 +26,11 @@
 #include "pstore.h"
 #include "mmio.h"
 #include "wdt.h"
+#include "timer.h"
+#include "clocks.h"
+#include "emmc.h"
+#include "log.h"
 
-int emmc_write_log(const char *text, unsigned len);
 extern unsigned emmc_last_stage;
 extern int emmc_last_error;
 extern int emmc_last_cmd_error;
@@ -72,6 +75,15 @@ void emmc_probe_e0(void);
 void emmc_probe_d0(void);
 #endif
 void emmc_model_finish(void);
+
+/*
+ * The display bring-up test (shim/display.c). It is OFF by default: the
+ * normal shim never touches the display. When it is ON, the shim brings
+ * the panel up, paints a picture and STOPS there: it never jumps to XNU.
+ */
+#if SHIM_DISPLAY_TEST && SHIM_HW_DIAG
+#include "display.h"
+#endif
 
 /*
  * The stage of the eMMC bring-up is encoded in the time the phone stays up
@@ -273,8 +285,12 @@ static unsigned shim_event_index(void)
 
 #define NR_CPUS			G4_NR_CPUS
 
+#ifndef rsr
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
+#endif
+#ifndef wsr
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
+#endif
 #define isb() __asm__ volatile("isb" ::: "memory")
 
 /* Guarded by the MMIO allowlist (shim/mmio.h). */
@@ -310,7 +326,7 @@ static uint64_t sgi_self(unsigned id)
  * PSCI call.
  *
  * On this device PSCI does not exist: the H815 device tree deletes the
- * psci node ("/* psci is broken *\/") and the Android kernel falls back
+ * psci node ("psci is broken") and the Android kernel falls back
  * to the qcom,pshold driver for the reboot. Calling "smc #0" traps, so
  * the call is not made at all and the function reports "not supported".
  *
@@ -350,6 +366,46 @@ static void delay_ms(unsigned ms)
  */
 #define LOG_SCRATCH	0x50000000UL
 #define LOG_MARKER	"G4SHIMLG"
+
+static void save_log(void);
+
+/*
+ * THE LOG, IN EVERY PLACE.
+ *
+ * The log has to survive three kinds of ending:
+ *
+ *   - the normal end (the shim has done its work);
+ *   - a fault (the panic handler);
+ *   - a hang (the watchdog resets the phone and nothing of the shim runs
+ *     any more, so the log has to have been written BEFORE).
+ *
+ * The RAM copy (0x50000000) is the one that survives the trip through the
+ * recovery, and the ramoops is the one that the next kernel reads back as
+ * /sys/fs/pstore/console-ramoops-0. Both are written here, in this
+ * order, and every path that ends the run calls this.
+ */
+static void shim_flush_logs(void)
+{
+	save_log();
+	pstore_console_write(con_log, (unsigned)con_log_len);
+}
+
+static void shim_checkpoint(const char *name)
+{
+	con_str("CHECK", name);
+	shim_flush_logs();
+	g4_wdt_pet();
+}
+
+/*
+ * The public entry of the log (shim/log.h): the loader uses it before
+ * the jump to XNU, so that a kernel that dies at its first instruction
+ * still leaves a record of the state the shim handed over.
+ */
+void shim_log_flush(void)
+{
+	shim_flush_logs();
+}
 
 static void save_log(void)
 {
@@ -400,8 +456,10 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	 * NOT after a fault: the fault usually comes from the eMMC driver
 	 * itself, so a second attempt would fault again and recurse.
 	 */
+#if SHIM_EMMC_WRITE
 	if (!panic_stage)
-		emmc_write_log(con_log, (unsigned)con_log_len);
+		emmc_log_write(con_log, (unsigned)con_log_len);
+#endif
 	/*
 	 * And into the ramoops console zone, which the next Android boot
 	 * reads back: /sys/fs/pstore/console-ramoops-0. This is the channel
@@ -535,7 +593,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	 * Reset the phone by dropping PS_HOLD, NOT with PSCI.
 	 *
 	 * The H815 has no PSCI: its device tree says so explicitly
-	 * ("/* psci is broken *\/" and "/delete-node/ psci;"), the CPU
+	 * ("psci is broken" and "/delete-node/ psci;"), the CPU
 	 * nodes use enable-method = "qcom,8994-arm-cortex-acc", and the
 	 * Android kernel's arm_pm_restart is the qcom,pshold driver
 	 * (drivers/power/reset/msm-poweroff.c), not psci_sys_reset.
@@ -661,6 +719,13 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	 * here and the wait is used to report the stage of the fault.
 	 */
 	panic_stage = 1;
+	/*
+	 * The panic record goes to the RAM and to the ramoops: the RAM copy
+	 * of the log does not survive the trip through the recovery, and
+	 * this is the only place where the fault is described (the ESR, the
+	 * ELR and the FAR). Without it a fault is a mystery.
+	 */
+	shim_flush_logs();
 	/*
 	 * Report where the fault happened through the wait time.
 	 *
@@ -1029,11 +1094,21 @@ static int dump_prop(const char *node_path, const char *name, uint32_t len,
 
 #define FDT_MAGIC	0xd00dfeed
 
+/*
+ * Is this address the start of a device tree?
+ *
+ * The tree has to pass the whole check of the parser (the magic, the
+ * version, the size and the two blocks inside the tree), not only the
+ * magic: a word of 0xd00dfeed in the middle of the RAM is not a tree,
+ * and walking it would read past its end.
+ */
 static int fdt_ok(uint64_t a)
 {
 	if (!a || (a & 3))
 		return 0;
-	return __builtin_bswap32(rd32(a)) == FDT_MAGIC;
+	if (!mmio_read_ok((uintptr_t)a, 4))
+		return 0;	/* Only read allowed and safe physical memory */
+	return fdt_valid((uintptr_t)a);
 }
 
 /*
@@ -1043,22 +1118,17 @@ static int fdt_ok(uint64_t a)
  * sweet shim assumed and what the V60 port uses. ABL for arm64 uses a
  * different convention, and this phone's bootloader is called "aboot" in
  * the partition table, so do not trust a single register: check x0, x1 and
- * x2, then the addresses bootloaders usually park the tree at, then
- * sweep the low memory.
+ * x2, then the addresses bootloaders usually park the tree at.
  */
 static uint64_t find_dtb(uint64_t x0, uint64_t x1, uint64_t x2)
 {
 	static const uint64_t candidates[] = {
-		0x00000100UL,	/* LG's own stock tags_addr */
-		0x00400000UL,	/* the tags_addr our boot image asks for */
-		0x00800000UL, 0x01000000UL, 0x02000000UL, 0x04000000UL,
-		0x08000000UL, 0x10000000UL, 0x20000000UL, 0x30000000UL,
-		0x38000000UL, 0x3c000000UL, 0x40000000UL, 0x50000000UL,
-		0x60000000UL, 0x70000000UL, 0x78000000UL, 0x7f000000UL,
-		0x80000000UL, 0x80080000UL, 0x80100000UL, 0x81000000UL,
-		0x81800000UL, 0x82000000UL, 0x82200000UL, 0x82800000UL,
-		0x83000000UL, 0x88000000UL, 0x8a000000UL, 0x90000000UL,
-		0x9f900000UL, 0xc0000000UL, 0xd0000000UL,
+		0x00400000UL,	/* DEFAULT_TAGS_ADDR (mkbootimg_lg.py) */
+		0x02000000UL,	/* LK standard DTB hand-off address    */
+		0x10000000UL, 0x20000000UL, 0x30000000UL,
+		0x40000000UL, 0x50000000UL,
+		0x80000000UL, 0x80080000UL, 0x81000000UL,
+		0x82000000UL, 0x90000000UL,
 	};
 
 	if (fdt_ok(x0))
@@ -1070,12 +1140,6 @@ static uint64_t find_dtb(uint64_t x0, uint64_t x1, uint64_t x2)
 	for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++)
 		if (fdt_ok(candidates[i]))
 			return candidates[i];
-	/*
-	 * No sweep of the low memory here: on this SoC 0x0-0x9600000 is the
-	 * secure region, protected by the XPU, and reading it from the
-	 * non-secure EL1 world takes a data abort. The bootloader always
-	 * hands the tree over somewhere in ordinary RAM.
-	 */
 	return 0;
 }
 
@@ -1209,9 +1273,55 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	struct mmu_info mi;
 	uint64_t dtb = find_dtb(x0, x1, x2);
 
-	shim_t0 = now();
+	/*
+	 * THE TIMEBASE, BEFORE ANYTHING ELSE.
+	 *
+	 * The EL0 counters are not running at the shim's entry (nothing in
+	 * the boot path programs them), and every wait of the shim is
+	 * measured with them. Without this the first wait that comes never
+	 * ends: that is the hang of 2026-11-15, between emmc_write_log()
+	 * and pstore_console_write().
+	 *
+	 * So the counters go on here, before the first module that waits.
+	 */
+	timer_init();
+
+	/*
+	 * THE FIRST THINGS, IN THIS ORDER (2026-11-15).
+	 *
+	 * 1. the trail: it is the ring of markers in IMEM, and it says how far
+	 *    the run got. It goes first because it is the cheapest way to
+	 *    tell "the shim never started" from "the shim started and died
+	 *    later".
+	 *
+	 * 2. con_disable(): the panel is not touched from here on. On the
+	 *    phone the splash framebuffer sits inside the 150 MiB
+	 *    "secure_region" that the XPU protects, and a write there is a
+	 *    data abort. The ASCII log in con_log lives in plain RAM and
+	 *    keeps working.
+	 *
+	 * 3. the watchdog is armed. It was not armed at the shim's entry
+	 *    (the successful runs have no "WDT" line), so a bus hang had
+	 *    nothing to reset the phone: the phone stayed hung and nothing
+	 *    could be read off it. With the guard, a hang becomes a reset.
+	 *    The guard has to be armed BEFORE the first write, because that
+	 *    write is the one that can hang.
+	 *
+	 * 4. the log goes to the pmsg zone: the only copy that survives the
+	 *    kernel's console. If the phone comes back with it, the shim
+	 *    started and the log path works.
+	 */
 	trail_init();
+	con_disable();
+#if SHIM_WDT_GUARD
+	g4_wdt_arm(G4_WDT_GUARD_MS);
+#endif
+	con_log_only("SHIM", "the shim is alive: the first line, before anything else");
+	pstore_early_write(con_log, (unsigned)con_log_len);
+
+	shim_t0 = now();
 	PHASE(1); stage = "boot";
+	con_hex2("TIMER", "hz=", timer_hz(), "ticks=", (uint32_t)timer_ticks());
 #if SHIM_HW_DIAG
 	/*
 	 * On the phone the console starts switched off. The splash
@@ -1314,7 +1424,23 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	emmc_probe_e0();
 	emmc_probe_d0();
 #endif
-	emmc_write_log(con_log, (unsigned)con_log_len);
+	/*
+	 * The eMMC phase. The bring-up identifies the card and reads its EXT_CSD.
+	 * Clock SDCC1 is verified FIRST by emmc_init() before any controller registers.
+	 */
+	shim_checkpoint("EMMC_PHASE_START");
+#if !SHIM_SKIP_EMMC
+	{
+		int emmc_rc = emmc_init();
+		con_hex1("EMMC", "rc=", (uint32_t)emmc_rc);
+#if SHIM_EMMC_WRITE
+		emmc_log_write(con_log, (unsigned)con_log_len);
+#endif
+	}
+#else
+	con_str("EMMC", "skipped (the display test does not need it)");
+#endif
+	shim_checkpoint("EMMC_PHASE_DONE");
 #if SHIM_SD_PROBE
 	/* And again AFTER it: the bring-up resets the host, and the question
 	 * is what that reset erases. Reads only. */
@@ -1368,6 +1494,95 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	PHASE(3); stage = "loader";
+#if SHIM_DISPLAY_TEST && SHIM_HW_DIAG
+	/*
+	 * THE DISPLAY TEST. The jump to XNU dies silently, before any log
+	 * line, so this build does NOT jump: it brings the display up from
+	 * the shim, alone, and paints "HELLO" on the panel. What is on the
+	 * screen is the proof that the shim runs and that the clocks, the
+	 * DSI and the MDP work.
+	 *
+	 * The watchdog goes on BEFORE the display is touched: a bus hang in
+	 * the middle of the bring-up then becomes a reset instead of a
+	 * brick. The bark time is the 60 s of G4_WDT_GUARD_MS, so the
+	 * picture stays on the screen for a minute and the phone then comes
+	 * back in the recovery, where the log can be read.
+	 */
+	PHASE(50); stage = "display";
+#if SHIM_WDT_GUARD
+	g4_wdt_arm(G4_WDT_GUARD_MS);
+#endif
+	/*
+	 * The log goes to the RAM and to the ramoops BEFORE the display is
+	 * touched: if the bring-up hangs on the bus, the shim never reaches
+	 * the end of the test and the record of what it had done so far is
+	 * the only thing left.
+	 */
+	shim_checkpoint("DISPLAY_PHASE_START");
+	uint32_t d = display_test();
+	con_hex1("DISP", "result=", d);
+	shim_checkpoint("DISPLAY_PHASE_DONE");
+
+	mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE);
+
+	/* 2026-11-15: this line used to claim "HELLO + stage on screen"
+	 * even in D0, which by definition paints NOTHING. It made the D0
+	 * log contradict the test. Say what the mode actually did. */
+#if SHIM_DISPLAY_MODE == 4
+	/* Stage 1/2 of D4 deliberately paint nothing: say so instead of
+	 * claiming HELLO was drawn. build.sh always defines the macro. */
+	con_str("SHIM", "display test: D4 DCS/GRAM probe, holding 20s then recovery");
+#elif SHIM_DISPLAY_MODE == 5
+	con_str("SHIM", "display test: D5 re-armed LK pipeline, holding 20s then recovery");
+#elif SHIM_DISPLAY_MODE == 6
+	con_str("SHIM", "display test: D6 contact probe, panel held OFF 20s");
+#elif SHIM_DISPLAY_MODE == 7
+	con_str("SHIM", "display test: D7 clean HELLO, 24bpp, holding 20s");
+#elif SHIM_DISPLAY_MODE == 8
+	con_str("SHIM", "display test: D8 colour bars, holding 20s");
+#elif SHIM_DISPLAY_MODE == 9
+	con_str("SHIM", "display test: D9 DCS only, no MDP kicks, holding 20s");
+#elif SHIM_DISPLAY_MODE == 10
+	con_str("SHIM", "display test: D10 full GRAM red, holding 20s");
+#elif SHIM_DISPLAY_MODE == 11
+	con_str("SHIM", "display test: D11 HELLO console on panel GRAM, holding 20s");
+#else
+	if (d & DISP_OK_BASELINE)
+		con_str("SHIM", "display test: D0 baseline, nothing painted by design, holding 20s");
+	else if (d & DISP_OK_GRAM)
+		con_str("SHIM", "display test: HELLO pushed into panel GRAM, holding 20s");
+	else
+		con_str("SHIM", "display test: HELLO + stage painted in framebuffer, holding 20s");
+#endif
+	con_skip();
+	shim_checkpoint("HALT_VISUAL_INSPECTION");
+	pstore_console_write(con_log, (unsigned)con_log_len);
+
+	/* Hold the picture and on-screen logs for 20 seconds so it can be read,
+	 * petting the watchdog regularly. */
+	for (int i = 0; i < 40; i++) {
+		timer_delay_ms(500);
+		g4_wdt_pet();
+		/* Repaint the heartbeat line and kick one frame. A frozen
+		 * number on the panel means the CPU is wedged. */
+		disp_screen_beat((unsigned)i);
+	}
+
+	/*
+	 * Automatic handoff to TWRP recovery:
+	 * Set restart reason to LK_RECOVERY_MODE and drop PSHOLD.
+	 * LK will boot the recovery partition (TWRP) already installed on eMMC.
+	 */
+	con_str("SHIM", "display test: auto-rebooting to recovery");
+	shim_checkpoint("AUTO_REBOOT_RECOVERY");
+	pstore_console_write(con_log, (unsigned)con_log_len);
+	timer_delay_ms(100);
+
+	mmio_wr32(G4_RESTART_REASON, LK_RECOVERY_MODE);
+	__asm__ volatile("dsb sy" ::: "memory");
+	mmio_wr32(G4_PSHOLD, 0);
+	for (;;) __asm__ volatile("wfe");
+#else
 #if SHIM_SD_PAYLOAD
 	/*
 	 * The payload can also live on the microSD: the eMMC is mute, so
@@ -1388,6 +1603,7 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+#endif	/* SHIM_DISPLAY_TEST && SHIM_HW_DIAG */
 
 	/* No payload: run the diagnostics so the screen shows what we learned. */
 	PHASE(4); stage = "fill off";
@@ -1435,11 +1651,11 @@ void shim_main(uint64_t x0, uint64_t x1, uint64_t x2)
 	 * Armv8.2, as on the A75/A76 of the sweet board).
 	 */
 	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));
-	con_hex2("PARANGE", "pa=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf));
-	con_hex2("TGRAN4", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 28) & 0xf));
-	con_hex2("TGRAN16", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
-	con_hex2("TGRAN64", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 24) & 0xf));
-	con_hex2("GRANULE", "16k=", mmu_granule_ok() ? 1 : 0);
+	con_hex1("PARANGE", "pa=", (uint32_t)(rsr("id_aa64mmfr0_el1") & 0xf));
+	con_hex1("TGRAN4", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 28) & 0xf));
+	con_hex1("TGRAN16", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 20) & 0xf));
+	con_hex1("TGRAN64", "v=", (uint32_t)((rsr("id_aa64mmfr0_el1") >> 24) & 0xf));
+	con_hex1("GRANULE", "16k=", mmu_granule_ok() ? 1 : 0);
 	con_skip();
 	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
 	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));

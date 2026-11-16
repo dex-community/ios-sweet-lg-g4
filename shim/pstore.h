@@ -12,6 +12,12 @@
 void pstore_console_write(const char *text, unsigned len);
 
 /*
+ * The FIRST write of the run: the pmsg zone only, before the watchdog is
+ * armed and before anything that can hang. See the comment in pstore.c.
+ */
+void pstore_early_write(const char *text, unsigned len);
+
+/*
  * Read back the log of the PREVIOUS run and print it (2026-11-10).
  *
  * The pstore console zone holds the LAST writer only, and the recovery

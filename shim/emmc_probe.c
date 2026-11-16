@@ -75,7 +75,7 @@
  *
  * So the panel is driven by the RGB2 pipe (offset 0x19000) on INTF2, NOT by
  * VIG0. That is the single most important fact for the display phase and
- * it changes the plan: see docs/PLAN-2026-11-10.md, section "Display".
+ * it changes the plan: see old/PLAN-2026-11-10.md, section "Display".
  */
 
 #include <stdint.h>

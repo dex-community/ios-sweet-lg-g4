@@ -70,7 +70,7 @@
  * and the image runs wherever the bootloader puts it, with no relocation
  * pass at all.
  */
-#define MMIO_DEV_N	10
+#define MMIO_DEV_N	14
 
 static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xf9824000UL,	/* 0: the eMMC core window ("core_mem", 0x800)  */
@@ -83,12 +83,31 @@ static const uintptr_t mmio_dev_base[MMIO_DEV_N] = {
 	0xf98a4000UL,	/* 7: the SDCC2 core window (the microSD slot)  */
 	0xf98a4900UL,	/* 8: the SDCC2 host window (the microSD slot)  */
 	0xfd512000UL,	/* 9: the TLMM SDC pad configuration (0x100)   */
+	/*
+	 * 10..13: the display windows, added on 2026-11-15 for the display
+	 * bring-up test (shim/display.c). They are the addresses the phone's
+	 * OWN device tree gives for the display hardware
+	 * ("../lg g4/msm8992-lg-h815-boot.dts"):
+	 *
+	 *   qcom,mmsscc@fd8c0000          the MMSS clock controller: the
+	 *                                 CBCR/RCGR registers of the MDSS
+	 *                                 (AHB, MDP, PCLK, BYTE, ESC) live
+	 *                                 here.
+	 *   qcom,mdss_mdp@fd900000        the MDP (0x90000).
+	 *   qcom,mdss_dsi@fd994000        DSI0: controller, PLL, PHY & regulator (0x1000).
+	 *   qcom,mdss_dsi@fd996000        DSI1: controller, PLL, PHY & regulator (0x1000).
+	 */
+	0xfd8c0000UL,	/* 10: the MMSS clock controller (0x4000)       */
+	0xfd900000UL,	/* 11: the MDP (0x90000)                       */
+	0xfd994000UL,	/* 12: DSI0 ctrl + PLL + PHY + reg (0x1000)     */
+	0xfd996000UL,	/* 13: DSI1 ctrl + PLL + PHY + reg (0x1000)     */
 };
 
 static const uint32_t mmio_dev_size[MMIO_DEV_N] = {
 	0x00000800UL, 0x000001a0UL, 0x00002000UL, 0x00001000UL,
 	0x00001000UL, 0x00003000UL, 0x00001000UL, 0x00000800UL,
 	0x000001a0UL, 0x00000100UL,
+	0x00004000UL, 0x00090000UL, 0x00001000UL, 0x00001000UL,
 };
 
 /* The MEMORY windows: plain RAM, harmless to read and to write. */
@@ -113,15 +132,17 @@ static const uint32_t mmio_mem_size[MMIO_MEM_N] = {
 /* The phone. */
 static const uintptr_t mmio_mem_base[MMIO_MEM_N] = {
 	0x00080000UL,	/* the shim image (0x80000..0xd0000)            */
+	0x00400000UL,	/* the tags/DTB buffer (DEFAULT_TAGS_ADDR)      */
 	0x02000000UL,	/* the device tree the bootloader hands over    */
 	0x0ff00000UL,	/* the ramoops zone (the pstore console)        */
 	0x50000000UL,	/* the scratch copy of the log                  */
-	0x10000000UL,	/* RAM bank 1 (0x10000000..0x5fffffff)          */
+	0x10000000UL,	/* RAM bank 1 (0x10000000..0x4fffffff)          */
 	0x80000000UL,	/* RAM bank 2 (0x80000000..0xdfffffff)          */
+	0x03400000UL,	/* cont_splash_mem (12 MiB)                      */
 };
 static const uint32_t mmio_mem_size[MMIO_MEM_N] = {
-	0x00050000UL, 0x00200000UL, 0x00100000UL, 0x00100000UL,
-	0x40000000UL, 0x60000000UL,
+	0x00050000UL, 0x00200000UL, 0x00200000UL, 0x00100000UL,
+	0x00100000UL, 0x40000000UL, 0x60000000UL, 0x00c00000UL,
 };
 #endif
 
@@ -145,6 +166,14 @@ static const uint32_t mmio_mem_size[MMIO_MEM_N] = {
  * The display is measured from the recovery instead, where the real kernel
  * drives the panel:
  *   /sys/kernel/debug/mdp/ and /sys/kernel/debug/mdss_panel/dsi0/
+ *
+ * 2026-11-15: the MDP, the DSI and the MMSS clock controller are now in
+ * the DEVICE list (writable), because the display bring-up test
+ * (shim/display.c) turns their clocks ON ITSELF before touching a single
+ * register of theirs. The rule above is unchanged: the clock first, the
+ * register second. The bring-up is gated behind SHIM_DISPLAY_TEST and it
+ * is built so that the CLOCKS can be enabled without writing anything
+ * else (DISP_STAGE_CLOCK), so that a hang can be bisected.
  */
 #define MMIO_RO_N	2
 
@@ -221,7 +250,6 @@ static inline void mmio_denied(uintptr_t a, unsigned size)
 	trail(0x2301, size);
 }
 
-/* The guarded accessors. */
 static inline uint32_t mmio_rd32(uintptr_t a)
 {
 	if (!mmio_read_ok(a, 4)) {
@@ -283,4 +311,20 @@ static inline void mmio_wr8(uintptr_t a, uint8_t v)
 		return;
 	}
 	*(volatile uint8_t *)a = v;
+}
+
+/*
+ * The named accessors: the ones the modules use. They say what they do,
+ * and they say that the address has been checked against the allowlist.
+ * The short names (mmio_rd32/mmio_wr32) are kept for the code that was
+ * written before the modules were split.
+ */
+static inline uint32_t mmio_read32(uintptr_t a)
+{
+	return mmio_rd32(a);
+}
+
+static inline void mmio_write32(uintptr_t a, uint32_t v)
+{
+	mmio_wr32(a, v);
 }

@@ -1,5 +1,13 @@
 # ios-sweet-lg-g4
 
+> **Stato corrente: `docs/INDEX.md`.** Il **display è risolto** dal 16/11:
+> HELLO, numero di stage, etichetta e heartbeat sono visibili sul pannello,
+> scritti dritti nella GRAM del pannello via DCS (`docs/DISPLAY-SOLVED.md`).
+> La causa del mancato avvio di XNU è stata misurata il 12/11 (grana 16 KiB,
+> `MSR SCTLR_EL1`, patch 0085) ed è **indipendente dal display**. Architettura,
+> hardware facts, safety rules e layout di questo file restano validi; la
+> sezione "Current blocker and next step" risale all'11/11.
+
 **Apple's iOS 16 userland on an LG G4 (H815).**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the LG G4 H815 (`msm8992`, Qualcomm Snapdragon 808: 4× Cortex-A53 + 2× Cortex-A57). The target userland is the **unmodified iOS 16.7.16 (20H392) root filesystem of the iPhone X**, already written to the phone's `userdata` partition.
@@ -20,7 +28,7 @@ It starts from [`dipa-studio/ios-sweet`](https://github.com/dipa-studio/ios-swee
 | eMMC from shim | The card **answers**: Samsung 032G74, CMD5/CMD7/CMD0/CMD1 all work and return the OCR. The only failing command is **CMD2 (SEND_ARG)**, with an error interrupt; the Linux driver that works on this phone programs it without the index check, and the shim now sweeps the four possible response types |
 | RAM disk | A minimal `sweet-init` Mach-O PID 1 with heartbeat, packed into the payload |
 | Fallback | Shim arms a 60 s watchdog and writes `LK_RECOVERY_MODE`, so the phone returns to TWRP without the damaged buttons |
-| Display | LG panel is JDI NT36850, 1440×2560, **command mode**, dual MIPI DSI. The active pipe is **RGB2/INTF2** (MDP3), not VIG0 |
+| Display | **SOLVED (2026-11-16)**: the shim paints HELLO, the stage number, a label and a heartbeat on the JDI NT36850 panel (1440×2560, **command mode**, dual MIPI DSI). The pixels go straight into the panel GRAM over DCS (`0x3A`/`0x2A`/`0x2B`/`0x2C`/`0x3C`), with **no MDP, no CTL_FLUSH, no SMMU and no framebuffer address**. Recipe, failed attempts and the reusable method: `docs/DISPLAY-SOLVED.md` |
 | Input | Touch is either Synaptics `s3528` or LG SIC `lg2411` (same GPIOs, not yet probed); only Volume Up is reliable |
 | SMP | PSCI is absent on this board (Qualcomm SCF/ACC path), so XNU runs single-core for now |
 | USB, Wi-Fi, audio, camera, GPU | Not started |
@@ -120,6 +128,7 @@ safe place to measure all of this is the recovery, through
 | `tools/sweet-root-tweaks.py`, `mkiosroot.sh` | iOS root image preparation |
 | `backup/` | Partition backups (not in git) |
 | `docs/`, `GUIDE-*.md`, `STATUS.md`, `NOTES.md` | Hardware facts, procedures and full engineering log |
+| `old/` | Superseded documentation, kept for history: the 7-test display archive, the first diagnosis plan, obsolete procedures |
 
 ## Guides
 
@@ -132,13 +141,15 @@ safe place to measure all of this is the recovery, through
 | `GUIDE-04-PSTORE.md` | Reading the shim log from pstore |
 | `GUIDE-05-MMIO-SAFE.md` | The allowlist rule and how to prove a block is clocked |
 | `GUIDE-06-SD-MISURE.md` | microSD measurements (SDCC2 works; the inserted card is read-only) |
-| `docs/PLAN-2026-11-10.md` | Current action plan: eMMC, display, input |
+| `docs/INDEX.md` | **Start here**: the state of truth and the map of every document |
+| `docs/DISPLAY-SOLVED.md` | **The display solution**: the working recipe, every failed attempt, the reasoning that unblocked it, and a method reusable on other devices |
 | `docs/XNU-BOOT-TEST.md` | The XNU boot cycle: the three images, the RAM channels, how to read the logs |
 | `docs/g4-hardware/HARDWARE-G4.md` | Every device-tree fact with file:line references |
 | `docs/g4-hardware/EMMC-REFERENCE.md` | UniXNU eMMC driver and what to change for the G4 |
-| `docs/QEMU_TESTING.md` | Offline QEMU test setup |
+| `docs/DISPLAY-TEST.md` | The display test modes (0..11) and how to build and run them |
 | `NOTES.md` | Engineering log: every measurement, boot, crash and decision |
 | `STATUS.md` | Phase status and open questions |
+| `old/` | Superseded documents, kept for history |
 
 ## Hardware facts
 

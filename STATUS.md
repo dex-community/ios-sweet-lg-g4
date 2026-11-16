@@ -1,6 +1,16 @@
 # STATUS — iOS 16 on LG G4 (H815)
 
-Last updated: 2026-11-11
+> **Aggiornato al 16/11.** La fase 4 (display) è **chiusa**: dal 16/11 il shim
+> scrive HELLO, numero di stage, etichetta e heartbeat sul pannello del G4,
+> dritti nella GRAM via DCS. Ricetta, tentativi falliti e metodo riutilizzabile:
+> `docs/DISPLAY-SOLVED.md`. Mappa di tutti i documenti: `docs/INDEX.md`.
+> Il "Critical Blocker: XNU Crash Immediato" è stato diagnosticato il 12/11:
+> morte dentro `MSR SCTLR_EL1` per la grana 16 KiB assente sul Cortex-A53, con
+> fix in `xnu/patches/0085`. **Il display non c'entra**: è una traccia separata.
+>
+> La sezione sotto è la fotografia dell'11/11 e resta valida come cronologia.
+
+Last updated: 2026-11-16 (display risolto; contenuto seguente: 11/11)
 
 ## Goal
 
@@ -18,7 +28,7 @@ touch and hardware buttons.
 | 1 — shim + minimal boot | **done** | Shim builds, passes offline checks, runs under QEMU **and on the real phone**. eMMC card identified (Samsung 032G74, CID verified). CMD2 now passes with fix to OCR busy bit polling (commit e80f24a). Log channel via RAM@0x50000000 works. |
 | 2 — XNU kernel and RAM disk | **mostly done** | XNU kernel builds in CI. **The patch chain was broken and the CI did not say so**: `darwin-xnu-build` skips a patch that does not apply with a warning, so the green run 42923144296 built a kernel missing 40 patches (no platform expert, no USB, no touch). Fixed: `tools/check-xnu-patch-chain.sh` now applies the whole series to a clean xnu-8796 tree and reports every failure (83 applied, 0 failed). |
 | 3 — eMMC storage and iOS root | **in progress** | The XNU eMMC driver has been **rewritten as a block device**: the root of XNU is a VBLK vnode read through `buf_bread` → `bdevsw[].d_strategy`, so the old `cdevsw` could never be read. The register encoding is now the one measured on the phone (command 16 bit at 0x0E, index << 8, CMD2 = 136 bit + CRC7 without index check). The driver serves the partition that holds the HFS+ volume, found in the GPT. Linux still mounts the iOS rootfs read-only (CI kernel-h815 run). |
-| 4 — touch, buttons, display | **blocked** | Blocked on working XNU boot. Touch is Synaptics s3528 @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2. Display is command-mode DSI and needs MDP/DSI driver. |
+| 4 — touch, buttons, display | **display chiuso (16/11)**, touch/buttons ancora bloccati | Il display non dipende da XNU: il shim scrive HELLO + stage + label + heartbeat direttamente nella GRAM del pannello via DCS (`docs/DISPLAY-SOLVED.md`). Touch is Synaptics s3528 @ I²C 0x20; buttons are PM8994 GPIO 3 + PON1/2, e dipendono da un boot funzionante di XNU. |
 | 5 — polish and documentation | **in progress** | `STATUS.md`, `GUIDE-*` files updated. Engineering log in progress. |
 
 ## What works (2026-11-11 update)

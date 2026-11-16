@@ -58,6 +58,9 @@
 #include "trail.h"
 #include "mmio.h"
 #include "wdt.h"
+#include "timer.h"
+#include "clocks.h"
+#include "emmc.h"
 
 /*
  * Which bring-up path to compile:
@@ -287,17 +290,7 @@
 #define LOG_LBA_SPARE1		259328UL	/* NOT SAFE: inside p23 (persist) */
 #define LOG_LBA_SPARE2		385280UL	/* NOT SAFE: inside p37 (laf)     */
 
-/* Error codes. They end up in the log sector, so they stay small. */
-#define EMMC_OK			0
-#define EMMC_E_NO_CAPS		-1	/* capability register reads as 0 / all ones */
-#define EMMC_E_BLKLEN		-3	/* CMD16 failed or card not in transfer state */
-#define EMMC_E_WAKE		-4	/* card answers to neither RCA candidate */
-#define EMMC_E_EXTCSD		-5	/* CMD8 failed */
-#define EMMC_E_PARTITION	-6	/* boot/RPMB/GP partition selected: refuse */
-#define EMMC_E_RANGE		-7	/* LBA not allowed / beyond the card */
-#define EMMC_E_WRITE		-8
-#define EMMC_E_READBACK		-9
-#define EMMC_E_VERIFY		-10	/* read back differs from what was written */
+/* Error codes are declared in emmc.h (EMMC_OK, EMMC_E_*). */
 
 #define STAGE_START		0
 #define STAGE_PROBE		1
@@ -526,39 +519,19 @@ static inline uint8_t rd8(uintptr_t a) { return mmio_rd8(a); }
 static inline void wr8(uintptr_t a, uint8_t v) { mmio_wr8(a, v); }
 #endif
 
-static uint64_t emmc_ticks(void)
-{
-	uint64_t v;
-
-	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
-	return v;
-}
-
-static uint32_t emmc_tick_hz(void)
-{
-	uint64_t v;
-
-	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v));
-	return (uint32_t)v;
-}
-
-static uint64_t emmc_deadline(uint32_t us)
-{
-	return emmc_ticks() + (uint64_t)emmc_tick_hz() * us / 1000000u;
-}
-
-static void emmc_delay_us(uint32_t us)
-{
-	uint64_t end = emmc_deadline(us);
-	unsigned n = 0;
-
-	while (emmc_ticks() < end) {
-		/* The wait loops are where a hang would hide, so the watchdog
-		 * guard is petted from here (shim/wdt.c). */
-		if ((++n & 0x3ffu) == 0)
-			g4_wdt_pet();
-	}
-}
+/*
+ * The timebase of this module is the shared one (shim/timer.h).
+ *
+ * It used to be a local one, measured with the VIRTUAL timer
+ * (cntvct_el0), and that is what hung the phone on 2026-11-15: the EL0
+ * counters are not running at the shim's entry, so a frozen counter
+ * means a deadline that never comes and a wait loop that waits for
+ * ever. The shared timebase switches the counters on at the entry
+ * (timer_init()) and pets the watchdog in the waits.
+ */
+#define emmc_ticks		timer_ticks
+#define emmc_deadline(us)	timer_deadline_us(us)
+#define emmc_delay_us(us)	timer_delay_us(us)
 
 /* Clear the interrupt status (both halves are write-1-to-clear). */
 static void emmc_ack(void)
@@ -571,6 +544,7 @@ static void emmc_ack(void)
 static void emmc_reset_lines(void)
 {
 	uint64_t end = emmc_deadline(10000);
+	unsigned n = 0;
 
 	STEP(48);
 	wr8(HC + HC_SWRST, SWRST_CMD_DAT);
@@ -578,6 +552,8 @@ static void emmc_reset_lines(void)
 	while (rd8(HC + HC_SWRST) & SWRST_CMD_DAT) {
 		if (emmc_ticks() >= end)
 			break;
+		if ((++n & 0x1ffu) == 0)
+			g4_wdt_pet();
 	}
 	emmc_ack();
 }
@@ -588,6 +564,7 @@ static void emmc_reset_lines(void)
 static uint32_t emmc_wait(uint32_t wanted, uint32_t timeout_us)
 {
 	uint64_t end = emmc_deadline(timeout_us);
+	unsigned n = 0;
 
 	for (;;) {
 		uint32_t status = rd32(HC + HC_INT_STATUS);
@@ -598,6 +575,8 @@ static uint32_t emmc_wait(uint32_t wanted, uint32_t timeout_us)
 			return status;
 		if (emmc_ticks() >= end)
 			return 0;
+		if ((++n & 0x1ffu) == 0)
+			g4_wdt_pet();
 	}
 }
 
@@ -605,6 +584,7 @@ static uint32_t emmc_wait(uint32_t wanted, uint32_t timeout_us)
 static int emmc_wait_idle(void)
 {
 	uint64_t end = emmc_deadline(CMD_TIMEOUT_US);
+	unsigned n = 0;
 
 	while (rd32(HC + HC_PRESENT) & (PS_CMD_INHIBIT | PS_DATA_INHIBIT)) {
 		if (emmc_ticks() >= end) {
@@ -613,6 +593,8 @@ static int emmc_wait_idle(void)
 				return -1;
 			return 0;
 		}
+		if ((++n & 0x1ffu) == 0)
+			g4_wdt_pet();
 	}
 	return 0;
 }
@@ -624,10 +606,13 @@ static void emmc_wait_busy(void)
 {
 	if (g_have_dat0) {
 		uint64_t end = emmc_deadline(3000000);
+		unsigned n = 0;
 
 		while (!(rd32(HC + HC_PRESENT) & PS_DAT0_LEVEL)) {
 			if (emmc_ticks() >= end)
 				break;
+			if ((++n & 0x1ffu) == 0)
+				g4_wdt_pet();
 		}
 	} else {
 		emmc_delay_us(20000);
@@ -643,15 +628,13 @@ static void emmc_wait_busy(void)
  */
 static void emmc_cmd_log(uint8_t index, uint32_t argument, uint32_t rc)
 {
+	/* Do not flood the console log during repetitive CMD1 polling unless it failed */
+	if (index == 1 && rc == 0)
+		return;
+
 	con_hex2("CMD", "n=", index, "rc=", rc);
 	con_hex2("CMD", "int=", rd32(HC + HC_INT_STATUS),
 		 "pres=", rd32(HC + HC_PRESENT));
-	/*
-	 * The four words of the answer. Which one carries what depends on
-	 * the length the controller was told to expect, so all four go into
-	 * the log: the run of 2026-11-10 read only the second one and could
-	 * not tell a real OCR from the leftovers of an older answer.
-	 */
 	con_hex2("CMD", "r0=", rd32(HC + HC_RESP0),
 		 "r1=", rd32(HC + HC_RESP1));
 	con_hex2("CMD", "r2=", rd32(HC + HC_RESP2),
@@ -1088,6 +1071,13 @@ struct lk_var {
 #define LK_F_PWR_ACK		(1u << 8)	/* ack the PWRCTL like the LK */
 #define LK_F_DELAY_10S		(1u << 9)	/* wait 10 s before CMD5/CMD0 */
 
+/*
+ * The answer of CMD2 that worked, remembered between the boots: the
+ * sweep of the four variants is only needed the first time (the file
+ * that uses it is included below).
+ */
+static uint8_t g_cmd2_flags;
+
 #if SHIM_EMMC_MODEL
 /*
  * The QEMU build serves the HC/CORE windows from the software model.
@@ -1377,7 +1367,13 @@ static void emmc_save_first_result(void)
 	}
 }
 
-int emmc_write_log(const char *text, unsigned len)
+/*
+ * The bring-up: the clocks, the host, the card.
+ *
+ * "text" and "len" are the log that goes on the card, and they are
+ * optional: emmc_init() (the bring-up without a write) passes none.
+ */
+static int emmc_bringup(const char *text, unsigned len)
 {
 	uint8_t sector[512];
 	uint8_t scratch[512];
@@ -1405,6 +1401,21 @@ int emmc_write_log(const char *text, unsigned len)
 	emmc_last_error = 0;
 	emmc_last_cmd_error = 0;
 
+	/*
+	 * THE GOLDEN RULE: "First the clock, then the controller".
+	 * The SDCC1 clocks MUST be enabled before touching any controller register
+	 * (including the snapshot). If the clock fails to turn on, accessing the
+	 * controller would permanently stall the AXI bus and crash silently.
+	 */
+	if (clocks_sdcc1() < 0) {
+		con_str("EMMC", "clocks_sdcc1: FAILED");
+		trail(0x00f9, 0xdead);
+		emmc_last_error = EMMC_E_BRINGUP;
+		emmc_save_first_result();
+		return EMMC_E_BRINGUP;
+	}
+	con_str("EMMC", "clocks: ON");
+
 	rc = emmc_prepare(scratch);
 	trail(0x00f0, (uint32_t)rc);
 	if (rc) {
@@ -1418,7 +1429,9 @@ int emmc_write_log(const char *text, unsigned len)
 	emmc_last_stage = STAGE_WRITE;
 	stage = STAGE_WRITE;
 	g_diag[D_CMD_ERR] = (uint32_t)emmc_last_cmd_error;
-	emmc_build_sector(sector, text, len, stage, 0, g_rca, g_diag[D_CMD16_R1]);
+	if (text)
+		emmc_build_sector(sector, text, len, stage, 0, g_rca,
+				  g_diag[D_CMD16_R1]);
 	emmc_build_diag(scratch);
 
 #if SHIM_EMMC_WRITE
@@ -1500,4 +1513,78 @@ int emmc_write_log(const char *text, unsigned len)
 	emmc_last_error = 0;
 	emmc_save_first_result();
 	return 0;
+}
+
+/*
+ * The public API of this module (shim/emmc.h).
+ */
+
+/* The bring-up: the card is identified and its EXT_CSD is read. No
+ * write to the card happens here. */
+int emmc_init(void)
+{
+	return emmc_bringup(0, 0);
+}
+
+/*
+ * The write of the log on the card.
+ *
+ * It is off by default (the build flag SHIM_EMMC_WRITE): the two
+ * addresses that are used are inside the 'persist' and 'laf'
+ * partitions, so the write is only for somebody who knows what they are
+ * doing. Without the flag the log goes to the ramoops and to the
+ * scratch RAM, and the card is only read.
+ */
+int emmc_log_write(const char *text, unsigned len)
+{
+	return emmc_bringup(text, len);
+}
+
+unsigned emmc_get_sec_count(void)
+{
+	return g_sec_count;
+}
+
+int emmc_get_sector_mode(void)
+{
+	return g_sector_mode;
+}
+
+uint16_t emmc_get_rca(void)
+{
+	return g_rca;
+}
+
+unsigned emmc_get_stage(void)
+{
+	return emmc_lk_stage;
+}
+
+const char *emmc_get_stage_name(void)
+{
+	/*
+	 * An if and not a switch: a switch over strings becomes a table of
+	 * pointers, and a pointer in the data means an absolute relocation
+	 * (the image runs wherever the bootloader puts it, with no
+	 * relocation pass: the build fails on it).
+	 */
+	if (emmc_lk_stage == 0)
+		return "nothing answered";
+	if (emmc_lk_stage == 1)
+		return "cmd1 answered, not ready";
+	if (emmc_lk_stage == 2)
+		return "cmd1 ready, cmd2/3/7 failed";
+	if (emmc_lk_stage == 3)
+		return "identified";
+	return "unknown";
+}
+
+int emmc_get_cmd_error(void)
+{
+	return emmc_last_cmd_error;
+}
+
+int emmc_get_class(void)
+{
+	return emmc_class;
 }
